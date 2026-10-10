@@ -1,7 +1,7 @@
 // robot_simulator: command-line entry point.
 //
-// Current scope (Phases 1-2): load and validate a map, plan an A* path,
-// export path.csv and planning_metrics.csv, print a summary.
+// Pipeline: load and validate a map -> plan an A* path -> simulate a point robot
+// following the path -> export CSV results -> print a summary.
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -15,6 +15,8 @@
 #include "astar.hpp"
 #include "csv_writer.hpp"
 #include "grid_map.hpp"
+#include "robot.hpp"
+#include "simulator.hpp"
 #include "types.hpp"
 
 namespace {
@@ -27,6 +29,7 @@ enum ExitCode : int {
     kExitInvalidRequest = 3,
     kExitNoPath = 4,
     kExitOutputError = 5,
+    kExitNavigationFailed = 6,
 };
 
 constexpr double kDefaultResolution = 0.5;  // meters per cell
@@ -38,6 +41,7 @@ struct CliOptions {
     bool has_start = false;
     bool has_goal = false;
     double resolution = kDefaultResolution;
+    amr::MotionConfig motion;
     std::filesystem::path output_dir = "results";
     bool show_help = false;
 };
@@ -45,25 +49,32 @@ struct CliOptions {
 void printUsage(std::ostream& os) {
     os << "Usage: robot_simulator --map FILE --start X Y --goal X Y [options]\n"
           "\n"
-          "Plans a collision-free path on an occupancy-grid map using A*.\n"
+          "Plans a collision-free path on an occupancy-grid map using A*, then\n"
+          "simulates a point robot following it.\n"
           "\n"
           "Required:\n"
-          "  --map FILE          Map CSV file (0 = free, 1 = occupied, row 0 = top)\n"
-          "  --start X Y         Start cell (x = column, y = row, origin upper-left)\n"
-          "  --goal X Y          Goal cell\n"
+          "  --map FILE            Map CSV file (0 = free, 1 = occupied, row 0 = top)\n"
+          "  --start X Y           Start cell (x = column, y = row, origin upper-left)\n"
+          "  --goal X Y            Goal cell\n"
           "\n"
           "Options:\n"
-          "  --resolution M      Cell size in meters (default 0.5)\n"
-          "  --output DIR        Output directory (default results/)\n"
-          "  -h, --help          Show this help and exit\n"
+          "  --resolution M        Cell size in meters (default 0.5)\n"
+          "  --speed V             Robot speed in m/s (default 0.5)\n"
+          "  --dt S                Simulation timestep in s (default 0.1)\n"
+          "  --goal-tolerance M    Allowed final distance to the goal in m (default 0.05)\n"
+          "  --max-time S          Simulation time limit in s (default 600)\n"
+          "  --output DIR          Output directory (default results/)\n"
+          "  -h, --help            Show this help and exit\n"
           "\n"
           "Outputs:\n"
-          "  DIR/path.csv              waypoint_index,grid_x,grid_y,world_x,world_y\n"
-          "  DIR/planning_metrics.csv  status, timing, expanded nodes, path length\n"
+          "  DIR/path.csv                waypoint_index,grid_x,grid_y,world_x,world_y\n"
+          "  DIR/planning_metrics.csv    status, timing, expanded nodes, path length\n"
+          "  DIR/trajectory.csv          time,x,y,target_waypoint_index\n"
+          "  DIR/simulation_metrics.csv  navigation status, travel time, distance, collisions\n"
           "\n"
           "Exit codes:\n"
-          "  0 success, 1 usage error, 2 map error, 3 invalid start/goal,\n"
-          "  4 no path exists, 5 output write error\n";
+          "  0 goal reached, 1 usage error, 2 map error, 3 invalid start/goal,\n"
+          "  4 no path exists, 5 output write error, 6 navigation failed\n";
 }
 
 bool parseInt(const std::string& text, int& value) {
@@ -73,13 +84,13 @@ bool parseInt(const std::string& text, int& value) {
     return ec == std::errc() && ptr == end;
 }
 
-bool parsePositiveDouble(const std::string& text, double& value) {
+bool parseFiniteDouble(const std::string& text, double& value) {
     if (text.empty()) {
         return false;
     }
     char* end = nullptr;
     const double parsed = std::strtod(text.c_str(), &end);
-    if (end != text.c_str() + text.size() || !std::isfinite(parsed) || parsed <= 0.0) {
+    if (end != text.c_str() + text.size() || !std::isfinite(parsed)) {
         return false;
     }
     value = parsed;
@@ -111,41 +122,57 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             }
             return true;
         };
+        auto parseNumber = [&](double& value) {
+            if (!requireValues(1)) {
+                return false;
+            }
+            const std::string text = argv[++i];
+            if (!parseFiniteDouble(text, value)) {
+                error = "option " + arg + " expects a number, got '" + text + "'";
+                return false;
+            }
+            return true;
+        };
 
+        bool ok = true;
         if (arg == "-h" || arg == "--help") {
             options.show_help = true;
             return options;
         } else if (arg == "--map") {
-            if (!requireValues(1)) {
-                return std::nullopt;
+            ok = requireValues(1);
+            if (ok) {
+                options.map_file = argv[++i];
             }
-            options.map_file = argv[++i];
         } else if (arg == "--start") {
-            if (!parseCoord(options.start)) {
-                return std::nullopt;
-            }
-            options.has_start = true;
+            ok = parseCoord(options.start);
+            options.has_start = ok;
         } else if (arg == "--goal") {
-            if (!parseCoord(options.goal)) {
-                return std::nullopt;
-            }
-            options.has_goal = true;
+            ok = parseCoord(options.goal);
+            options.has_goal = ok;
         } else if (arg == "--resolution") {
-            if (!requireValues(1)) {
-                return std::nullopt;
+            ok = parseNumber(options.resolution);
+            if (ok && options.resolution <= 0.0) {
+                error = "--resolution must be positive";
+                ok = false;
             }
-            const std::string text = argv[++i];
-            if (!parsePositiveDouble(text, options.resolution)) {
-                error = "--resolution expects a positive number, got '" + text + "'";
-                return std::nullopt;
-            }
+        } else if (arg == "--speed") {
+            ok = parseNumber(options.motion.speed);
+        } else if (arg == "--dt") {
+            ok = parseNumber(options.motion.dt);
+        } else if (arg == "--goal-tolerance") {
+            ok = parseNumber(options.motion.goal_tolerance);
+        } else if (arg == "--max-time") {
+            ok = parseNumber(options.motion.max_time);
         } else if (arg == "--output") {
-            if (!requireValues(1)) {
-                return std::nullopt;
+            ok = requireValues(1);
+            if (ok) {
+                options.output_dir = argv[++i];
             }
-            options.output_dir = argv[++i];
         } else {
             error = "unknown option '" + arg + "'";
+            ok = false;
+        }
+        if (!ok) {
             return std::nullopt;
         }
     }
@@ -156,6 +183,11 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
         error = "missing required option --start";
     } else if (!options.has_goal) {
         error = "missing required option --goal";
+    } else {
+        const std::string motion_error = amr::validateMotionConfig(options.motion);
+        if (!motion_error.empty()) {
+            error = "invalid motion parameters: " + motion_error;
+        }
     }
     if (!error.empty()) {
         return std::nullopt;
@@ -164,7 +196,7 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
 }
 
 void printSummary(const CliOptions& options, const amr::GridMap& map,
-                  const amr::PlanResult& result) {
+                  const amr::PlanResult& plan, const amr::SimulationResult& sim) {
     const amr::WorldPoint start_w = map.gridToWorld(options.start);
     const amr::WorldPoint goal_w = map.gridToWorld(options.goal);
     std::cout << std::fixed << std::setprecision(2);
@@ -174,24 +206,34 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
               << start_w.y << ") m\n";
     std::cout << "Goal:           cell " << options.goal << ", world (" << goal_w.x << ", "
               << goal_w.y << ") m\n";
-    std::cout << "Planner status: " << amr::toString(result.status) << '\n';
-    std::cout << "Expanded nodes: " << result.expanded_nodes << '\n';
-    std::cout << std::setprecision(3) << "Planning time:  " << result.planning_time_ms
+    std::cout << "Planner status: " << amr::toString(plan.status) << '\n';
+    std::cout << "Expanded nodes: " << plan.expanded_nodes << '\n';
+    std::cout << std::setprecision(3) << "Planning time:  " << plan.planning_time_ms
               << " ms\n";
-    if (result.success()) {
-        std::cout << std::setprecision(2) << "Path:           " << result.path.size()
-                  << " waypoints, " << result.path_cost << " steps, "
-                  << amr::pathLengthMeters(map, result.path) << " m\n";
+    if (plan.success()) {
+        std::cout << std::setprecision(2) << "Path:           " << plan.path.size()
+                  << " waypoints, " << plan.path_cost << " steps, "
+                  << amr::pathLengthMeters(map, plan.path) << " m\n";
     } else {
         std::cout << "Path:           none\n";
+    }
+    std::cout << "Navigation:     " << amr::toString(sim.status) << '\n';
+    if (!sim.trajectory.empty()) {
+        std::cout << std::setprecision(2) << "Motion:         " << sim.steps << " steps of "
+                  << options.motion.dt << " s at " << options.motion.speed << " m/s, travel time "
+                  << sim.travelTime() << " s, distance " << sim.distance_traveled << " m\n";
+        std::cout << std::setprecision(4) << "Goal error:     " << sim.final_goal_error
+                  << " m (tolerance " << options.motion.goal_tolerance << " m), collisions "
+                  << sim.collision_count << '\n';
     }
     std::cout << "Results:        " << options.output_dir.string() << '\n';
 }
 
-int exitCodeFor(amr::PlanStatus status) {
-    switch (status) {
+int exitCodeFor(amr::PlanStatus plan_status, amr::NavigationStatus nav_status) {
+    switch (plan_status) {
         case amr::PlanStatus::Success:
-            return kExitSuccess;
+            return nav_status == amr::NavigationStatus::GoalReached ? kExitSuccess
+                                                                    : kExitNavigationFailed;
         case amr::PlanStatus::NoPath:
             return kExitNoPath;
         case amr::PlanStatus::StartOutOfBounds:
@@ -201,6 +243,20 @@ int exitCodeFor(amr::PlanStatus status) {
             return kExitInvalidRequest;
     }
     return kExitInvalidRequest;
+}
+
+bool writeResults(const CliOptions& options, const amr::GridMap& map,
+                  const amr::PlanResult& plan, const amr::SimulationResult& sim,
+                  std::string& error) {
+    const std::filesystem::path& dir = options.output_dir;
+    // Every file is rewritten on every run (header-only when there is no data),
+    // so results from an earlier run can never be mistaken for the current one.
+    return amr::writePathCsv(dir / "path.csv", map, plan.path, error) &&
+           amr::writePlanningMetricsCsv(dir / "planning_metrics.csv", map, options.start,
+                                        options.goal, plan, error) &&
+           amr::writeTrajectoryCsv(dir / "trajectory.csv", sim.trajectory, error) &&
+           amr::writeSimulationMetricsCsv(dir / "simulation_metrics.csv", plan.success(),
+                                          options.motion, sim, error);
 }
 
 }  // namespace
@@ -225,7 +281,11 @@ int main(int argc, char** argv) {
     }
     const amr::GridMap& map = loaded.map;
 
-    const amr::PlanResult result = amr::planAStar(map, options.start, options.goal);
+    const amr::PlanResult plan = amr::planAStar(map, options.start, options.goal);
+    amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed
+    if (plan.success()) {
+        sim = amr::simulatePath(map, plan.path, options.motion);
+    }
 
     std::error_code ec;
     std::filesystem::create_directories(options.output_dir, ec);
@@ -234,18 +294,16 @@ int main(int argc, char** argv) {
                   << "': " << ec.message() << '\n';
         return kExitOutputError;
     }
-    // path.csv is always rewritten (header-only on failure) so a stale path
-    // from an earlier run can never be mistaken for the current result.
-    if (!amr::writePathCsv(options.output_dir / "path.csv", map, result.path, error) ||
-        !amr::writePlanningMetricsCsv(options.output_dir / "planning_metrics.csv", map,
-                                      options.start, options.goal, result, error)) {
+    if (!writeResults(options, map, plan, sim, error)) {
         std::cerr << "Error: " << error << '\n';
         return kExitOutputError;
     }
 
-    printSummary(options, map, result);
-    if (!result.success()) {
-        std::cerr << "Planning failed: " << amr::toString(result.status) << '\n';
+    printSummary(options, map, plan, sim);
+    if (!plan.success()) {
+        std::cerr << "Planning failed: " << amr::toString(plan.status) << '\n';
+    } else if (!sim.success()) {
+        std::cerr << "Navigation failed: " << amr::toString(sim.status) << '\n';
     }
-    return exitCodeFor(result.status);
+    return exitCodeFor(plan.status, sim.status);
 }

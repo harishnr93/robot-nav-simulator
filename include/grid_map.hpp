@@ -54,6 +54,11 @@ public:
     /// Center of the cell in meters.
     WorldPoint gridToWorld(GridCoord c) const;
 
+    /// Cell containing a world point: floor(world / resolution). Points outside
+    /// the map (or non-finite) map to {-1, -1}, which is out of bounds.
+    /// A point exactly on a cell boundary belongs to the cell with the larger index.
+    GridCoord worldToGrid(WorldPoint p) const;
+
 private:
     int width_ = 0;
     int height_ = 0;

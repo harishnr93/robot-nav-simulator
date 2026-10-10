@@ -1,4 +1,5 @@
 // Tests for occupancy-grid representation, coordinate conversion and map parsing.
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -78,6 +79,26 @@ void testCoordinateConversion() {
     const auto corner = map.gridToWorld({19, 19});
     CHECK_NEAR(corner.x, 9.75, kTolerance);
     CHECK_NEAR(corner.y, 9.75, kTolerance);
+}
+
+void testWorldToGrid() {
+    const GridMap map(20, 10, kResolution);
+    CHECK_EQ(map.worldToGrid({0.25, 0.25}), (GridCoord{0, 0}));
+    CHECK_EQ(map.worldToGrid({1.75, 0.75}), (GridCoord{3, 1}));
+    CHECK_EQ(map.worldToGrid({0.0, 0.0}), (GridCoord{0, 0}));
+    CHECK_EQ(map.worldToGrid({0.5, 0.49}), (GridCoord{1, 0}));  // boundary -> larger index
+    CHECK_EQ(map.worldToGrid({9.99, 4.99}), (GridCoord{19, 9}));
+    CHECK(!map.inBounds(map.worldToGrid({10.0, 1.0})));   // right edge is outside
+    CHECK(!map.inBounds(map.worldToGrid({-0.01, 1.0})));
+    CHECK(!map.inBounds(map.worldToGrid({1.0, 5.0})));
+    CHECK(!map.inBounds(map.worldToGrid({std::nan(""), 1.0})));
+    CHECK(!map.inBounds(map.worldToGrid({1e300, 1.0})));
+    // Round trip: every cell center maps back to its own cell.
+    for (int y = 0; y < map.height(); ++y) {
+        for (int x = 0; x < map.width(); ++x) {
+            CHECK_EQ(map.worldToGrid(map.gridToWorld({x, y})), (GridCoord{x, y}));
+        }
+    }
 }
 
 void testBoundsAndOccupancyQueries() {
@@ -234,6 +255,7 @@ int main() {
         {"Parse valid map (row-major, row 0 = top)", testParsesValidMapRowMajor},
         {"Parse tolerates whitespace, comments, CRLF", testToleratesWhitespaceCommentsAndCrlf},
         {"Grid-to-world conversion uses cell centers", testCoordinateConversion},
+        {"World-to-grid conversion and round trip", testWorldToGrid},
         {"Bounds and occupancy queries", testBoundsAndOccupancyQueries},
         {"GridMap constructor rejects invalid input", testConstructorRejectsInvalidInput},
         {"TC13 Malformed CSV maps produce controlled errors", tc13MalformedMapsProduceErrors},

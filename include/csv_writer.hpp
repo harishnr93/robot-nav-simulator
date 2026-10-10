@@ -6,6 +6,13 @@
 //   status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,
 //   planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m
 // path_length_steps and path_length_m are left empty when planning failed.
+// trajectory.csv columns:
+//   time,x,y,target_waypoint_index
+// simulation_metrics.csv (one header row, one data row):
+//   status,success,navigation_success,steps,travel_time_s,distance_traveled_m,
+//   final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s
+// navigation_success = planning succeeded AND the robot reached the goal without
+// collision or timeout. Distance/time fields are empty when the simulation did not run.
 #pragma once
 
 #include <filesystem>
@@ -13,6 +20,7 @@
 #include <vector>
 
 #include "grid_map.hpp"
+#include "simulator.hpp"
 #include "types.hpp"
 
 namespace amr {
@@ -26,5 +34,14 @@ bool writePathCsv(const std::filesystem::path& file, const GridMap& map,
 bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& map,
                              GridCoord start, GridCoord goal, const PlanResult& result,
                              std::string& error);
+
+/// Writes trajectory.csv. An empty trajectory produces a header-only file.
+bool writeTrajectoryCsv(const std::filesystem::path& file,
+                        const std::vector<TrajectorySample>& trajectory, std::string& error);
+
+/// Writes simulation_metrics.csv. `planning_succeeded` feeds navigation_success.
+bool writeSimulationMetricsCsv(const std::filesystem::path& file, bool planning_succeeded,
+                               const MotionConfig& config, const SimulationResult& result,
+                               std::string& error);
 
 }  // namespace amr

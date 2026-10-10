@@ -1,8 +1,8 @@
 # Architecture
 
-This document describes the modules that exist after Phases 1–2 and how data flows
-between them. Later phases (motion simulation, animation, benchmarking) will extend
-this document as they are implemented.
+This document describes the modules that exist after Phases 1–3 and how data flows
+between them. Later phases (animation, benchmarking) will extend this document as they
+are implemented.
 
 ## Data flow
 
@@ -12,14 +12,20 @@ this document as they are implemented.
  │   generate_map.py   │                │   1. parse CLI arguments                 │
  └─────────────────────┘                │   2. loadGridMapCsv()      grid_map.cpp  │
                                         │   3. planAStar()           astar.cpp     │
-                                        │   4. write*Csv()           csv_writer.cpp│
+                                        │   4. simulatePath()        simulator.cpp │
+                                        │        └ stepToward()      robot.cpp     │
+                                        │   5. write*Csv()           csv_writer.cpp│
                                         └───────────────┬──────────────────────────┘
                                                         │ results/path.csv
                                                         │ results/planning_metrics.csv
+                                                        │ results/trajectory.csv
+                                                        │ results/simulation_metrics.csv
                                         ┌───────────────▼──────────────────────────┐
                                         │ python/visualize_map.py                  │
                                         │   → map_visualization.png                │
                                         │   → planned_path.png                     │
+                                        │   → trajectory.png                       │
+                                        │   → robot_position_vs_time.png           │
                                         └──────────────────────────────────────────┘
 ```
 
@@ -37,7 +43,9 @@ uses.
 | `include/types.hpp` | Value types shared by all modules: `GridCoord`, `WorldPoint`, `PlanStatus`, `PlanResult`. Documents the coordinate convention. |
 | `include/grid_map.hpp`, `src/grid_map.cpp` | `GridMap` occupancy grid (row-major `std::vector<uint8_t>`), bounds/occupancy queries, grid→world conversion, CSV parsing and validation. |
 | `include/astar.hpp`, `src/astar.cpp` | Request validation, A* search, path reconstruction, path validity check, path length, and a reference BFS used only by tests. |
-| `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv` and `planning_metrics.csv`. |
+| `include/robot.hpp`, `src/robot.cpp` | `RobotState`, `MotionConfig` (+ validation), and `stepToward()`: one clamped kinematic step of the point robot. |
+| `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking, timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
+| `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv` and `simulation_metrics.csv`. |
 | `src/main.cpp` | CLI parsing, orchestration, console summary, exit codes. |
 
 ### Key data structures
@@ -47,6 +55,11 @@ uses.
   single `isFree()` call.
 - **`PlanResult`**: status, path (start…goal inclusive), path cost in steps, expanded
   node count, and planning time.
+- **`MotionConfig`**: speed (m/s), timestep `dt` (s), goal tolerance (m), time limit
+  (s). Validated by `validateMotionConfig()`; `max_time / dt` is capped at 10⁷ steps to
+  bound memory use.
+- **`SimulationResult`**: navigation status, trajectory samples (`RobotState` + target
+  waypoint index), steps, collision count, distance traveled, final goal error.
 - **`MapLoadResult`**: `ok` flag + `GridMap` + human-readable error. Loading never
   throws on bad input. The `GridMap` constructor *does* throw `std::invalid_argument`,
   but only for programming errors (the loader validates before constructing).
@@ -58,19 +71,21 @@ uses.
 | Bad/missing CLI arguments | message + `--help` hint | 1 |
 | Missing, empty, non-rectangular or invalid map | `MapLoadResult.error` with file and line number | 2 |
 | Start/goal out of bounds or inside an obstacle | `PlanStatus` other than `Success` | 3 |
-| Goal unreachable | `PlanStatus::NoPath`, empty path | 4 |
+| Goal unreachable | `PlanStatus::NoPath`, empty path, simulation `NOT_RUN` | 4 |
 | Cannot write results | message | 5 |
+| Collision or timeout while moving | `NavigationStatus::Collision` / `Timeout`, partial trajectory | 6 |
+| Invalid motion parameters (`--speed`, `--dt`, ...) | rejected during argument parsing | 1 |
 
-Results are written for every planning outcome (codes 0, 3, 4). On failure `path.csv`
-contains only its header, so a stale path from an earlier run can never be mistaken
-for the current one.
+All four result files are written for every planning outcome (codes 0, 3, 4, 6). Files
+without data contain only their header, so results from an earlier run can never be
+mistaken for the current one. The simulator only runs when planning succeeded.
 
 ## Python modules
 
 | File | Responsibility |
 |---|---|
 | `python/generate_map.py` | Creates `empty`, `obstacles`, `corridor`, `maze` and `random` maps. Seeded randomness; optional reachability guarantee via flood fill (a connectivity check, not a planner). |
-| `python/visualize_map.py` | Loads a map and the C++ results, checks they belong together, and saves static figures. |
+| `python/visualize_map.py` | Loads a map and the C++ results, checks they belong together (size, path free on this map, path/metrics agree, trajectory timestamps increasing), and saves static figures. Its loaders are reused by later phases. |
 
 ## Coordinate conventions
 
@@ -87,4 +102,4 @@ for the current one.
 |---|---|---|
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
-| `test_grid_map`, `test_astar` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot` | executables | unit tests (registered with CTest) |

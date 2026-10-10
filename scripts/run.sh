@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Plan a path with the C++ simulator, then render the static figures.
+# Plan a path, simulate the robot, then render the static figures.
 # Usage: scripts/run.sh [MAP START_X START_Y GOAL_X GOAL_Y]
 # Example: scripts/run.sh maps/corridor.csv 1 1 18 18
 set -euo pipefail
@@ -22,12 +22,12 @@ if [[ ! -x "${ROOT_DIR}/build/robot_simulator" ]]; then
     "${ROOT_DIR}/scripts/build.sh"
 fi
 
-# A failed plan (exit code 3 or 4) still writes results, so visualize it anyway.
+# Failed planning (3, 4) or navigation (6) still writes results, so visualize them.
 status=0
 "${ROOT_DIR}/build/robot_simulator" --map "${MAP}" \
     --start "${START_X}" "${START_Y}" --goal "${GOAL_X}" "${GOAL_Y}" \
     --output "${OUTPUT_DIR}" || status=$?
-if [[ ${status} -ne 0 && ${status} -ne 3 && ${status} -ne 4 ]]; then
+if [[ ${status} -ne 0 && ${status} -ne 3 && ${status} -ne 4 && ${status} -ne 6 ]]; then
     exit "${status}"
 fi
 

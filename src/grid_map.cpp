@@ -88,6 +88,16 @@ WorldPoint GridMap::gridToWorld(GridCoord c) const {
     return WorldPoint{(c.x + 0.5) * resolution_, (c.y + 0.5) * resolution_};
 }
 
+GridCoord GridMap::worldToGrid(WorldPoint p) const {
+    const double gx = std::floor(p.x / resolution_);
+    const double gy = std::floor(p.y / resolution_);
+    // Range check before the integer cast (also rejects NaN).
+    if (!(gx >= 0.0 && gx < width_ && gy >= 0.0 && gy < height_)) {
+        return GridCoord{-1, -1};
+    }
+    return GridCoord{static_cast<int>(gx), static_cast<int>(gy)};
+}
+
 MapLoadResult parseGridMapCsv(std::istream& input, double resolution) {
     if (!std::isfinite(resolution) || resolution <= 0.0) {
         return failure("map resolution must be a positive finite number");

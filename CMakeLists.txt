@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(RobotNavSimulator
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Autonomous Mobile Robot Navigation Simulator"
     LANGUAGES CXX)
 
@@ -18,11 +18,13 @@ option(AMR_BUILD_TESTS "Build the automated tests" ON)
 set(AMR_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
 
 # ---------------------------------------------------------------------------
-# Core library: map loading, A* planning, CSV export
+# Core library: map loading, A* planning, motion simulation, CSV export
 # ---------------------------------------------------------------------------
 add_library(amr_core STATIC
     src/grid_map.cpp
     src/astar.cpp
+    src/robot.cpp
+    src/simulator.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -40,7 +42,7 @@ target_compile_options(robot_simulator PRIVATE ${AMR_WARNING_FLAGS})
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar)
+    foreach(test_name test_grid_map test_astar test_robot)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -58,19 +60,31 @@ if(AMR_BUILD_TESTS)
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
                 --start 1 1 --goal 18 18 --output ${CLI_OUT}/obstacles)
     set_tests_properties(cli_plan_obstacles_map PROPERTIES
-        PASS_REGULAR_EXPRESSION "Planner status: SUCCESS")
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED")
 
     add_test(NAME cli_plan_maze_map
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/maze.csv
                 --start 1 1 --goal 19 19 --output ${CLI_OUT}/maze)
     set_tests_properties(cli_plan_maze_map PROPERTIES
-        PASS_REGULAR_EXPRESSION "Planner status: SUCCESS")
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED")
+
+    add_test(NAME cli_navigation_timeout
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv
+                --start 1 1 --goal 18 18 --max-time 2 --output ${CLI_OUT}/timeout)
+    set_tests_properties(cli_navigation_timeout PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +TIMEOUT")
+
+    add_test(NAME cli_rejects_invalid_motion_parameters
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --speed -1)
+    set_tests_properties(cli_rejects_invalid_motion_parameters PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid motion parameters")
 
     add_test(NAME cli_reports_unreachable_goal
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/tests/data/unreachable_goal.csv
                 --start 0 0 --goal 4 4 --output ${CLI_OUT}/unreachable)
     set_tests_properties(cli_reports_unreachable_goal PROPERTIES
-        PASS_REGULAR_EXPRESSION "Planner status: NO_PATH")
+        PASS_REGULAR_EXPRESSION "Planner status: NO_PATH.*Navigation: +NOT_RUN")
 
     add_test(NAME cli_rejects_occupied_start
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
