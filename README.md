@@ -5,10 +5,12 @@ featuring A* path planning, occupancy-grid mapping, collision detection, traject
 visualization, and performance analysis. Runs on an ordinary laptop: no robot hardware,
 no ROS, no GPU.
 
-> **Development status:** Phases 1–3 (map loading/validation, A* path planning and
-> point-robot motion simulation) are complete and tested. Animation and benchmarking are
-> being added phase by phase. See [Roadmap](#roadmap). This README only documents
-> features that exist today.
+> **Development status:** Phases 1–4 (map loading/validation, A* path planning,
+> point-robot motion simulation and visualization/animation) are complete and tested.
+> Benchmarking is next. See [Roadmap](#roadmap). This README only documents features
+> that exist today.
+
+![Animated robot navigation on the obstacles map](docs/images/navigation_obstacles.gif)
 
 | Planned path | Planned path vs. robot trajectory |
 |---|---|
@@ -37,8 +39,14 @@ no ROS, no GPU.
   with optional reachability guarantee.
 - Python static visualization of the map, planned path, actual robot trajectory and
   robot position over time (including a clear "No valid path" figure on failure).
-- 35 C++ test cases plus 10 end-to-end CLI checks, including A* vs. BFS optimality on
-  500 random maps and trajectory checks under 5 speed/timestep settings.
+- Robot animation (`matplotlib.animation.FuncAnimation`) driven by the recorded
+  timestamps, with the planned route, traveled trajectory, simulation clock and
+  navigation status. GIF export via Pillow; optional MP4 export when FFmpeg is installed.
+- One-command demo launcher (`python/run_demo.py`) that runs the C++ simulator and all
+  visualizations.
+- 35 C++ test cases, 10 end-to-end CLI checks and 20 Python tests, including A* vs. BFS
+  optimality on 500 random maps, trajectory checks under 5 speed/timestep settings, and
+  animation timing checks.
 
 ## Architecture
 
@@ -49,9 +57,13 @@ no ROS, no GPU.
                                                                                    │
            results/path.csv, planning_metrics.csv, trajectory.csv, simulation_metrics.csv
                                                                                    │
- Python  visualize_map.py ◄────────────────────────────────────────────────────────┘
-             └──► results/map_visualization.png, planned_path.png,
-                  trajectory.png, robot_position_vs_time.png
+ Python  visualize_map.py ◄──────────────────────────────────────────────────────┤
+             └──► results/map_visualization.png, planned_path.png,                 │
+                  trajectory.png, robot_position_vs_time.png                       │
+         animate_robot.py ◄────────────────────────────────────────────────────────┘
+             └──► results/navigation.gif (and optionally navigation.mp4)
+
+         run_demo.py runs all of the above with one command.
 ```
 
 The C++ planner is the single authoritative planning implementation; Python only
@@ -95,7 +107,21 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Or use the helper scripts: `scripts/build.sh` and `scripts/test.sh`.
+Or use the helper scripts: `scripts/build.sh` and `scripts/test.sh`. The Python tests are
+registered automatically when `.venv/` exists (or when the Python found by CMake has
+NumPy, Matplotlib and Pillow); otherwise CMake prints that they were skipped.
+
+## Quick demo
+
+After installation and building, one command plans, simulates and renders everything:
+
+```bash
+python3 python/run_demo.py --save-gif
+```
+
+This uses `maps/obstacles.csv` from `(1, 1)` to `(18, 18)` and writes the CSV results,
+four PNG figures and `results/navigation.gif` to `results/`. Add `--animate` to also
+play the animation in a window.
 
 ## Usage
 
@@ -156,11 +182,42 @@ The trajectory figures are skipped when there is no trajectory (planning failed)
 `visualize_map.py` refuses to plot results that do not belong to the given map
 (different size, or a path that crosses its obstacles).
 
-### Simulate and visualize in one step
+### Animate the robot
 
 ```bash
-scripts/run.sh maps/corridor.csv 1 1 18 18
+python3 python/animate_robot.py --map maps/obstacles.csv --save-gif   # results/navigation.gif
+python3 python/animate_robot.py --map maps/obstacles.csv --show       # play in a window
+python3 python/animate_robot.py --map maps/obstacles.csv --save-mp4   # needs FFmpeg
 ```
+
+| Option | Meaning | Default |
+|---|---|---|
+| `--results-dir DIR` | where the simulator wrote its CSV files | `results` |
+| `--output-dir DIR` | where to save animations | `--results-dir` |
+| `--save-gif` / `--save-mp4` / `--show` | outputs (GIF if none is given) | GIF |
+| `--fps N` | animation frame rate | `15` |
+| `--playback-speed X` | simulation seconds per animation second | about a 12 s animation, at least 1× |
+| `--dpi N` | animation resolution | `80` (600 × 680 px) |
+
+Each frame shows one simulation time; the robot is drawn at the trajectory position at
+that time (interpolated between the recorded samples), so it moves at the simulated
+speed rather than jumping between waypoints. If planning failed, nothing is animated:
+`navigation_failed.png` shows the map with a "No valid path" message, and any
+`navigation.gif`/`.mp4` from an earlier run is removed.
+
+### Plan, simulate and visualize in one step
+
+```bash
+python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 --animate --save-gif
+python3 python/run_demo.py --map maps/maze.csv --start 1 1 --goal 19 19 --speed 1.0 --save-gif
+scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save-gif
+```
+
+`run_demo.py` accepts the simulator's options (`--speed`, `--dt`, `--goal-tolerance`,
+`--max-time`, `--resolution`, `--output`), the animation options `--animate`,
+`--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
+starts the C++ executable with `subprocess` and an argument list, never through a shell.
+Its exit code is the simulator's (for example `4` when there is no path).
 
 ### Sample maps
 
@@ -231,6 +288,19 @@ See [docs/testing.md](docs/testing.md) for every test case and what it checks.
   so travel time is slightly longer than `path length / speed`.
 - 4-connected movement only; paths are optimal in grid steps, not in Euclidean distance.
 - Static maps only.
+- GIF export renders every frame with Matplotlib: about 25 s for the default
+  ~200-frame animation on a laptop CPU. Lower `--fps` or `--dpi` for faster exports.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `simulator not found at .../build/robot_simulator` | build first: `cmake -S . -B build && cmake --build build -j` |
+| `ImportError: Matplotlib requires numpy>=...` | use the project environment: `source .venv/bin/activate` (system packages may be outdated) |
+| CMake says "Python tests skipped" | create `.venv` and install `requirements.txt`, then re-run `cmake -S . -B build` |
+| `--show` / `--animate` opens no window | no display is available (e.g. SSH); use `--save-gif` instead |
+| `MP4 export needs FFmpeg` | `sudo apt install ffmpeg`, or use GIF export |
+| `results were produced for a ... map` / `path crosses obstacles` | the CSV files in `results/` belong to another map; re-run the simulator with this map |
 
 ## Roadmap
 
@@ -239,7 +309,7 @@ See [docs/testing.md](docs/testing.md) for every test case and what it checks.
 | 1 | Repository, CMake, map loading & validation, sample maps | ✅ done |
 | 2 | A* planner, path export, planner tests | ✅ done |
 | 3 | Point-robot motion simulation, collision checks, `trajectory.csv` | ✅ done |
-| 4 | Robot animation and GIF export | pending |
+| 4 | Robot animation, GIF/MP4 export, one-command demo | ✅ done |
 | 5 | Benchmarks and performance plots | pending |
 | 6 | Publication polish | pending |
 

@@ -1,8 +1,7 @@
 # Architecture
 
-This document describes the modules that exist after Phases 1–3 and how data flows
-between them. Later phases (animation, benchmarking) will extend this document as they
-are implemented.
+This document describes the modules that exist after Phases 1–4 and how data flows
+between them. Phase 5 (benchmarking) will extend this document when it is implemented.
 
 ## Data flow
 
@@ -26,7 +25,14 @@ are implemented.
                                         │   → planned_path.png                     │
                                         │   → trajectory.png                       │
                                         │   → robot_position_vs_time.png           │
+                                        ├──────────────────────────────────────────┤
+                                        │ python/animate_robot.py                  │
+                                        │   → navigation.gif  (navigation.mp4)     │
+                                        │   → navigation_failed.png (no path)      │
                                         └──────────────────────────────────────────┘
+
+ python/run_demo.py runs robot_simulator (subprocess, argument list) and then
+ visualize_map.main() and animate_robot.main() in-process.
 ```
 
 C++ and Python communicate only through CSV files. Python never re-implements the
@@ -85,7 +91,36 @@ mistaken for the current one. The simulator only runs when planning succeeded.
 | File | Responsibility |
 |---|---|
 | `python/generate_map.py` | Creates `empty`, `obstacles`, `corridor`, `maze` and `random` maps. Seeded randomness; optional reachability guarantee via flood fill (a connectivity check, not a planner). |
-| `python/visualize_map.py` | Loads a map and the C++ results, checks they belong together (size, path free on this map, path/metrics agree, trajectory timestamps increasing), and saves static figures. Its loaders are reused by later phases. |
+| `python/visualize_map.py` | Loads a map and the C++ results, checks they belong together (size, path free on this map, path/metrics agree, trajectory timestamps increasing), and saves static figures. Its loaders and drawing helpers are shared with `animate_robot.py`. |
+| `python/animate_robot.py` | Builds a `FuncAnimation` from `trajectory.csv` and exports GIF (Pillow) and optionally MP4 (FFmpeg). Draws a static "No valid path" figure instead when there is no trajectory. |
+| `python/run_demo.py` | One-command demo: runs `build/robot_simulator`, then the static figures and the animation. |
+
+### Animation timing
+
+`trajectory.csv` is the source of truth. With playback speed `p` (simulation seconds
+per animation second) and frame rate `fps`, the moving frames show the simulation
+times `linspace(t_first, t_last, n + 1)` with `n = ceil((t_last − t_first) · fps / p)`.
+That is evenly spaced, at most `p / fps` apart, and ending exactly at the final sample.
+The robot is drawn at `np.interp(t, time, x)`, `np.interp(t, time, y)`. Linear
+interpolation is exact here because the robot moves in a straight line within each
+timestep. The final frame is then held for 1.5 s and shows the final navigation status.
+The default `p` makes the animation about 12 s long, but never slower than real time.
+
+### Rendering performance
+
+Two measures keep export times reasonable (measured on the 34 s obstacles run, 203
+frames at 80 dpi):
+
+1. Constrained layout is computed once and then frozen
+   (`fig.set_layout_engine("none")`), so it is not recomputed for every frame.
+2. `Animation.save()` draws each frame, and the stock `PillowWriter.grab_frame()`
+   renders it again through `savefig`. `CanvasPillowWriter` copies the canvas buffer
+   that is already up to date when the canvas draws synchronously (Agg), and uses the
+   standard path otherwise. Its output was checked to be pixel-identical to
+   `PillowWriter` on all 181 GIF frames.
+
+Measured: GIF + MP4 export together took 175 s before (1); after (1) the GIF alone
+took 58 s, and after (2) about 25 s.
 
 ## Coordinate conventions
 
@@ -103,3 +138,4 @@ mistaken for the current one. The simulator only runs when planning succeeded.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `test_grid_map`, `test_astar`, `test_robot` | executables | unit tests (registered with CTest) |
+| `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

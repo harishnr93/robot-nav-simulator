@@ -14,6 +14,7 @@ Each test executable can also be run directly for a per-case report:
 ./build/test_grid_map
 ./build/test_astar
 ./build/test_robot
+.venv/bin/python tests/test_python_visualization.py
 ```
 
 The tests use a small assertion framework in `tests/test_framework.hpp` (`CHECK`,
@@ -37,6 +38,21 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
+| `python_visualization` | `tests/test_python_visualization.py` (20 tests, about 7 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+
+## Python visualization tests
+
+`tests/test_python_visualization.py` uses `unittest` and runs the real `robot_simulator`
+binary into temporary directories.
+
+| Group | What is checked |
+|---|---|
+| Frame timing | frames start and end exactly at the first and last timestamps, are strictly increasing and at most `playback / fps` apart; real-time playback gives `fps` frames per second; zero-duration runs give one frame; the default playback speed targets about 12 s and is never slower than real time |
+| Interpolation | the robot is exactly at recorded samples at their timestamps, linear in between, clamped after the end; the traveled trail ends at the robot; the target waypoint switches at the right sample |
+| Result validation | non-increasing timestamps and missing columns are rejected |
+| Animation integration | the robot in each frame is at the trajectory position for that frame's time, and in an independent check from the motion model, `x(t) = 0.75 + 0.5 t` on the first leg at a time *between* samples; the time label matches; the status reads `NAVIGATING …` and then `GOAL_REACHED` / `TIMEOUT` |
+| Export | the GIF is valid and looping with several frames; a failed plan produces `navigation_failed.png`, no GIF, and removes a stale GIF; MP4 without FFmpeg reports an error and still writes the GIF; a trajectory from another run is rejected |
+| `run_demo.py` | the simulator is called with an argument list (a map name containing spaces and `;` stays one argument); unset options are not passed, so the C++ defaults apply; animation runs only when requested; a missing executable gives exit code 127 |
 
 ## Test cases
 
@@ -107,3 +123,4 @@ Additional unit tests:
   | Collision check disabled | 2 |
   | Timeout disabled | 1 |
   | Timestamps doubled | 3 |
+  | Animation snaps the robot to the previous sample instead of interpolating (a "jumping" robot) | 2 Python tests (interpolation unit test and animation integration test) |

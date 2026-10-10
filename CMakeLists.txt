@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(RobotNavSimulator
-    VERSION 0.3.0
+    VERSION 0.4.0
     DESCRIPTION "Autonomous Mobile Robot Navigation Simulator"
     LANGUAGES CXX)
 
@@ -14,6 +14,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(AMR_BUILD_TESTS "Build the automated tests" ON)
+option(AMR_PYTHON_TESTS "Register the Python visualization tests (needs numpy, matplotlib, pillow)" ON)
 
 set(AMR_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
 
@@ -107,4 +108,31 @@ if(AMR_BUILD_TESTS)
     add_test(NAME cli_rejects_bad_arguments
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv --start 1 x)
     set_tests_properties(cli_rejects_bad_arguments PROPERTIES WILL_FAIL TRUE)
+
+    # Python visualization/animation tests. The project virtual environment
+    # (.venv) is used when present; otherwise an active virtual environment or the
+    # system Python. Override with -DPython3_EXECUTABLE=/path/to/python.
+    if(AMR_PYTHON_TESTS)
+        if(NOT Python3_EXECUTABLE AND EXISTS "${PROJECT_SOURCE_DIR}/.venv/bin/python")
+            set(Python3_EXECUTABLE "${PROJECT_SOURCE_DIR}/.venv/bin/python"
+                CACHE FILEPATH "Python interpreter for the visualization tests")
+        endif()
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            execute_process(
+                COMMAND ${Python3_EXECUTABLE} -c "import numpy, matplotlib, PIL"
+                RESULT_VARIABLE AMR_PYTHON_DEPS_RESULT
+                OUTPUT_QUIET ERROR_QUIET)
+        endif()
+        if(Python3_Interpreter_FOUND AND AMR_PYTHON_DEPS_RESULT EQUAL 0)
+            message(STATUS "Python tests enabled with ${Python3_EXECUTABLE}")
+            add_test(NAME python_visualization
+                COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test_python_visualization.py)
+            set_tests_properties(python_visualization PROPERTIES
+                ENVIRONMENT "AMR_SOURCE_DIR=${PROJECT_SOURCE_DIR};AMR_SIMULATOR=$<TARGET_FILE:robot_simulator>;MPLBACKEND=Agg")
+        else()
+            message(STATUS "Python tests skipped: no interpreter with numpy, matplotlib "
+                           "and pillow (activate .venv or set -DPython3_EXECUTABLE)")
+        endif()
+    endif()
 endif()

@@ -55,6 +55,8 @@ METRICS_COLUMNS = (
 )
 PATH_COLUMNS = ("waypoint_index", "grid_x", "grid_y", "world_x", "world_y")
 TRAJECTORY_COLUMNS = ("time", "x", "y", "target_waypoint_index")
+# Column indices of the array returned by load_trajectory().
+TRAJ_TIME, TRAJ_X, TRAJ_Y, TRAJ_TARGET = range(4)
 SIMULATION_COLUMNS = (
     "status", "success", "navigation_success", "steps", "travel_time_s",
     "distance_traveled_m", "final_goal_error_m", "collision_count",
@@ -187,11 +189,15 @@ def load_simulation_metrics(path: Path) -> SimulationMetrics:
 
 
 def load_trajectory(path: Path) -> np.ndarray:
-    """Return an (N, 3) array of (time_s, x_m, y_m); N may be 0."""
+    """Return an (N, 4) array of (time_s, x_m, y_m, target_waypoint_index).
+
+    N may be 0. Columns are addressed with the TRAJ_* constants.
+    """
     rows = _read_csv(path, TRAJECTORY_COLUMNS)
     try:
-        data = np.array([(float(r["time"]), float(r["x"]), float(r["y"]))
-                         for r in rows], dtype=float).reshape(-1, 3)
+        data = np.array([(float(r["time"]), float(r["x"]), float(r["y"]),
+                          int(r["target_waypoint_index"]))
+                         for r in rows], dtype=float).reshape(-1, 4)
     except ValueError as error:
         raise ResultFileError(f"'{path}' has a malformed value: {error}") from error
     if not np.isfinite(data).all():
@@ -321,8 +327,8 @@ def plot_trajectory(grid: np.ndarray, metrics: PlanningMetrics, waypoints: np.nd
     if len(waypoints) > 0:
         ax.plot(waypoints[:, 0], waypoints[:, 1], color=PATH_COLOR, linewidth=6,
                 alpha=0.35, solid_capstyle="round", label="Planned A* path", zorder=2)
-    traj_x = world_to_grid(trajectory[:, 1], metrics.resolution)
-    traj_y = world_to_grid(trajectory[:, 2], metrics.resolution)
+    traj_x = world_to_grid(trajectory[:, TRAJ_X], metrics.resolution)
+    traj_y = world_to_grid(trajectory[:, TRAJ_Y], metrics.resolution)
     ax.plot(traj_x, traj_y, color=TRAJECTORY_COLOR, linewidth=1.8,
             label="Robot trajectory", zorder=3)
     draw_start_goal(ax, metrics.start, metrics.goal)
@@ -330,7 +336,7 @@ def plot_trajectory(grid: np.ndarray, metrics: PlanningMetrics, waypoints: np.nd
     ax.plot(traj_x[-1], traj_y[-1], marker="o", markersize=15, color=ROBOT_COLOR,
             markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
             label="Robot (final position)", zorder=3.5)
-    time_s = trajectory[-1, 0] - trajectory[0, 0]
+    time_s = trajectory[-1, TRAJ_TIME] - trajectory[0, TRAJ_TIME]
     distance = sim.distance_traveled_m or 0.0
     fig.suptitle(f"Navigation: {sim.status}  |  {time_s:.1f} s, {distance:.2f} m "
                  f"traveled, {sim.collision_count} collision(s)")
@@ -342,9 +348,9 @@ def plot_position_vs_time(trajectory: np.ndarray, sim: SimulationMetrics, output
     """x(t) and y(t) in meters, one panel each (same units, separate axes)."""
     fig, (ax_x, ax_y) = plt.subplots(2, 1, figsize=(8, 5.5), sharex=True,
                                      layout="constrained")
-    time_s = trajectory[:, 0]
-    for ax, values, name in ((ax_x, trajectory[:, 1], "x"),
-                             (ax_y, trajectory[:, 2], "y")):
+    time_s = trajectory[:, TRAJ_TIME]
+    for ax, values, name in ((ax_x, trajectory[:, TRAJ_X], "x"),
+                             (ax_y, trajectory[:, TRAJ_Y], "y")):
         ax.plot(time_s, values, color=TRAJECTORY_COLOR, linewidth=2)
         ax.set_ylabel(f"{name} (m)")
         ax.grid(color=GRID_LINE_COLOR, linewidth=0.5)
