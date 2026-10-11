@@ -73,7 +73,7 @@ comes from a reproducible benchmark.
                                                                                    │
            results/path.csv, planning_metrics.csv, trajectory.csv, simulation_metrics.csv
                                                                                    │
- Python  visualize_map.py ◄──────────────────────────────────────────────────────┤
+ Python  visualize_map.py ◄────────────────────────────────────────────────────────┤
              └──► results/map_visualization.png, planned_path.png,                 │
                   trajectory.png, robot_position_vs_time.png                       │
          animate_robot.py ◄────────────────────────────────────────────────────────┘
