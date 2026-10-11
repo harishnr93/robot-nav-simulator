@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake python3 python3-venv
+
+      - name: Python environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Build (Release)
+        run: |
+          cmake -S . -B build
+          cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Demo smoke test
+        run: .venv/bin/python python/run_demo.py --save-gif
+
+      - name: Sanitizer build and test
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAMR_PYTHON_TESTS=OFF \
+                -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+          cmake --build build-asan -j
+          ctest --test-dir build-asan --output-on-failure
+
+      - name: Upload demo results
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-results
+          path: results/

@@ -298,7 +298,7 @@ def _offsets(count: int, step: float) -> np.ndarray:
 
 
 def plot_metric_vs_grid_size(data, metric: str, ylabel: str, title: str, output: Path,
-                             log_y: bool, reference=None) -> None:
+                             *, log_y: bool, reference=None) -> None:
     """Median over successful plans per (N, density); error bars: 25th–75th percentile."""
     sizes = np.unique(data["grid_size"])
     densities = np.unique(data["density"])
@@ -427,9 +427,9 @@ def command_benchmark(args: argparse.Namespace) -> int:
         out / "expanded_nodes_vs_grid_size.png", log_y=True,
         reference=("all cells (N²)", sizes.astype(float) ** 2))
     plot_success_rate(data, out / "success_rate_vs_obstacle_density.png")
-    if args.run_dir is not None:
-        if not plot_run_position(args.run_dir, out / "robot_position_vs_time.png"):
-            print(f"Note: no trajectory in {args.run_dir}; robot_position_vs_time.png skipped")
+    if args.run_dir is not None and not plot_run_position(
+            args.run_dir, out / "robot_position_vs_time.png"):
+        print(f"Note: no trajectory in {args.run_dir}; robot_position_vs_time.png skipped")
 
     total = len(data["grid_size"])
     checked = data["optimal"][~np.isnan(data["optimal"])]

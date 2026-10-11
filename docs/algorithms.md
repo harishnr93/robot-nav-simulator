@@ -61,16 +61,28 @@ at most 1 per move, which is the move's cost (consistent). With a consistent heu
 the first time A* expands a node its `g` value is already optimal. So when the goal is
 expanded, the path is shortest.
 
-**Implementation details (`src/astar.cpp`):**
+**Implementation details (`src/astar.cpp`, class `AStarPlanner`):**
 
 | Concern | Choice |
 |---|---|
-| Open set | `std::priority_queue` (min-heap via a custom comparator) |
+| Open set | two `std::priority_queue` min-heaps, one per f value (see below) |
 | Decrease-key | not supported by `std::priority_queue`; cells are pushed again when a cheaper `g` is found, and stale entries are skipped when popped (`closed` check) |
-| Costs / parents | `std::vector<int>` and `std::vector<size_t>` indexed by cell |
-| Expanded set | `std::vector<bool> closed` |
+| Per-cell state | one byte: *visited*, *closed*, and the direction to the parent (2 bits) |
+| Costs `g` | `int` array, written only for cells the search reaches (never bulk-initialized) |
+| Path reconstruction | follow the 2-bit parent directions back from the goal |
+| Repeated planning | an `AStarPlanner` keeps its buffers and resets only the cells the previous search touched; `planAStar()` is the one-shot wrapper |
 | Expanded-node count | number of cells popped *and* expanded, including the goal |
-| Timing | `std::chrono::steady_clock` around validation + search only (no file I/O) |
+| Timing | `std::chrono::steady_clock` around validation, buffer set-up and search (no file I/O) |
+
+**Why two heaps suffice.** Every move adds 1 to `g` and changes `h` by exactly ±1, so
+`f = g + h` changes by 0 or +2 along every edge. With a consistent heuristic, `f` never
+decreases along the search, so if `F` is the smallest `f` in the open set, every entry
+has `f = F` or `f = F + 2`. The planner keeps one min-heap for each. When the `F` heap
+runs empty, the heaps swap and `F` grows by 2. Inside a heap, entries are 64-bit keys
+`h << 32 | index`, where `index = y · width + x`. Comparing two keys is then a single
+integer comparison that implements the `(h, y, x)` tie-break, and the overall pop order is
+exactly `(f, h, y, x)`. A debug-build `assert` checks the two-bucket invariant on every
+push.
 
 **Deterministic tie-breaking.** Many grid paths have equal cost. The open set orders
 entries by:
@@ -94,7 +106,10 @@ make the output a pure function of the map and the request. On an empty map the
 | goal not connected to start | `NO_PATH`, empty path |
 
 **Complexity:** with `V` free cells, each cell is expanded at most once and pushed at
-most 4 times, giving `O(V log V)` time and `O(V)` memory.
+most 4 times, giving `O(V log V)` time. Memory is one byte per map cell plus 4 bytes per
+reached cell and the heap entries. The per-request set-up is `O(cells touched by the
+previous search)` with a reused `AStarPlanner`, and one byte per cell for a fresh one.
+Measured effect: [performance.md](performance.md#optimizations).
 
 ## 4. Reference BFS (validation only)
 

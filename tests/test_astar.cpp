@@ -270,6 +270,39 @@ void tc11AStarMatchesBfs() {
     CHECK(unreachable > 0);
 }
 
+// A reused AStarPlanner must give exactly the same results as fresh planAStar()
+// calls, including when consecutive maps grow and shrink (stale per-cell state from
+// a previous search must never leak into the next one).
+void testReusedPlannerMatchesFreshPlanner() {
+    constexpr int kTrials = 300;
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<int> size_dist(1, 60);
+    std::uniform_real_distribution<double> density_dist(0.0, 0.45);
+    amr::AStarPlanner planner;
+    for (int trial = 0; trial < kTrials; ++trial) {
+        const int width = size_dist(rng);
+        const int height = size_dist(rng);
+        GridMap map = makeRandomMap(rng, width, height, density_dist(rng));
+        std::uniform_int_distribution<int> x_dist(0, width - 1);
+        std::uniform_int_distribution<int> y_dist(0, height - 1);
+        const GridCoord start{x_dist(rng), y_dist(rng)};
+        const GridCoord goal{x_dist(rng), y_dist(rng)};
+        if (trial % 10 != 0) {  // keep some blocked start/goal requests
+            map.setOccupied(start, false);
+            map.setOccupied(goal, false);
+        }
+        const PlanResult fresh = amr::planAStar(map, start, goal);
+        const PlanResult reused = planner.plan(map, start, goal);
+        CHECK(reused.status == fresh.status);
+        CHECK_EQ(reused.path_cost, fresh.path_cost);
+        CHECK_EQ(reused.expanded_nodes, fresh.expanded_nodes);
+        REQUIRE(reused.path.size() == fresh.path.size());
+        for (std::size_t i = 0; i < fresh.path.size(); ++i) {
+            CHECK_EQ(reused.path[i], fresh.path[i]);
+        }
+    }
+}
+
 // Maps of different dimensions, including single-row and single-column maps.
 void testNonSquareMaps() {
     const GridMap row(25, 1, kResolution);
@@ -320,6 +353,7 @@ int main() {
         {"TC09 Multiple equivalent routes", tc09MultipleEquivalentRoutes},
         {"TC10 Reproducibility", tc10Reproducibility},
         {"TC11 A* cost equals BFS cost (500 random maps)", tc11AStarMatchesBfs},
+        {"Reused planner matches fresh planner (300 maps)", testReusedPlannerMatchesFreshPlanner},
         {"Maps of different dimensions", testNonSquareMaps},
         {"Path validation and length helpers", testPathValidationHelpers},
     });

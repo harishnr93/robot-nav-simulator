@@ -5,24 +5,36 @@ featuring A* path planning, occupancy-grid mapping, collision detection, traject
 visualization, and performance analysis. Runs on an ordinary laptop: no robot hardware,
 no ROS, no GPU.
 
-> **Development status:** Phases 1–5 (map loading/validation, A* path planning,
-> point-robot motion simulation, visualization/animation and benchmarking) are complete
-> and tested. Publication polish is next. See [Roadmap](#roadmap). This README only
-> documents features that exist today.
-
 ![Animated robot navigation on the obstacles map](docs/images/navigation_obstacles.gif)
 
 | Planned path | Planned path vs. robot trajectory |
 |---|---|
 | ![Planned A* path on the obstacles map](docs/images/planned_path_obstacles.png) | ![Robot trajectory on the obstacles map](docs/images/trajectory_obstacles.png) |
 
-## Features (implemented)
+## Motivation
+
+Planning a collision-free route and following it is the core loop of every mobile
+robot. This project builds that loop from first principles, small enough to read in an
+afternoon:
+
+- an environment model (occupancy grid);
+- a graph search (A*, written from scratch);
+- a motion model with collision checking;
+- simulation with metrics;
+- visualization.
+
+It is verified rather than just demonstrated: A* is checked against an independent BFS,
+the motion is checked against its physical invariants, and every performance number
+comes from a reproducible benchmark.
+
+## Features
 
 - Occupancy-grid maps loaded from CSV, with validation of every input (missing/empty
   files, non-rectangular grids, unsupported cell values, invalid dimensions).
 - A* path planner written from scratch: 4-connected grid, uniform step cost,
   Manhattan heuristic, `std::priority_queue` with lazy deletion, **deterministic
-  tie-breaking**.
+  tie-breaking**. Optimized for speed (1 byte of state per cell, a two-bucket open set,
+  reusable buffers) while giving bit-identical results to the straightforward version.
 - Explicit planner status: `SUCCESS`, `NO_PATH`, `START_OUT_OF_BOUNDS`,
   `GOAL_OUT_OF_BOUNDS`, `START_OCCUPIED`, `GOAL_OCCUPIED`. A failed plan never returns a
   fabricated path.
@@ -47,9 +59,10 @@ no ROS, no GPU.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 35 C++ test cases, 12 end-to-end CLI checks and 26 Python tests, including A* vs. BFS
+- 36 C++ test cases, 12 end-to-end CLI checks and 27 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
-  animation timing checks and analysis checks.
+  animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
+  Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
 
 ## Architecture
 
@@ -84,9 +97,11 @@ generates maps and visualizes results. Details: [docs/architecture.md](docs/arch
 
 ## Requirements
 
-- Ubuntu 24.04 LTS (also verified on 22.04 with GCC 11.4 / CMake 3.22)
+- Target platform: Ubuntu 24.04 LTS. Developed and tested on Ubuntu 22.04 (GCC 11.4,
+  CMake 3.22, Python 3.10). The CI workflow builds and tests on Ubuntu 24.04.
 - GCC/G++ with C++17, CMake ≥ 3.16
 - Python 3.10+ with NumPy, Matplotlib (≥ 3.7), Pillow
+- Optional: FFmpeg for MP4 export
 
 ## Installation
 
@@ -140,7 +155,7 @@ Start:          cell (1, 1), world (0.75, 0.75) m
 Goal:           cell (18, 18), world (9.25, 9.25) m
 Planner status: SUCCESS
 Expanded nodes: 38
-Planning time:  0.008 ms
+Planning time:  0.007 ms
 Path:           35 waypoints, 34 steps, 17.00 m
 Navigation:     GOAL_REACHED
 Motion:         340 steps of 0.10 s at 0.50 m/s, travel time 34.00 s, distance 17.00 m
@@ -288,8 +303,9 @@ per configuration, start and goal in opposite corners.
 | Metric | Result |
 |---|---|
 | A* optimal (cost equal to reference BFS) | 480 / 480 runs |
-| Median planning time, 100 × 100, successful plans | 0.11 ms (0 % obstacles) to 0.18 ms (20 %) |
-| Slowest single plan | 1.79 ms |
+| Median planning time, 100 × 100, successful plans | 0.039 ms (0 % obstacles) to 0.085 ms (20 %) |
+| Slowest single plan | 0.89 ms |
+| Warm planning on 400 × 400 maps (`bench_planner`) | 0.037 ms (0 %) to 1.8 ms (30 %) |
 | Expanded nodes, obstacle-free maps | exactly 2N − 1, the path cells only |
 | Navigation success (all sizes) | 100 % / 95 % / 75 % / 53 % at 0 / 10 / 20 / 30 % obstacles |
 | Collisions, timeouts | 0, 0 |
@@ -299,20 +315,56 @@ per configuration, start and goal in opposite corners.
 | ![Planning time vs. grid size](docs/images/benchmark/planning_time_vs_grid_size.png) | ![Success rate vs. obstacle density](docs/images/benchmark/success_rate_vs_obstacle_density.png) |
 
 Failures are genuine `NO_PATH` results. 89 of the 92 come from a start or goal corner being sealed
-off by its neighbors. For maps of this size, planning time is dominated by setting up the
-per-cell search arrays, not by the search itself. Methodology, all plots, the full table
-and the measurement limitations are in [docs/performance.md](docs/performance.md).
+off by its neighbors.
 
-Reproduce (about 10 s):
+**Optimization.** Benchmarking showed the first planner spent most of its time setting
+up per-cell arrays. The optimized planner stores one byte of state per cell, writes costs
+only for cells it reaches, and uses a two-bucket open set: f only takes two values at a
+time on this grid, so it needs two heaps of single-integer keys.
+
+- **Planning:** 1.1–3.0× faster in-process and up to 2.5× faster per CLI call.
+- **GIF/MP4 export:** blitted rendering cut GIF + MP4 export from 75 s to 11 s, and GIF
+  alone from 25 s to 9 s.
+- **Same results:** both produce bit-identical results, verified on 400 random maps and
+  pixel-exact frame comparisons.
+
+Methodology, all plots, the before/after tables and the measurement limitations are in
+[docs/performance.md](docs/performance.md).
+
+Reproduce:
 
 ```bash
-python3 python/run_benchmark.py                        # -> results/benchmark/
+python3 python/run_benchmark.py                        # 480 runs, about 10 s -> results/benchmark/
+./build/bench_planner                                  # in-process micro-benchmark, about 7 s
 python3 python/analyze_results.py run --results-dir results   # metrics of one run
 ```
 
 ## Testing
 
-See [docs/testing.md](docs/testing.md) for every test case and what it checks.
+```bash
+ctest --test-dir build --output-on-failure      # 16 CTest entries: C++ suites, CLI checks, Python suite
+```
+
+[docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
+mutation checks (deliberately broken code that the tests must catch) and the sanitizer
+and static-analysis results.
+
+## Project structure
+
+```text
+robot-nav-simulator/
+├── CMakeLists.txt          build, tests (CTest) and benchmark targets
+├── include/, src/          C++17 core: grid_map, astar, robot, simulator, csv_writer, main (CLI)
+├── tests/                  C++ unit tests, Python tests, test map fixtures (tests/data/)
+├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
+├── python/                 generate_map, visualize_map, animate_robot, run_demo,
+│                           run_benchmark, analyze_results
+├── maps/                   sample maps (empty, obstacles, corridor, maze)
+├── scripts/                build.sh, test.sh, run.sh
+├── docs/                   architecture, algorithms, testing, performance,
+│                           benchmark data and images
+└── results/                generated outputs (git-ignored)
+```
 
 ## Known limitations
 
@@ -324,8 +376,8 @@ See [docs/testing.md](docs/testing.md) for every test case and what it checks.
   so travel time is slightly longer than `path length / speed`.
 - 4-connected movement only; paths are optimal in grid steps, not in Euclidean distance.
 - Static maps only.
-- GIF export renders every frame with Matplotlib: about 25 s for the default
-  ~200-frame animation on a laptop CPU. Lower `--fps` or `--dpi` for faster exports.
+- GIF export of the default ~200-frame animation takes about 9 s, most of it Pillow's GIF
+  encoding. Lower `--fps` or `--dpi` for faster exports.
 
 ## Troubleshooting
 
@@ -347,10 +399,20 @@ See [docs/testing.md](docs/testing.md) for every test case and what it checks.
 | 3 | Point-robot motion simulation, collision checks, `trajectory.csv` | ✅ done |
 | 4 | Robot animation, GIF/MP4 export, one-command demo | ✅ done |
 | 5 | Benchmarks, performance analysis and plots | ✅ done |
-| 6 | Publication polish | pending |
+| 6 | Optimization, verification, publication polish | ✅ done |
 
-Later extensions: 8-connected A*, differential-drive robot, PID control, simulated
-LiDAR, EKF localization, dynamic obstacles, ROS 2 integration.
+### Future improvements
+
+- **8-connected A*:** diagonal moves with an octile heuristic and no corner-cutting.
+- **Finite robot footprint:** obstacle inflation by the robot radius.
+- **Differential-drive robot:** `x, y, θ` with linear and angular velocity, plus a
+  waypoint-following controller (P vs. PID comparison).
+- **Simulated 2D LiDAR:** ray casting.
+- **EKF localization:** from noisy odometry.
+- **Dynamic obstacles:** with replanning, where `AStarPlanner`'s reusable buffers already
+  avoid per-request set-up.
+- **ROS 2 integration:** publishing the map, path and robot state for RViz2, keeping the
+  standalone simulator.
 
 ## License
 

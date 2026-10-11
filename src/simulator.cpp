@@ -1,5 +1,6 @@
 #include "simulator.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "astar.hpp"
@@ -93,6 +94,15 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
         const std::size_t recorded_target = target < waypoints.size() ? target : last_index;
         result.trajectory.push_back({RobotState{position.x, position.y, time}, recorded_target});
     };
+
+    // Exact number of samples for an uninterrupted run: each leg takes
+    // ceil(leg length / step) steps (the last one clamped), plus the t = 0 sample.
+    std::size_t expected_steps = 0;
+    for (std::size_t i = 1; i < waypoints.size(); ++i) {
+        const double leg = distanceBetween(waypoints[i - 1], waypoints[i]);
+        expected_steps += static_cast<std::size_t>(std::ceil(leg / step_limit - kArrivalEpsilon));
+    }
+    result.trajectory.reserve(std::min(expected_steps, max_steps) + 1);
 
     record(0.0);
     if (!isSegmentCollisionFree(map, position, position)) {

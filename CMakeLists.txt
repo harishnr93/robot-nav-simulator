@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(RobotNavSimulator
-    VERSION 0.5.0
+    VERSION 1.0.0
     DESCRIPTION "Autonomous Mobile Robot Navigation Simulator"
     LANGUAGES CXX)
 
@@ -14,6 +14,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(AMR_BUILD_TESTS "Build the automated tests" ON)
+option(AMR_BUILD_BENCHMARKS "Build the in-process planner micro-benchmark" ON)
 option(AMR_PYTHON_TESTS "Register the Python visualization tests (needs numpy, matplotlib, pillow)" ON)
 
 set(AMR_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
@@ -36,6 +37,16 @@ target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
 add_executable(robot_simulator src/main.cpp)
 target_link_libraries(robot_simulator PRIVATE amr_core)
 target_compile_options(robot_simulator PRIVATE ${AMR_WARNING_FLAGS})
+
+# ---------------------------------------------------------------------------
+# Micro-benchmark (run with: ./build/bench_planner [--quick])
+# ---------------------------------------------------------------------------
+if(AMR_BUILD_BENCHMARKS)
+    add_executable(bench_planner benchmarks/bench_planner.cpp)
+    target_link_libraries(bench_planner PRIVATE amr_core)
+    target_compile_options(bench_planner PRIVATE ${AMR_WARNING_FLAGS})
+    target_compile_definitions(bench_planner PRIVATE AMR_HAS_PLANNER_CLASS)
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests (run with: ctest --test-dir build --output-on-failure)

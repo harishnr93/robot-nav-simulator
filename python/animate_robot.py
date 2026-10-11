@@ -30,8 +30,11 @@ Example:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
+from collections.abc import Callable
+from typing import NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -51,6 +54,13 @@ STATUS_EDGE_COLORS = {"GOAL_REACHED": vm.START_COLOR}  # every other status: GOA
 
 class AnimationError(Exception):
     """Raised when an animation cannot be produced."""
+
+
+class RobotAnimation(NamedTuple):
+    figure: plt.Figure
+    animation: animation.FuncAnimation
+    frame_count: int
+    update: Callable[[int], tuple]   # draws frame k's state into the artists; returns them
 
 
 def default_playback_speed(sim_duration_s: float) -> float:
@@ -109,7 +119,7 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
                     waypoints: np.ndarray, trajectory: np.ndarray,
                     sim: vm.SimulationMetrics, fps: float, playback_speed: float,
                     dpi: int = ANIMATION_DPI):
-    """Create the figure and FuncAnimation. Returns (figure, animation, frame count)."""
+    """Create the figure, the per-frame update function and a FuncAnimation."""
     res = metrics.resolution
     t_start = trajectory[0, vm.TRAJ_TIME]
     t_end = trajectory[-1, vm.TRAJ_TIME]
@@ -166,22 +176,26 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
 
     anim = animation.FuncAnimation(fig, update, frames=len(times),
                                    interval=1000.0 / fps, blit=True, repeat=True)
-    return fig, anim, len(times)
+    return RobotAnimation(fig, anim, len(times), update)
+
+
+def canvas_draws_synchronously(canvas) -> bool:
+    """True for canvases (Agg) whose buffer is current right after drawing."""
+    return type(canvas).draw_idle is FigureCanvasBase.draw_idle
 
 
 class CanvasPillowWriter(animation.PillowWriter):
-    """PillowWriter that reuses the frame FuncAnimation has just rendered.
+    """PillowWriter that takes the frame from the canvas buffer.
 
-    Animation.save() draws every frame, and PillowWriter.grab_frame() then renders
-    it a second time through savefig. On canvases whose draw_idle() draws
-    synchronously (the Agg backend used for file export), the canvas buffer is
-    already up to date, so it is copied directly, which roughly halves export time.
-    Other canvases (interactive windows) fall back to the standard behaviour.
+    The stock grab_frame() renders the whole figure again through savefig. On a
+    synchronous (Agg) canvas the buffer already holds the frame that was just drawn,
+    so it is copied directly. The output is pixel-identical; interactive canvases
+    fall back to the standard behaviour.
     """
 
     def grab_frame(self, **savefig_kwargs):
         canvas = self.fig.canvas
-        if type(canvas).draw_idle is not FigureCanvasBase.draw_idle:
+        if not canvas_draws_synchronously(canvas):
             super().grab_frame(**savefig_kwargs)
             return
         buffer = canvas.buffer_rgba()
@@ -192,6 +206,74 @@ class CanvasPillowWriter(animation.PillowWriter):
         self._frames.append(frame if frame.getextrema()[3][0] < 255 else frame.convert("RGB"))
 
 
+class CanvasFFMpegWriter(animation.FFMpegWriter):
+    """FFMpegWriter that pipes the canvas buffer instead of re-rendering via savefig.
+
+    FFMpegWriter's frames are raw RGBA figure renders at the figure dpi, which is
+    exactly what the Agg canvas buffer holds after a draw.
+    """
+
+    def grab_frame(self, **savefig_kwargs):
+        canvas = self.fig.canvas
+        if not canvas_draws_synchronously(canvas) or self.frame_format != "rgba":
+            super().grab_frame(**savefig_kwargs)
+            return
+        self._proc.stdin.write(bytes(canvas.buffer_rgba()))
+
+
+def render_frames_blitted(robot_anim: RobotAnimation):
+    """Render every frame into the canvas, yielding after each one.
+
+    Blitting: the static background (grid, axes, legend, planned path) is drawn
+    once; each frame restores it and redraws only the changing artists plus every
+    artist that lies above them in z-order (e.g. the start/goal markers), in the
+    same z-order a full render uses. The frames are pixel-identical to full
+    renders and about 20x cheaper.
+    """
+    fig = robot_anim.figure
+    ax = fig.axes[0]
+    dynamic = list(robot_anim.update(0))
+    lowest = min(artist.get_zorder() for artist in dynamic)
+    redraw = sorted((a for a in ax.get_children()
+                     if a in dynamic or (a.get_visible() and a.get_zorder() >= lowest)),
+                    key=lambda a: a.get_zorder())  # stable: keeps creation order on ties
+    previous = [a.get_animated() for a in redraw]
+    for artist in redraw:
+        artist.set_animated(True)   # excluded from the background render
+    try:
+        canvas = fig.canvas
+        canvas.draw()
+        background = canvas.copy_from_bbox(fig.bbox)
+        for frame in range(robot_anim.frame_count):
+            canvas.restore_region(background)
+            robot_anim.update(frame)
+            for artist in redraw:
+                ax.draw_artist(artist)
+            yield frame
+    finally:
+        for artist, was_animated in zip(redraw, previous, strict=True):
+            artist.set_animated(was_animated)
+
+
+def export_animation(robot_anim: RobotAnimation, outputs: list[tuple[Path, object]]) -> None:
+    """Write all requested files, rendering each frame only once."""
+    fig = robot_anim.figure
+    for path, _ in outputs:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if canvas_draws_synchronously(fig.canvas):
+        with contextlib.ExitStack() as stack:
+            for path, writer in outputs:
+                stack.enter_context(writer.saving(fig, path, fig.dpi))
+            for _ in render_frames_blitted(robot_anim):
+                for _, writer in outputs:
+                    writer.grab_frame()
+    else:  # interactive backend (--show): standard Animation.save per file
+        for path, writer in outputs:
+            robot_anim.animation.save(path, writer=writer)
+    for path, _ in outputs:
+        print(f"Saved {path} ({path.stat().st_size / 1024:.0f} KB)")
+
+
 def remove_stale_outputs(output_dir: Path) -> None:
     """Delete animations from an earlier run so they cannot be mistaken for this one."""
     for name in ("navigation.gif", "navigation.mp4"):
@@ -199,13 +281,6 @@ def remove_stale_outputs(output_dir: Path) -> None:
         if stale.is_file():
             stale.unlink()
             print(f"Removed stale {stale} (it belonged to an earlier run)")
-
-
-def save_animation(anim, path: Path, writer) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    anim.save(path, writer=writer)  # uses the figure's own dpi
-    size_kb = path.stat().st_size / 1024
-    print(f"Saved {path} ({size_kb:.0f} KB)")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -271,26 +346,27 @@ def main(argv: list[str] | None = None) -> int:
 
     duration = trajectory[-1, vm.TRAJ_TIME] - trajectory[0, vm.TRAJ_TIME]
     playback = args.playback_speed or default_playback_speed(duration)
-    fig, anim, frame_count = build_animation(grid, metrics, waypoints, trajectory,
-                                             sim, args.fps, playback, args.dpi)
+    robot_anim = build_animation(grid, metrics, waypoints, trajectory,
+                                 sim, args.fps, playback, args.dpi)
     print(f"Animating {duration:.1f} s of simulation at {playback:.2f}x: "
-          f"{frame_count} frames at {args.fps:g} fps")
+          f"{robot_anim.frame_count} frames at {args.fps:g} fps")
 
     status = 0
+    outputs = []
     if save_gif:
-        save_animation(anim, output_dir / "navigation.gif",
-                       CanvasPillowWriter(fps=args.fps))
+        outputs.append((output_dir / "navigation.gif", CanvasPillowWriter(fps=args.fps)))
     if args.save_mp4:
         if animation.FFMpegWriter.isAvailable():
-            save_animation(anim, output_dir / "navigation.mp4",
-                           animation.FFMpegWriter(fps=args.fps))
+            outputs.append((output_dir / "navigation.mp4", CanvasFFMpegWriter(fps=args.fps)))
         else:
             print("Error: MP4 export needs FFmpeg (sudo apt install ffmpeg); "
                   "GIF export works without it", file=sys.stderr)
             status = 1
+    if outputs:
+        export_animation(robot_anim, outputs)
     if args.show:
         plt.show()
-    plt.close(fig)
+    plt.close(robot_anim.figure)
     return status
 
 

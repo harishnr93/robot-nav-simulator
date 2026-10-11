@@ -1,5 +1,5 @@
 {
-  "created": "2026-10-10T10:39:25+02:00",
+  "created": "2026-10-11T08:05:45+02:00",
   "machine": {
     "cpu": "AMD Ryzen 7 4800H with Radeon Graphics",
     "logical_cpus": 16,
@@ -9,7 +9,7 @@
     "compiler": "/usr/bin/c++",
     "compiler_version": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
     "cmake_build_type": "Release",
-    "git_commit": "e83bcb5-dirty"
+    "git_commit": "f8dcbf9-dirty"
   },
   "software": {
     "python": "3.10.12",
@@ -42,5 +42,5 @@
     "max_time_s": 5000.0,
     "map_seed": "numpy default_rng([seed, N, round(100 * density)])"
   },
-  "elapsed_wall_time_s": 6.6
+  "elapsed_wall_time_s": 6.2
 }

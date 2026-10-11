@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the modules that exist after Phases 1–5 and how data flows
+This document describes the modules of the simulator and how data flows
 between them.
 
 ## Data flow
@@ -55,7 +55,8 @@ uses.
 |---|---|
 | `include/types.hpp` | Value types shared by all modules: `GridCoord`, `WorldPoint`, `PlanStatus`, `PlanResult`. Documents the coordinate convention. |
 | `include/grid_map.hpp`, `src/grid_map.cpp` | `GridMap` occupancy grid (row-major `std::vector<uint8_t>`), bounds/occupancy queries, grid→world conversion, CSV parsing and validation. |
-| `include/astar.hpp`, `src/astar.cpp` | Request validation, A* search, path reconstruction, path validity check, path length, and a reference BFS used only by tests. |
+| `include/astar.hpp`, `src/astar.cpp` | Request validation, A* search (`AStarPlanner`, reusable, plus the one-shot `planAStar()`), path reconstruction, path validity check, path length, and a reference BFS used only for validation. |
+| `benchmarks/bench_planner.cpp` | In-process micro-benchmark of fresh vs. reused planning, with a result checksum for comparing builds. |
 | `include/robot.hpp`, `src/robot.cpp` | `RobotState`, `MotionConfig` (+ validation), and `stepToward()`: one clamped kinematic step of the point robot. |
 | `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking, timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
 | `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv` and `simulation_metrics.csv`. |
@@ -66,6 +67,10 @@ uses.
 - **`GridMap`**: `width × height` cells stored row-major (`index = y * width + x`).
   Out-of-bounds queries count as occupied, which makes neighbor checks in the planner a
   single `isFree()` call.
+- **`AStarPlanner`**: one state byte per cell (visited, closed, 2-bit parent direction),
+  a cost array written only for reached cells, two `std::priority_queue` min-heaps for
+  the open set, and the list of touched cells used to reset the state between plans
+  (details in [algorithms.md](algorithms.md)).
 - **`PlanResult`**: status, path (start…goal inclusive), path cost in steps, expanded
   node count, and planning time.
 - **`MotionConfig`**: speed (m/s), timestep `dt` (s), goal tolerance (m), time limit
@@ -100,7 +105,7 @@ mistaken for the current one. The simulator only runs when planning succeeded.
 |---|---|
 | `python/generate_map.py` | Creates `empty`, `obstacles`, `corridor`, `maze` and `random` maps. Seeded randomness; optional reachability guarantee via flood fill (a connectivity check, not a planner). |
 | `python/visualize_map.py` | Loads a map and the C++ results, checks they belong together (size, path free on this map, path/metrics agree, trajectory timestamps increasing), and saves static figures. Its loaders and drawing helpers are shared with `animate_robot.py`. |
-| `python/animate_robot.py` | Builds a `FuncAnimation` from `trajectory.csv` and exports GIF (Pillow) and optionally MP4 (FFmpeg). Draws a static "No valid path" figure instead when there is no trajectory. |
+| `python/animate_robot.py` | Builds a `FuncAnimation` from `trajectory.csv` and exports GIF (Pillow) and optionally MP4 (FFmpeg) with blitted rendering. Draws a static "No valid path" figure instead when there is no trajectory. |
 | `python/run_demo.py` | One-command demo: runs `build/robot_simulator`, then the static figures and the animation. |
 | `python/run_benchmark.py` | Benchmark sweep: seeded random maps (reusing `generate_map.generate_random`), one `robot_simulator --reference-bfs` process per run, raw results plus machine/build metadata. |
 | `python/analyze_results.py` | `run`: recomputes path length, travel time and success of one run from the raw CSV files and cross-checks them with the simulator. `benchmark`: per-configuration statistics (median, mean, min, max, p95, counts) and the performance plots. |
@@ -122,19 +127,27 @@ The default `p` makes the animation about 12 s long, but never slower than real 
 
 ### Rendering performance
 
-Two measures keep export times reasonable (measured on the 34 s obstacles run, 203
-frames at 80 dpi):
+Measured on the 34 s obstacles run (203 frames at 80 dpi):
 
 1. Constrained layout is computed once and then frozen
    (`fig.set_layout_engine("none")`), so it is not recomputed for every frame.
-2. `Animation.save()` draws each frame, and the stock `PillowWriter.grab_frame()`
-   renders it again through `savefig`. `CanvasPillowWriter` copies the canvas buffer
-   that is already up to date when the canvas draws synchronously (Agg), and uses the
-   standard path otherwise. Its output was checked to be pixel-identical to
-   `PillowWriter` on all 181 GIF frames.
+2. **Blitting** (`render_frames_blitted`): the static background (grid, axes, legend,
+   planned path) is rendered once and saved. Each frame restores it and draws only the
+   changing artists (robot, trail, labels) plus every artist that lies above them in
+   z-order (the start/goal markers), in the same z-order a full render uses.
+3. **Render once, write everywhere:** `CanvasPillowWriter` and `CanvasFFMpegWriter`
+   take the frame straight from the canvas buffer instead of re-rendering through
+   `savefig`, so one rendered frame feeds the GIF and the MP4 together.
 
-Measured: GIF + MP4 export together took 175 s before (1); after (1) the GIF alone
-took 58 s, and after (2) about 25 s.
+With an interactive backend (`--show`), export falls back to the standard
+`Animation.save()`. The output is unchanged: the GIF is byte-identical to the
+non-blitted exporter and the decoded MP4 frames are identical. A test compares blitted
+frames with full renders pixel by pixel.
+
+| Export | Before (1) | After (1) | After (1)–(3) |
+|---|---|---|---|
+| GIF + MP4 | 175 s | 75 s | 10.8 s |
+| GIF only | — | 24.8 s | 8.7 s (about 6 s of it is Pillow's GIF encoding) |
 
 ## Coordinate conventions
 
@@ -151,5 +164,6 @@ took 58 s, and after (2) about 25 s.
 |---|---|---|
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
+| `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
 | `test_grid_map`, `test_astar`, `test_robot` | executables | unit tests (registered with CTest) |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

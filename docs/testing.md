@@ -26,7 +26,7 @@ values are compared with explicit tolerances.
 | CTest name | What it runs |
 |---|---|
 | `test_grid_map` | map representation and parsing unit tests |
-| `test_astar` | planner unit tests (TC01–TC11) |
+| `test_astar` | planner unit tests (TC01–TC11, planner reuse) |
 | `test_robot` | motion and simulation unit tests (TC12, TC14, motion side of TC03–TC05) |
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
@@ -40,7 +40,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (26 tests, about 8 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (27 tests, about 6 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -53,6 +53,7 @@ binary into temporary directories.
 | Interpolation | the robot is exactly at recorded samples at their timestamps, linear in between, clamped after the end; the traveled trail ends at the robot; the target waypoint switches at the right sample |
 | Result validation | non-increasing timestamps and missing columns are rejected |
 | Animation integration | the robot in each frame is at the trajectory position for that frame's time, and in an independent check from the motion model, `x(t) = 0.75 + 0.5 t` on the first leg at a time *between* samples; the time label matches; the status reads `NAVIGATING …` and then `GOAL_REACHED` / `TIMEOUT` |
+| Blitting | blitted frames are pixel-identical to full renders of the same state (first, middle and last frame) |
 | Export | the GIF is valid and looping with several frames; a failed plan produces `navigation_failed.png`, no GIF, and removes a stale GIF; MP4 without FFmpeg reports an error and still writes the GIF; a trajectory from another run is rejected |
 | Analysis | the 95 % Wilson interval is correct (120/120, 10/20); summaries keep failed runs in counts, rates and planning-time statistics while path lengths use successful plans only; single-run metrics are recomputed from the raw CSV files (17.0 m, 34.0 s on the obstacles map) and a tampered `simulation_metrics.csv` is detected |
 | Benchmark | benchmark maps are identical for the same seed and differ between seeds, with start and goal cleared; a 12-run benchmark runs end to end and writes every summary file and plot |
@@ -94,6 +95,9 @@ Additional unit tests:
 - File loader: missing file, empty file, directory, malformed file, valid file.
 - Every shipped map in `maps/` loads as 20×20 and connects its documented start/goal.
 - Non-square maps (25×1, 1×17, 60×7).
+- Planner reuse: one `AStarPlanner` plans 300 random maps of changing sizes (1–60 cells
+  per side, some with blocked start/goal), and every status, cost, expansion count and
+  path equals a fresh `planAStar()` call.
 - `isValidGridPath()` rejects occupied, skipped, diagonal and out-of-bounds steps.
 - `stepToward()`: normal, diagonal (3-4-5), clamped and zero-distance steps.
 - Motion configuration validation (non-positive speed/dt, negative tolerance, NaN,
@@ -128,7 +132,33 @@ Additional unit tests:
   | Timeout disabled | 1 |
   | Timestamps doubled | 3 |
   | Animation snaps the robot to the previous sample instead of interpolating (a "jumping" robot) | 2 Python tests (interpolation unit test and animation integration test) |
+  | Reused planner skips resetting the previous search's state | 1 (planner reuse test) |
+  | Blitted export redraws artists in the wrong z-order | 1 Python test (blitting test) |
 
 - **Benchmark-scale optimality check:** every one of the 480 benchmark runs
   ([performance.md](performance.md)) compares A* with the reference BFS through
   `--reference-bfs`. All 480 agreed: 388 equal costs and 92 runs where both found no path.
+- **Optimization equivalence (Phase 6):** the optimized planner was compared with the
+  previous implementation. A result checksum over 160 micro-benchmark maps is identical,
+  and the old and new `robot_simulator` binaries produce byte-identical `path.csv`,
+  `trajectory.csv` and non-timing metrics on 400 random maps
+  ([performance.md](performance.md#verification)).
+
+## Sanitizers and static analysis
+
+Run in Phase 6 on the final code:
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
+```
+
+| Tool | Result |
+|---|---|
+| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 16 CTest entries pass, no reports |
+| `cppcheck` 2.7 (`--enable=warning,performance,portability`) | no findings |
+| `clang-tidy` 14 (`bugprone-*`, `performance-*`, `clang-analyzer-*`) | 3 notes about string concatenation in CLI error messages (run only when reporting an error); left as is |
+| `ruff` (pyflakes, pycodestyle, bugbear, pyupgrade, simplify) | no findings |
+| GCC `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` | no warnings |
+

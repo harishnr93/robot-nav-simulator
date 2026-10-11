@@ -37,6 +37,8 @@ public:
     int height() const { return height_; }
     double resolution() const { return resolution_; }
     std::size_t cellCount() const { return cells_.size(); }
+    /// Row-major cell values (kFree / kOccupied), cellCount() entries.
+    const std::uint8_t* data() const { return cells_.data(); }
 
     bool inBounds(GridCoord c) const;
     /// Out-of-bounds cells are reported as occupied (conservative).

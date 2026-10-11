@@ -141,15 +141,15 @@ class AnimationIntegrationTests(unittest.TestCase):
     def test_frames_follow_recorded_timestamps(self):
         self.assertEqual(run_simulator(self.results, OBSTACLES_MAP, (1, 1), (18, 18)), 0)
         grid, metrics, waypoints, trajectory, sim = load_results(self.results, OBSTACLES_MAP)
-        fig, anim, frame_count = ar.build_animation(grid, metrics, waypoints, trajectory,
-                                                    sim, fps=10, playback_speed=3.7)
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory,
+                                        sim, fps=10, playback_speed=3.7)
+        frame_count = robot_anim.frame_count
         # 3.7x at 10 fps puts frames between the 0.1 s trajectory samples.
         times = np.concatenate([ar.frame_times(0.0, 34.0, 10, 3.7),
                                 np.full(int(round(ar.END_HOLD_S * 10)), 34.0)])
         self.assertEqual(frame_count, len(times))
-        robot, trail, time_text, status_text = anim._func(0)
         for frame in (0, 17, 40, frame_count - 1):
-            robot, trail, time_text, status_text = anim._func(frame)
+            robot, trail, time_text, status_text = robot_anim.update(frame)
             x, y = ar.position_at(trajectory, times[frame])
             np.testing.assert_allclose(
                 [robot.get_xdata()[0], robot.get_ydata()[0]],
@@ -157,7 +157,7 @@ class AnimationIntegrationTests(unittest.TestCase):
                  vm.world_to_grid(y, metrics.resolution)])
             self.assertIn(f"{times[frame]:5.1f} s", time_text.get_text())
         self.assertEqual(status_text.get_text(), "GOAL_REACHED")
-        robot, trail, time_text, status_text = anim._func(17)
+        robot, trail, time_text, status_text = robot_anim.update(17)
         self.assertTrue(status_text.get_text().startswith("NAVIGATING"))
         # Independent check from the motion model: the first leg (t <= 14 s) runs
         # along row 1 from x = 0.75 m at 0.5 m/s, so x(t) = 0.75 + 0.5 t, y = 0.75 m.
@@ -166,6 +166,24 @@ class AnimationIntegrationTests(unittest.TestCase):
         expected_x_m = 0.75 + 0.5 * t
         np.testing.assert_allclose([robot.get_xdata()[0], robot.get_ydata()[0]],
                                    [expected_x_m / 0.5 - 0.5, 1.0], atol=1e-9)
+
+    def test_blitted_frames_equal_full_renders(self):
+        self.assertEqual(run_simulator(self.results, OBSTACLES_MAP, (1, 1), (18, 18)), 0)
+        grid, metrics, waypoints, trajectory, sim = load_results(self.results, OBSTACLES_MAP)
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=5, playback_speed=4.0)
+        canvas = robot_anim.figure.canvas
+        checked = {0, 9, robot_anim.frame_count - 1}
+        blitted = {frame: np.array(canvas.buffer_rgba())
+                   for frame in ar.render_frames_blitted(robot_anim) if frame in checked}
+        for frame in sorted(checked):
+            # Full render of the same state. FuncAnimation(blit=True) marks its
+            # artists as animated, which a normal draw skips, so clear that first.
+            for artist in robot_anim.update(frame):
+                artist.set_animated(False)
+            canvas.draw()
+            np.testing.assert_array_equal(blitted[frame], np.array(canvas.buffer_rgba()),
+                                          err_msg=f"frame {frame}")
 
     def test_gif_export(self):
         self.assertEqual(run_simulator(self.results, OBSTACLES_MAP, (1, 1), (18, 18)), 0)
@@ -182,9 +200,9 @@ class AnimationIntegrationTests(unittest.TestCase):
         self.assertEqual(run_simulator(self.results, OBSTACLES_MAP, (1, 1), (18, 18),
                                        "--max-time", "3"), 6)
         grid, metrics, waypoints, trajectory, sim = load_results(self.results, OBSTACLES_MAP)
-        fig, anim, frame_count = ar.build_animation(grid, metrics, waypoints, trajectory,
-                                                    sim, fps=5, playback_speed=1.0)
-        *_, status_text = anim._func(frame_count - 1)
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory,
+                                        sim, fps=5, playback_speed=1.0)
+        *_, status_text = robot_anim.update(robot_anim.frame_count - 1)
         self.assertEqual(status_text.get_text(), "TIMEOUT")
 
     def test_failed_plan_is_not_animated(self):
