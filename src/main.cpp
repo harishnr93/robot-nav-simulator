@@ -30,6 +30,7 @@ enum ExitCode : int {
     kExitNoPath = 4,
     kExitOutputError = 5,
     kExitNavigationFailed = 6,
+    kExitReferenceMismatch = 7,
 };
 
 constexpr double kDefaultResolution = 0.5;  // meters per cell
@@ -43,7 +44,14 @@ struct CliOptions {
     double resolution = kDefaultResolution;
     amr::MotionConfig motion;
     std::filesystem::path output_dir = "results";
+    bool reference_bfs = false;
     bool show_help = false;
+};
+
+/// Result of the optional optimality check against the reference BFS.
+struct ReferenceCheck {
+    std::optional<int> cost;  ///< nullopt: not computed; kReferenceNoPath: no path
+    bool agrees = true;       ///< BFS and A* agree on reachability and cost
 };
 
 void printUsage(std::ostream& os) {
@@ -64,6 +72,7 @@ void printUsage(std::ostream& os) {
           "  --goal-tolerance M    Allowed final distance to the goal in m (default 0.05)\n"
           "  --max-time S          Simulation time limit in s (default 600)\n"
           "  --output DIR          Output directory (default results/)\n"
+          "  --reference-bfs       Also run the reference BFS and check A* optimality\n"
           "  -h, --help            Show this help and exit\n"
           "\n"
           "Outputs:\n"
@@ -74,7 +83,8 @@ void printUsage(std::ostream& os) {
           "\n"
           "Exit codes:\n"
           "  0 goal reached, 1 usage error, 2 map error, 3 invalid start/goal,\n"
-          "  4 no path exists, 5 output write error, 6 navigation failed\n";
+          "  4 no path exists, 5 output write error, 6 navigation failed,\n"
+          "  7 A* disagrees with the reference BFS (only with --reference-bfs)\n";
 }
 
 bool parseInt(const std::string& text, int& value) {
@@ -163,6 +173,8 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             ok = parseNumber(options.motion.goal_tolerance);
         } else if (arg == "--max-time") {
             ok = parseNumber(options.motion.max_time);
+        } else if (arg == "--reference-bfs") {
+            options.reference_bfs = true;
         } else if (arg == "--output") {
             ok = requireValues(1);
             if (ok) {
@@ -195,8 +207,22 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
     return options;
 }
 
+ReferenceCheck checkAgainstBfs(const amr::GridMap& map, const CliOptions& options,
+                              const amr::PlanResult& plan) {
+    ReferenceCheck check;
+    if (amr::validatePlanRequest(map, options.start, options.goal) !=
+        amr::PlanStatus::Success) {
+        return check;  // invalid start/goal: nothing to compare
+    }
+    const std::optional<int> bfs = amr::bfsShortestPathCost(map, options.start, options.goal);
+    check.cost = bfs ? *bfs : amr::kReferenceNoPath;
+    check.agrees = plan.success() ? (bfs && *bfs == plan.path_cost) : !bfs;
+    return check;
+}
+
 void printSummary(const CliOptions& options, const amr::GridMap& map,
-                  const amr::PlanResult& plan, const amr::SimulationResult& sim) {
+                  const amr::PlanResult& plan, const ReferenceCheck& reference,
+                  const amr::SimulationResult& sim) {
     const amr::WorldPoint start_w = map.gridToWorld(options.start);
     const amr::WorldPoint goal_w = map.gridToWorld(options.goal);
     std::cout << std::fixed << std::setprecision(2);
@@ -216,6 +242,15 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
                   << amr::pathLengthMeters(map, plan.path) << " m\n";
     } else {
         std::cout << "Path:           none\n";
+    }
+    if (reference.cost) {
+        std::cout << "Reference BFS:  ";
+        if (*reference.cost == amr::kReferenceNoPath) {
+            std::cout << "no path";
+        } else {
+            std::cout << *reference.cost << " steps";
+        }
+        std::cout << (reference.agrees ? " (matches A*)" : " (MISMATCH with A*)") << '\n';
     }
     std::cout << "Navigation:     " << amr::toString(sim.status) << '\n';
     if (!sim.trajectory.empty()) {
@@ -246,14 +281,14 @@ int exitCodeFor(amr::PlanStatus plan_status, amr::NavigationStatus nav_status) {
 }
 
 bool writeResults(const CliOptions& options, const amr::GridMap& map,
-                  const amr::PlanResult& plan, const amr::SimulationResult& sim,
-                  std::string& error) {
+                  const amr::PlanResult& plan, const ReferenceCheck& reference,
+                  const amr::SimulationResult& sim, std::string& error) {
     const std::filesystem::path& dir = options.output_dir;
     // Every file is rewritten on every run (header-only when there is no data),
     // so results from an earlier run can never be mistaken for the current one.
     return amr::writePathCsv(dir / "path.csv", map, plan.path, error) &&
            amr::writePlanningMetricsCsv(dir / "planning_metrics.csv", map, options.start,
-                                        options.goal, plan, error) &&
+                                        options.goal, plan, reference.cost, error) &&
            amr::writeTrajectoryCsv(dir / "trajectory.csv", sim.trajectory, error) &&
            amr::writeSimulationMetricsCsv(dir / "simulation_metrics.csv", plan.success(),
                                           options.motion, sim, error);
@@ -282,6 +317,9 @@ int main(int argc, char** argv) {
     const amr::GridMap& map = loaded.map;
 
     const amr::PlanResult plan = amr::planAStar(map, options.start, options.goal);
+    // The BFS check runs after planning, so it is not part of the planning time.
+    const ReferenceCheck reference =
+        options.reference_bfs ? checkAgainstBfs(map, options, plan) : ReferenceCheck{};
     amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed
     if (plan.success()) {
         sim = amr::simulatePath(map, plan.path, options.motion);
@@ -294,12 +332,16 @@ int main(int argc, char** argv) {
                   << "': " << ec.message() << '\n';
         return kExitOutputError;
     }
-    if (!writeResults(options, map, plan, sim, error)) {
+    if (!writeResults(options, map, plan, reference, sim, error)) {
         std::cerr << "Error: " << error << '\n';
         return kExitOutputError;
     }
 
-    printSummary(options, map, plan, sim);
+    printSummary(options, map, plan, reference, sim);
+    if (!reference.agrees) {
+        std::cerr << "Error: A* result disagrees with the reference BFS\n";
+        return kExitReferenceMismatch;
+    }
     if (!plan.success()) {
         std::cerr << "Planning failed: " << amr::toString(plan.status) << '\n';
     } else if (!sim.success()) {

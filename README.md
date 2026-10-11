@@ -5,10 +5,10 @@ featuring A* path planning, occupancy-grid mapping, collision detection, traject
 visualization, and performance analysis. Runs on an ordinary laptop: no robot hardware,
 no ROS, no GPU.
 
-> **Development status:** Phases 1–4 (map loading/validation, A* path planning,
-> point-robot motion simulation and visualization/animation) are complete and tested.
-> Benchmarking is next. See [Roadmap](#roadmap). This README only documents features
-> that exist today.
+> **Development status:** Phases 1–5 (map loading/validation, A* path planning,
+> point-robot motion simulation, visualization/animation and benchmarking) are complete
+> and tested. Publication polish is next. See [Roadmap](#roadmap). This README only
+> documents features that exist today.
 
 ![Animated robot navigation on the obstacles map](docs/images/navigation_obstacles.gif)
 
@@ -44,9 +44,12 @@ no ROS, no GPU.
   navigation status. GIF export via Pillow; optional MP4 export when FFmpeg is installed.
 - One-command demo launcher (`python/run_demo.py`) that runs the C++ simulator and all
   visualizations.
-- 35 C++ test cases, 10 end-to-end CLI checks and 20 Python tests, including A* vs. BFS
-  optimality on 500 random maps, trajectory checks under 5 speed/timestep settings, and
-  animation timing checks.
+- Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
+  × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
+  Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
+- 35 C++ test cases, 12 end-to-end CLI checks and 26 Python tests, including A* vs. BFS
+  optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
+  animation timing checks and analysis checks.
 
 ## Architecture
 
@@ -159,12 +162,13 @@ and no timeout.
 | `--dt S` | simulation timestep, s | `0.1` |
 | `--goal-tolerance M` | allowed final distance to the goal center, m | `0.05` |
 | `--max-time S` | simulation time limit, s | `600` |
+| `--reference-bfs` | also run the reference BFS and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
 
 Exit codes: `0` goal reached · `1` usage error · `2` map error · `3` invalid
 start/goal · `4` no path · `5` output write error · `6` navigation failed (collision or
-timeout).
+timeout) · `7` A* disagrees with the reference BFS (only with `--reference-bfs`).
 
 The speed, timestep and tolerance defaults are simulation settings, not measured
 hardware specifications.
@@ -248,8 +252,9 @@ line is row `y = 0`. Blank lines and lines starting with `#` are ignored.
 goal. Header only when planning fails.
 
 **`planning_metrics.csv`**: one row with
-`status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m`.
-The two path-length fields are empty when planning fails.
+`status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,reference_bfs_cost`.
+The two path-length fields are empty when planning fails. `reference_bfs_cost` is empty
+unless `--reference-bfs` was given, and `-1` when the reference BFS found no path.
 
 **`trajectory.csv`**: `time,x,y,target_waypoint_index`. One row per timestep, from
 `t = 0` (start-cell center) to the final position; `x`, `y` in meters.
@@ -273,6 +278,37 @@ The robot then follows the waypoints at constant speed. Each timestep it moves
 `min(speed × dt, distance to the next waypoint)` toward that waypoint, so it never
 overshoots, and every movement segment is checked against the occupancy grid. Full
 explanation: [docs/algorithms.md](docs/algorithms.md).
+
+## Performance
+
+Measured on an AMD Ryzen 7 4800H laptop (Ubuntu 22.04 under WSL2, GCC 11.4, Release
+build): 480 random maps from 10 × 10 to 100 × 100 cells with 0–30 % obstacles, 20 seeds
+per configuration, start and goal in opposite corners.
+
+| Metric | Result |
+|---|---|
+| A* optimal (cost equal to reference BFS) | 480 / 480 runs |
+| Median planning time, 100 × 100, successful plans | 0.11 ms (0 % obstacles) to 0.18 ms (20 %) |
+| Slowest single plan | 1.79 ms |
+| Expanded nodes, obstacle-free maps | exactly 2N − 1, the path cells only |
+| Navigation success (all sizes) | 100 % / 95 % / 75 % / 53 % at 0 / 10 / 20 / 30 % obstacles |
+| Collisions, timeouts | 0, 0 |
+
+| | |
+|---|---|
+| ![Planning time vs. grid size](docs/images/benchmark/planning_time_vs_grid_size.png) | ![Success rate vs. obstacle density](docs/images/benchmark/success_rate_vs_obstacle_density.png) |
+
+Failures are genuine `NO_PATH` results. 89 of the 92 come from a start or goal corner being sealed
+off by its neighbors. For maps of this size, planning time is dominated by setting up the
+per-cell search arrays, not by the search itself. Methodology, all plots, the full table
+and the measurement limitations are in [docs/performance.md](docs/performance.md).
+
+Reproduce (about 10 s):
+
+```bash
+python3 python/run_benchmark.py                        # -> results/benchmark/
+python3 python/analyze_results.py run --results-dir results   # metrics of one run
+```
 
 ## Testing
 
@@ -310,7 +346,7 @@ See [docs/testing.md](docs/testing.md) for every test case and what it checks.
 | 2 | A* planner, path export, planner tests | ✅ done |
 | 3 | Point-robot motion simulation, collision checks, `trajectory.csv` | ✅ done |
 | 4 | Robot animation, GIF/MP4 export, one-command demo | ✅ done |
-| 5 | Benchmarks and performance plots | pending |
+| 5 | Benchmarks, performance analysis and plots | ✅ done |
 | 6 | Publication polish | pending |
 
 Later extensions: 8-connected A*, differential-drive robot, PID control, simulated

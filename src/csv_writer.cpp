@@ -43,14 +43,15 @@ bool writePathCsv(const std::filesystem::path& file, const GridMap& map,
 
 bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& map,
                              GridCoord start, GridCoord goal, const PlanResult& result,
-                             std::string& error) {
+                             std::optional<int> reference_bfs_cost, std::string& error) {
     std::ofstream out(file);
     if (!out) {
         error = "cannot open '" + file.string() + "' for writing";
         return false;
     }
     out << "status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,"
-           "planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m\n";
+           "planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,"
+           "reference_bfs_cost\n";
     out << toString(result.status) << ',' << (result.success() ? 1 : 0) << ','
         << map.width() << ',' << map.height() << ','
         << std::fixed << std::setprecision(kMetersPrecision) << map.resolution() << ','
@@ -62,6 +63,10 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
             << pathLengthMeters(map, result.path);
     } else {
         out << ',';
+    }
+    out << ',';
+    if (reference_bfs_cost) {
+        out << *reference_bfs_cost;
     }
     out << '\n';
     return finishWrite(out, file, error);

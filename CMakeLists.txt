@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(RobotNavSimulator
-    VERSION 0.4.0
+    VERSION 0.5.0
     DESCRIPTION "Autonomous Mobile Robot Navigation Simulator"
     LANGUAGES CXX)
 
@@ -68,6 +68,18 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 19 19 --output ${CLI_OUT}/maze)
     set_tests_properties(cli_plan_maze_map PROPERTIES
         PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED")
+
+    add_test(NAME cli_reference_bfs_matches
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv
+                --start 1 1 --goal 18 18 --reference-bfs --output ${CLI_OUT}/reference)
+    set_tests_properties(cli_reference_bfs_matches PROPERTIES
+        PASS_REGULAR_EXPRESSION "Reference BFS: +68 steps \\(matches A\\*\\)")
+
+    add_test(NAME cli_reference_bfs_no_path
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/tests/data/unreachable_goal.csv
+                --start 0 0 --goal 4 4 --reference-bfs --output ${CLI_OUT}/reference_none)
+    set_tests_properties(cli_reference_bfs_no_path PROPERTIES
+        PASS_REGULAR_EXPRESSION "Reference BFS: +no path \\(matches A\\*\\)")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

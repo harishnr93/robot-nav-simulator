@@ -31,6 +31,8 @@ values are compared with explicit tolerances.
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
 | `cli_plan_maze_map` | plans and simulates on `maps/maze.csv`, expects `GOAL_REACHED` |
+| `cli_reference_bfs_matches` | corridor map with `--reference-bfs`, expects `Reference BFS: 68 steps (matches A*)` |
+| `cli_reference_bfs_no_path` | unreachable map with `--reference-bfs`, expects `Reference BFS: no path (matches A*)` |
 | `cli_navigation_timeout` | corridor map with `--max-time 2`, expects `TIMEOUT` |
 | `cli_rejects_invalid_motion_parameters` | `--speed -1`, expects "invalid motion parameters" |
 | `cli_reports_unreachable_goal` | `tests/data/unreachable_goal.csv`, expects `NO_PATH` and navigation `NOT_RUN` |
@@ -38,7 +40,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (20 tests, about 7 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (26 tests, about 8 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -52,6 +54,8 @@ binary into temporary directories.
 | Result validation | non-increasing timestamps and missing columns are rejected |
 | Animation integration | the robot in each frame is at the trajectory position for that frame's time, and in an independent check from the motion model, `x(t) = 0.75 + 0.5 t` on the first leg at a time *between* samples; the time label matches; the status reads `NAVIGATING …` and then `GOAL_REACHED` / `TIMEOUT` |
 | Export | the GIF is valid and looping with several frames; a failed plan produces `navigation_failed.png`, no GIF, and removes a stale GIF; MP4 without FFmpeg reports an error and still writes the GIF; a trajectory from another run is rejected |
+| Analysis | the 95 % Wilson interval is correct (120/120, 10/20); summaries keep failed runs in counts, rates and planning-time statistics while path lengths use successful plans only; single-run metrics are recomputed from the raw CSV files (17.0 m, 34.0 s on the obstacles map) and a tampered `simulation_metrics.csv` is detected |
+| Benchmark | benchmark maps are identical for the same seed and differ between seeds, with start and goal cleared; a 12-run benchmark runs end to end and writes every summary file and plot |
 | `run_demo.py` | the simulator is called with an argument list (a map name containing spaces and `;` stays one argument); unset options are not passed, so the C++ defaults apply; animation runs only when requested; a missing executable gives exit code 127 |
 
 ## Test cases
@@ -124,3 +128,7 @@ Additional unit tests:
   | Timeout disabled | 1 |
   | Timestamps doubled | 3 |
   | Animation snaps the robot to the previous sample instead of interpolating (a "jumping" robot) | 2 Python tests (interpolation unit test and animation integration test) |
+
+- **Benchmark-scale optimality check:** every one of the 480 benchmark runs
+  ([performance.md](performance.md)) compares A* with the reference BFS through
+  `--reference-bfs`. All 480 agreed: 388 equal costs and 92 runs where both found no path.

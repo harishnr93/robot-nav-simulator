@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the Python visualization and animation modules.
+"""Tests for the Python visualization, animation and analysis modules.
 
 Runs under CTest (see CMakeLists.txt), which sets:
     AMR_SOURCE_DIR   repository root
@@ -30,7 +30,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
+import analyze_results  # noqa: E402
 import animate_robot as ar  # noqa: E402
+import run_benchmark  # noqa: E402
 import run_demo  # noqa: E402
 import visualize_map as vm  # noqa: E402
 
@@ -212,6 +214,88 @@ class AnimationIntegrationTests(unittest.TestCase):
         (self.results / "trajectory.csv").write_text((other / "trajectory.csv").read_text())
         status = ar.main(["--map", str(OBSTACLES_MAP), "--results-dir", str(self.results)])
         self.assertEqual(status, 1)
+
+
+class AnalysisTests(unittest.TestCase):
+    def test_wilson_interval(self):
+        low, high = analyze_results.wilson_interval(120, 120)
+        self.assertAlmostEqual(high, 1.0)
+        self.assertAlmostEqual(low, 0.969, places=3)
+        low, high = analyze_results.wilson_interval(10, 20)
+        self.assertLess(low, 0.5)
+        self.assertGreater(high, 0.5)
+        self.assertAlmostEqual(low + high, 1.0)  # symmetric around 0.5
+
+    def test_summary_keeps_failed_runs(self):
+        data = {
+            "grid_size": np.array([10, 10, 10, 10]),
+            "density": np.array([0.3, 0.3, 0.3, 0.3]),
+            "planning_success": np.array([True, False, True, False]),
+            "planning_time_ms": np.array([1.0, 2.0, 3.0, 4.0]),
+            "expanded_nodes": np.array([10, 2, 30, 3]),
+            "path_length_m": np.array([9.0, np.nan, 10.0, np.nan]),
+            "optimal": np.array([1.0, 1.0, 1.0, 1.0]),
+            "navigation_success": np.array([True, False, True, False]),
+            "travel_time_s": np.array([18.0, np.nan, 20.0, np.nan]),
+            "collision_count": np.array([0, 0, 0, 0]),
+        }
+        (row,) = analyze_results.summarize(data)
+        self.assertEqual(row["runs"], 4)
+        self.assertEqual(row["planning_successes"], 2)
+        self.assertEqual(row["navigation_success_rate"], 0.5)
+        self.assertEqual(row["planning_time_median_ms"], 2.5)  # failed runs included
+        self.assertEqual(row["planning_time_max_ms"], 4.0)
+        self.assertEqual(row["path_length_median_m"], 9.5)     # successful plans only
+
+    def test_benchmark_maps_are_reproducible(self):
+        a = run_benchmark.make_map(30, 0.3, seed=4)
+        b = run_benchmark.make_map(30, 0.3, seed=4)
+        c = run_benchmark.make_map(30, 0.3, seed=5)
+        np.testing.assert_array_equal(a, b)
+        self.assertFalse(np.array_equal(a, c))
+        self.assertEqual(a[0, 0], 0)      # start cleared
+        self.assertEqual(a[29, 29], 0)    # goal cleared
+
+
+@unittest.skipUnless(SIMULATOR.is_file(), f"simulator not built at {SIMULATOR}")
+class AnalysisIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_run_metrics_are_recomputed_from_raw_files(self):
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18)), 0)
+        metrics = analyze_results.analyze_run(self.dir)
+        self.assertEqual(metrics["path_length_m"], 17.0)   # 34 steps of 0.5 m
+        self.assertEqual(metrics["travel_time_s"], 34.0)   # 17 m at 0.5 m/s
+        self.assertEqual(metrics["navigation_success"], 1)
+
+    def test_inconsistent_results_are_detected(self):
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18)), 0)
+        metrics_file = self.dir / "simulation_metrics.csv"
+        header, row = metrics_file.read_text().splitlines()
+        fields = row.split(",")
+        fields[4] = "99.000000"  # travel_time_s no longer matches trajectory.csv
+        metrics_file.write_text(header + "\n" + ",".join(fields) + "\n")
+        with self.assertRaises(analyze_results.AnalysisError):
+            analyze_results.analyze_run(self.dir)
+
+    def test_small_benchmark_end_to_end(self):
+        status = run_benchmark.main(["--sizes", "6", "12", "--densities", "0", "0.3",
+                                     "--seeds", "3", "--output-dir", str(self.dir),
+                                     "--simulator", str(SIMULATOR)])
+        self.assertEqual(status, 0)
+        with (self.dir / "benchmark_runs.csv").open() as handle:
+            self.assertEqual(sum(1 for _ in handle) - 1, 12)   # 2 x 2 x 3 runs
+        for name in ("benchmark_summary.csv", "benchmark_summary.md",
+                     "benchmark_metadata.json", "planning_time_vs_grid_size.png",
+                     "path_length_vs_grid_size.png", "expanded_nodes_vs_grid_size.png",
+                     "success_rate_vs_obstacle_density.png"):
+            self.assertTrue((self.dir / name).is_file(), name)
 
 
 class RunDemoTests(unittest.TestCase):

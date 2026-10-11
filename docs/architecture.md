@@ -1,7 +1,7 @@
 # Architecture
 
-This document describes the modules that exist after Phases 1–4 and how data flows
-between them. Phase 5 (benchmarking) will extend this document when it is implemented.
+This document describes the modules that exist after Phases 1–5 and how data flows
+between them.
 
 ## Data flow
 
@@ -33,6 +33,13 @@ between them. Phase 5 (benchmarking) will extend this document when it is implem
 
  python/run_demo.py runs robot_simulator (subprocess, argument list) and then
  visualize_map.main() and animate_robot.main() in-process.
+
+ Benchmark:  run_benchmark.py ──► (random map → robot_simulator --reference-bfs) × 480
+                    │                 one process at a time, results read back from CSV
+                    ▼
+             results/benchmark/benchmark_runs.csv + benchmark_metadata.json
+                    │
+             analyze_results.py benchmark ──► benchmark_summary.csv/.md + 4 plots
 ```
 
 C++ and Python communicate only through CSV files. Python never re-implements the
@@ -80,6 +87,7 @@ uses.
 | Goal unreachable | `PlanStatus::NoPath`, empty path, simulation `NOT_RUN` | 4 |
 | Cannot write results | message | 5 |
 | Collision or timeout while moving | `NavigationStatus::Collision` / `Timeout`, partial trajectory | 6 |
+| `--reference-bfs` and A* disagree with the BFS (a planner bug) | message; results are still written | 7 |
 | Invalid motion parameters (`--speed`, `--dt`, ...) | rejected during argument parsing | 1 |
 
 All four result files are written for every planning outcome (codes 0, 3, 4, 6). Files
@@ -94,6 +102,12 @@ mistaken for the current one. The simulator only runs when planning succeeded.
 | `python/visualize_map.py` | Loads a map and the C++ results, checks they belong together (size, path free on this map, path/metrics agree, trajectory timestamps increasing), and saves static figures. Its loaders and drawing helpers are shared with `animate_robot.py`. |
 | `python/animate_robot.py` | Builds a `FuncAnimation` from `trajectory.csv` and exports GIF (Pillow) and optionally MP4 (FFmpeg). Draws a static "No valid path" figure instead when there is no trajectory. |
 | `python/run_demo.py` | One-command demo: runs `build/robot_simulator`, then the static figures and the animation. |
+| `python/run_benchmark.py` | Benchmark sweep: seeded random maps (reusing `generate_map.generate_random`), one `robot_simulator --reference-bfs` process per run, raw results plus machine/build metadata. |
+| `python/analyze_results.py` | `run`: recomputes path length, travel time and success of one run from the raw CSV files and cross-checks them with the simulator. `benchmark`: per-configuration statistics (median, mean, min, max, p95, counts) and the performance plots. |
+
+The reference BFS stays in C++ (`bfsShortestPathCost`). The benchmark reaches it through
+`--reference-bfs`, so Python never re-implements a planner. The BFS runs after
+`planAStar()` returns, so it is not part of the measured planning time.
 
 ### Animation timing
 
