@@ -43,7 +43,8 @@ bool writePathCsv(const std::filesystem::path& file, const GridMap& map,
 
 bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& map,
                              GridCoord start, GridCoord goal, const PlanResult& result,
-                             std::optional<int> reference_bfs_cost, std::string& error) {
+                             std::optional<int> reference_bfs_cost, double robot_radius,
+                             double inflation_time_ms, std::string& error) {
     std::ofstream out(file);
     if (!out) {
         error = "cannot open '" + file.string() + "' for writing";
@@ -51,7 +52,7 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
     }
     out << "status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,"
            "planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,"
-           "reference_bfs_cost\n";
+           "reference_bfs_cost,robot_radius_m,inflation_time_ms\n";
     out << toString(result.status) << ',' << (result.success() ? 1 : 0) << ','
         << map.width() << ',' << map.height() << ','
         << std::fixed << std::setprecision(kMetersPrecision) << map.resolution() << ','
@@ -68,7 +69,23 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
     if (reference_bfs_cost) {
         out << *reference_bfs_cost;
     }
-    out << '\n';
+    out << ',' << std::setprecision(kMetersPrecision) << robot_radius << ','
+        << std::setprecision(kMillisecondsPrecision) << inflation_time_ms << '\n';
+    return finishWrite(out, file, error);
+}
+
+bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error) {
+    std::ofstream out(file);
+    if (!out) {
+        error = "cannot open '" + file.string() + "' for writing";
+        return false;
+    }
+    for (int y = 0; y < map.height(); ++y) {
+        for (int x = 0; x < map.width(); ++x) {
+            out << (x > 0 ? "," : "") << (map.isOccupied({x, y}) ? '1' : '0');
+        }
+        out << '\n';
+    }
     return finishWrite(out, file, error);
 }
 
@@ -98,7 +115,8 @@ bool writeSimulationMetricsCsv(const std::filesystem::path& file, bool planning_
         return false;
     }
     out << "status,success,navigation_success,steps,travel_time_s,distance_traveled_m,"
-           "final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s\n";
+           "final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,"
+           "robot_radius_m\n";
     const bool ran = !result.trajectory.empty();
     out << toString(result.status) << ',' << (result.success() ? 1 : 0) << ','
         << (planning_succeeded && result.success() ? 1 : 0) << ',' << result.steps << ',';
@@ -112,7 +130,7 @@ bool writeSimulationMetricsCsv(const std::filesystem::path& file, bool planning_
     }
     out << result.collision_count << ',' << std::setprecision(kMillisecondsPrecision)
         << config.speed << ',' << config.dt << ',' << config.goal_tolerance << ','
-        << config.max_time << '\n';
+        << config.max_time << ',' << config.robot_radius << '\n';
     return finishWrite(out, file, error);
 }
 

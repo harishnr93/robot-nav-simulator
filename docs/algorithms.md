@@ -184,10 +184,11 @@ is within the goal tolerance of the goal-cell center.
 
 **Why:** the planner only promises a path through free cells. The simulator checks
 independently, while moving, that the robot really stays in free space. This catches
-bad input paths now, and it is the hook where a finite robot footprint will be checked
-in later extensions.
+bad input paths, and with a robot footprint it verifies the disc against the real map
+(section 8).
 
-**How it works:** before executing a step from `a` to `b`, `isSegmentCollisionFree()`
+**How it works (point robot, `--robot-radius 0`):** before executing a step from `a` to
+`b`, `isSegmentCollisionFree()`
 samples the segment at intervals of at most `resolution / 20` (both endpoints included)
 and converts every sample to a cell with `worldToGrid()` (`floor(world / resolution)`).
 Each cell must be inside the map and free. If not, the step is not executed: the robot
@@ -201,14 +202,95 @@ rejects malformed paths (empty, out of bounds, or not 4-connected). Occupied cel
 deliberately left to the motion-time check, so a path through an obstacle is reported
 as a collision at the obstacle boundary.
 
-**Limitation:** the robot is a point. A real robot with radius `r` would need every
-point within `r` of its center to be free (obstacle inflation), which this check does
-not do.
+For a robot with a radius, the disc check of section 8 replaces this point check.
+
+## 8. Robot footprint and obstacle inflation
+
+**Why:** a real robot has a size. A point-robot path may graze an obstacle or pass
+through a gap narrower than the robot. Modelling the robot as a disc of radius `r`
+(`--robot-radius`) keeps the robot's whole body clear of obstacles.
+
+**Collision rule.** Occupied cells are the full squares they cover, and the area outside
+the map counts as an obstacle. The disc collides when it **overlaps** one of them:
+
+```text
+collision  ⇔  distance(center, nearest occupied square or map exterior) < r
+```
+
+Touching (`distance = r`) is allowed. So a robot whose diameter equals a gap's width
+still fits through it; the unit tests check a 1 m door with `r = 0.5` (fits) and
+`r = 0.6` (does not).
+
+**How planning uses it (configuration-space inflation).** Instead of searching over
+disc positions, A* plans for the robot's *center* on an **inflated map**:
+`inflateObstacles()` blocks every free cell whose center is closer than `r` to an
+obstacle or to the map border. A* then runs unchanged on that map (`planWithFootprint()`).
+With 0.25 m cells, the rings around an obstacle are blocked at these radii:
+
+| Ring around an obstacle cell | Center distance | Blocked when |
+|---|---|---|
+| side neighbors | 0.125 m | r > 0.125 m |
+| diagonal neighbors | 0.177 m | r > 0.177 m |
+| second ring, side | 0.375 m | r > 0.375 m |
+
+So the inflation grows in steps as `r` increases (372 cells for `0.177 < r ≤ 0.375` on
+`maps/obstacles_fine.csv`).
+
+**Why the inflated path is safe while moving.** A* only checks the cell *centers* on the
+path. The robot also passes between them, so the segment from one center to the next must
+be clear too. For a 4-connected move between the centers of two adjacent free cells of the
+inflated map, it is. Take a horizontal move from column `i` to `i + 1`:
+
+- The distance to an obstacle square is `sqrt(dx² + dy²)`, where `dy` is constant along
+  the move.
+- `dx` is the distance to the square's x-interval `[k·res, (k+1)·res]`. If that interval
+  overlaps the segment's x-range `[(i+½)·res, (i+1½)·res]`, it contains one of the two
+  endpoints, so `dx = 0` at that endpoint.
+- If it doesn't overlap, `dx` is smallest at the nearer endpoint.
+- Either way, the smallest distance along the move occurs at an endpoint, and both
+  endpoints are at least `r` from every obstacle. Distances to the map border change
+  linearly along the move, so the same holds for them.
+
+The test suite checks this on 300 random maps with random radii and resolutions, using
+the independent swept-disc check below.
+
+**How the simulator checks it.** Every step is checked against the **real** map (not the
+inflated one) by `sweptDiscOverlapsObstacle()`, an exact test with no sampling:
+
+- the distance between the step's segment and an obstacle square is 0 if they intersect
+  (a slab test);
+- otherwise it is attained at a segment endpoint or a square corner, because the closest
+  points of two disjoint convex shapes include a vertex of one of them.
+
+Only cells within the swept disc's bounding box are examined. With `r = 0` the
+simulator keeps using the point check of section 7, so point-robot results are
+unchanged.
+
+**Statuses.** A start or goal that is free in the real map but blocked after inflation
+is reported as `START_TOO_CLOSE_TO_OBSTACLE` / `GOAL_TOO_CLOSE_TO_OBSTACLE`.
+`START_OCCUPIED` / `GOAL_OCCUPIED` remain for cells that are actually occupied.
+
+**Conservative on coarse grids.** Inflation tests only cell centers. On a coarse grid, a
+passage can be wide enough for the robot even though no cell center inside it is far
+enough from both walls.
+
+- Example: `maps/obstacles.csv` (0.5 m cells) has 1.0 m wide passages beside the map
+  border. A robot with `r = 0.3 m` (0.6 m wide) physically fits, but both cell centers
+  in the passage are within 0.3 m of a wall, so the planner reports `NO_PATH`.
+- The same layout at 0.25 m cells (`maps/obstacles_fine.csv`) does find these routes.
+
+Use a resolution that is small compared with `r`. Inflation never produces an unsafe
+path, only possibly a missed one.
+
+**Cost.** Inflation examines the cells within `r` of each free cell:
+`O(cells × (2r / res + 1)²)`. It runs once per CLI call, before planning, and is timed
+separately (`inflation_time_ms`): 0.05–0.14 ms for `maps/obstacles_fine.csv` (r = 0.12–0.4 m).
 
 ## Limitations
 
-- The robot is treated as a point. Paths may pass right next to obstacles; a real robot
-  would need obstacle inflation by its radius (planned extension).
+- The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
+  cell centers, so on coarse grids it may reject passages the robot could physically
+  use (section 8).
 - The robot has no orientation, acceleration limits or dynamics: it changes direction
   instantly at waypoints (a differential-drive model is a planned extension).
 - Only 4-connected moves. Paths are optimal in grid steps but are not the shortest

@@ -118,7 +118,7 @@ def check_trajectory_matches(metrics: vm.PlanningMetrics,
 def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
                     waypoints: np.ndarray, trajectory: np.ndarray,
                     sim: vm.SimulationMetrics, fps: float, playback_speed: float,
-                    dpi: int = ANIMATION_DPI):
+                    dpi: int = ANIMATION_DPI, inflated: np.ndarray | None = None):
     """Create the figure, the per-frame update function and a FuncAnimation."""
     res = metrics.resolution
     t_start = trajectory[0, vm.TRAJ_TIME]
@@ -131,14 +131,20 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
     # The figure is created at the export dpi so saving needs no rescaling.
     fig, ax = plt.subplots(figsize=vm.FIGURE_SIZE, dpi=dpi, layout="constrained")
     vm.draw_grid(ax, grid, res)
+    extra_handles = vm.draw_inflation(ax, grid, inflated)
     ax.plot(waypoints[:, 0], waypoints[:, 1], color=vm.PATH_COLOR, linewidth=6,
             alpha=0.35, solid_capstyle="round", label="Planned A* path", zorder=2)
     vm.draw_start_goal(ax, metrics.start, metrics.goal)
     (trail,) = ax.plot([], [], color=vm.TRAJECTORY_COLOR, linewidth=2,
                        label="Robot trajectory", zorder=3)
-    (robot,) = ax.plot([], [], marker="o", markersize=13, color=vm.ROBOT_COLOR,
-                       markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
-                       label="Robot", zorder=3.5)
+    if metrics.robot_radius > 0:
+        # True-size footprint (a disc of the robot radius, in grid units).
+        robot = ax.add_patch(vm.robot_disc((np.nan, np.nan), metrics.robot_radius, res,
+                                           f"Robot (r = {metrics.robot_radius:g} m)"))
+    else:
+        (robot,) = ax.plot([], [], marker="o", markersize=13, color=vm.ROBOT_COLOR,
+                           markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
+                           label="Robot", zorder=3.5)
     text_box = dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.9,
                     edgecolor=vm.GRID_LINE_COLOR)
     time_text = ax.text(0.02, 0.98, "", transform=ax.transAxes, ha="left", va="top",
@@ -149,8 +155,8 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
     fig.suptitle(f"Robot navigation  ({sim.speed_mps:g} m/s, dt {sim.dt_s:g} s, "
                  f"playback {playback_speed:.1f}x)")
     handles, _ = ax.get_legend_handles_labels()
-    fig.legend(handles=vm._legend_handles() + handles, loc="outside lower center",
-               ncol=3, frameon=False)
+    fig.legend(handles=vm._legend_handles() + extra_handles + handles,
+               loc="outside lower center", ncol=3, frameon=False)
     # Compute the layout once, then freeze it: re-running constrained layout on
     # every frame would roughly double the rendering time.
     fig.canvas.draw()
@@ -160,7 +166,10 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
         t = float(times[frame])
         x, y = position_at(trajectory, t)
         traveled = traveled_until(trajectory, t)
-        robot.set_data([vm.world_to_grid(x, res)], [vm.world_to_grid(y, res)])
+        if metrics.robot_radius > 0:
+            robot.set_center((vm.world_to_grid(x, res), vm.world_to_grid(y, res)))
+        else:
+            robot.set_data([vm.world_to_grid(x, res)], [vm.world_to_grid(y, res)])
         trail.set_data(vm.world_to_grid(traveled[:, 0], res),
                        vm.world_to_grid(traveled[:, 1], res))
         time_text.set_text(f"t = {t - t_start:5.1f} s / {t_end - t_start:.1f} s")
@@ -330,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         vm.check_results_match_map(grid, metrics, waypoints, args.map)
         trajectory = vm.load_trajectory(args.results_dir / "trajectory.csv")
         sim = vm.load_simulation_metrics(args.results_dir / "simulation_metrics.csv")
+        inflated = vm.load_inflated_map(args.results_dir, grid, metrics)
         if len(trajectory) > 0:
             check_trajectory_matches(metrics, trajectory)
     except vm.ResultFileError as error:
@@ -339,7 +349,8 @@ def main(argv: list[str] | None = None) -> int:
     if not metrics.success or len(trajectory) == 0:
         print(f"No valid path ({metrics.status}): there is no robot motion to animate")
         remove_stale_outputs(output_dir)
-        vm.plot_planned_path(grid, metrics, waypoints, output_dir / "navigation_failed.png")
+        vm.plot_planned_path(grid, metrics, waypoints, output_dir / "navigation_failed.png",
+                             inflated)
         if args.show:
             plt.show()
         return 0
@@ -347,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     duration = trajectory[-1, vm.TRAJ_TIME] - trajectory[0, vm.TRAJ_TIME]
     playback = args.playback_speed or default_playback_speed(duration)
     robot_anim = build_animation(grid, metrics, waypoints, trajectory,
-                                 sim, args.fps, playback, args.dpi)
+                                 sim, args.fps, playback, args.dpi, inflated)
     print(f"Animating {duration:.1f} s of simulation at {playback:.2f}x: "
           f"{robot_anim.frame_count} frames at {args.fps:g} fps")
 

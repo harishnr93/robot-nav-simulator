@@ -53,6 +53,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="allowed final distance to the goal in m (default 0.05)")
     parser.add_argument("--max-time", type=float,
                         help="simulation time limit in s (default 600)")
+    parser.add_argument("--robot-radius", type=float,
+                        help="robot footprint radius in m (default 0 = point robot)")
     parser.add_argument("--output", type=Path, default=REPO_ROOT / "results",
                         help="results directory (default results/)")
     parser.add_argument("--animate", action="store_true",
@@ -79,7 +81,7 @@ def simulator_command(args: argparse.Namespace) -> list[str]:
                "--output", str(args.output)]
     optional = (("--resolution", args.resolution), ("--speed", args.speed),
                 ("--dt", args.dt), ("--goal-tolerance", args.goal_tolerance),
-                ("--max-time", args.max_time))
+                ("--max-time", args.max_time), ("--robot-radius", args.robot_radius))
     for flag, value in optional:
         if value is not None:
             command += [flag, repr(value)]

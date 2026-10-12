@@ -5,7 +5,7 @@
 // planning_metrics.csv (one header row, one data row):
 //   status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,
 //   planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,
-//   reference_bfs_cost
+//   reference_bfs_cost,robot_radius_m,inflation_time_ms
 // path_length_steps and path_length_m are left empty when planning failed.
 // reference_bfs_cost is empty unless the BFS check was requested, and
 // kReferenceNoPath (-1) when the reference BFS found no path.
@@ -13,7 +13,10 @@
 //   time,x,y,target_waypoint_index
 // simulation_metrics.csv (one header row, one data row):
 //   status,success,navigation_success,steps,travel_time_s,distance_traveled_m,
-//   final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s
+//   final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,
+//   robot_radius_m
+// inflated_map.csv (only for robot_radius_m > 0): the planning map, in the same
+// format as input maps (rows of comma-separated 0/1, row 0 first).
 // navigation_success = planning succeeded AND the robot reached the goal without
 // collision or timeout. Distance/time fields are empty when the simulation did not run.
 #pragma once
@@ -39,9 +42,14 @@ bool writePathCsv(const std::filesystem::path& file, const GridMap& map,
 
 /// Writes planning_metrics.csv. Returns false and sets error on I/O failure.
 /// reference_bfs_cost: std::nullopt if not computed, kReferenceNoPath, or a cost.
+/// robot_radius / inflation_time_ms describe the obstacle inflation used for planning.
 bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& map,
                              GridCoord start, GridCoord goal, const PlanResult& result,
-                             std::optional<int> reference_bfs_cost, std::string& error);
+                             std::optional<int> reference_bfs_cost, double robot_radius,
+                             double inflation_time_ms, std::string& error);
+
+/// Writes a map in the input map format (rows of comma-separated 0/1).
+bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error);
 
 /// Writes trajectory.csv. An empty trajectory produces a header-only file.
 bool writeTrajectoryCsv(const std::filesystem::path& file,

@@ -9,9 +9,14 @@
 //   4. advances to the next waypoint when the current one is reached;
 //   5. stops at the goal, on the first collision, or when max_time is reached.
 //
-// Collision model: the robot is a POINT. A segment is collision-free if every
-// sampled point on it lies in a free, in-bounds cell. The robot's physical radius
-// is NOT considered (obstacle inflation is a planned extension).
+// Collision model:
+//   * robot_radius == 0 (point robot): a segment is collision-free if every sampled
+//     point on it lies in a free, in-bounds cell.
+//   * robot_radius > 0 (disc robot): a step is collision-free if the disc swept
+//     along it never overlaps an occupied cell or the map exterior (exact test,
+//     see footprint.hpp). Touching is allowed.
+// The check always uses the real map, never the inflated planning map, so it is an
+// independent verification of the planned path.
 #pragma once
 
 #include <cstddef>

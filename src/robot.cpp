@@ -25,6 +25,10 @@ std::string validateMotionConfig(const MotionConfig& config) {
     if (!isPositiveFinite(config.max_time)) {
         return "maximum simulation time must be a positive finite number";
     }
+    if (!std::isfinite(config.robot_radius) || config.robot_radius < 0.0 ||
+        config.robot_radius > kMaxRobotRadius) {
+        return "robot radius must be between 0 and 100 m";
+    }
     if (config.max_time / config.dt > kMaxSimulationSteps) {
         return "max_time / dt exceeds the supported number of simulation steps";
     }

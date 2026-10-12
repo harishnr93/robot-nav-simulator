@@ -10,15 +10,18 @@ between them.
  │ python/             │ ─────────────► │ build/robot_simulator  (src/main.cpp)    │
  │   generate_map.py   │                │   1. parse CLI arguments                 │
  └─────────────────────┘                │   2. loadGridMapCsv()      grid_map.cpp  │
-                                        │   3. planAStar()           astar.cpp     │
-                                        │   4. simulatePath()        simulator.cpp │
+                                        │   3. inflateObstacles()    footprint.cpp │
+                                        │   4. planWithFootprint()   footprint.cpp │
+                                        │        └ AStarPlanner      astar.cpp     │
+                                        │   5. simulatePath()        simulator.cpp │
                                         │        └ stepToward()      robot.cpp     │
-                                        │   5. write*Csv()           csv_writer.cpp│
+                                        │   6. write*Csv()           csv_writer.cpp│
                                         └───────────────┬──────────────────────────┘
                                                         │ results/path.csv
                                                         │ results/planning_metrics.csv
                                                         │ results/trajectory.csv
                                                         │ results/simulation_metrics.csv
+                                                        │ results/inflated_map.csv (r > 0)
                                         ┌───────────────▼──────────────────────────┐
                                         │ python/visualize_map.py                  │
                                         │   → map_visualization.png                │
@@ -58,7 +61,8 @@ uses.
 | `include/astar.hpp`, `src/astar.cpp` | Request validation, A* search (`AStarPlanner`, reusable, plus the one-shot `planAStar()`), path reconstruction, path validity check, path length, and a reference BFS used only for validation. |
 | `benchmarks/bench_planner.cpp` | In-process micro-benchmark of fresh vs. reused planning, with a result checksum for comparing builds. |
 | `include/robot.hpp`, `src/robot.cpp` | `RobotState`, `MotionConfig` (+ validation), and `stepToward()`: one clamped kinematic step of the point robot. |
-| `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking, timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
+| `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking (point or disc robot), timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
+| `include/footprint.hpp`, `src/footprint.cpp` | Disc footprint: exact disc and swept-disc overlap tests, obstacle inflation, and `planWithFootprint()` (A* on the inflated map with footprint-specific statuses). |
 | `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv` and `simulation_metrics.csv`. |
 | `src/main.cpp` | CLI parsing, orchestration, console summary, exit codes. |
 
@@ -74,8 +78,11 @@ uses.
 - **`PlanResult`**: status, path (start…goal inclusive), path cost in steps, expanded
   node count, and planning time.
 - **`MotionConfig`**: speed (m/s), timestep `dt` (s), goal tolerance (m), time limit
-  (s). Validated by `validateMotionConfig()`; `max_time / dt` is capped at 10⁷ steps to
-  bound memory use.
+  (s) and robot radius (m, 0 = point robot). Validated by `validateMotionConfig()`;
+  `max_time / dt` is capped at 10⁷ steps to bound memory use, and the radius is at most
+  100 m.
+- **Inflated map**: a second `GridMap` that A* plans on. For a point robot it is a copy
+  of the input map. The simulator always collision-checks against the input map.
 - **`SimulationResult`**: navigation status, trajectory samples (`RobotState` + target
   waypoint index), steps, collision count, distance traveled, final goal error.
 - **`MapLoadResult`**: `ok` flag + `GridMap` + human-readable error. Loading never
@@ -89,6 +96,7 @@ uses.
 | Bad/missing CLI arguments | message + `--help` hint | 1 |
 | Missing, empty, non-rectangular or invalid map | `MapLoadResult.error` with file and line number | 2 |
 | Start/goal out of bounds or inside an obstacle | `PlanStatus` other than `Success` | 3 |
+| Start/goal free, but the robot footprint does not fit there | `START_TOO_CLOSE_TO_OBSTACLE` / `GOAL_TOO_CLOSE_TO_OBSTACLE` | 3 |
 | Goal unreachable | `PlanStatus::NoPath`, empty path, simulation `NOT_RUN` | 4 |
 | Cannot write results | message | 5 |
 | Collision or timeout while moving | `NavigationStatus::Collision` / `Timeout`, partial trajectory | 6 |
@@ -165,5 +173,5 @@ frames with full renders pixel by pixel.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
-| `test_grid_map`, `test_astar`, `test_robot` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint` | executables | unit tests (registered with CTest) |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

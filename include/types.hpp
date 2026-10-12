@@ -47,6 +47,8 @@ enum class PlanStatus {
     GoalOutOfBounds,
     StartOccupied,
     GoalOccupied,
+    StartTooCloseToObstacle,  ///< start is free, but the robot footprint does not fit there
+    GoalTooCloseToObstacle,   ///< goal is free, but the robot footprint does not fit there
     NoPath,
 };
 
@@ -57,6 +59,8 @@ inline const char* toString(PlanStatus status) {
         case PlanStatus::GoalOutOfBounds:  return "GOAL_OUT_OF_BOUNDS";
         case PlanStatus::StartOccupied:    return "START_OCCUPIED";
         case PlanStatus::GoalOccupied:     return "GOAL_OCCUPIED";
+        case PlanStatus::StartTooCloseToObstacle: return "START_TOO_CLOSE_TO_OBSTACLE";
+        case PlanStatus::GoalTooCloseToObstacle:  return "GOAL_TOO_CLOSE_TO_OBSTACLE";
         case PlanStatus::NoPath:           return "NO_PATH";
     }
     return "UNKNOWN";

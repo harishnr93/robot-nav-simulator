@@ -38,6 +38,8 @@ import visualize_map as vm  # noqa: E402
 
 OBSTACLES_MAP = SOURCE_DIR / "maps" / "obstacles.csv"
 UNREACHABLE_MAP = SOURCE_DIR / "tests" / "data" / "unreachable_goal.csv"
+FINE_MAP = SOURCE_DIR / "maps" / "obstacles_fine.csv"
+FINE_ARGS = ("--resolution", "0.25", "--robot-radius", "0.2")
 
 
 def run_simulator(output: Path, map_file: Path, start, goal, *extra: str) -> int:
@@ -234,6 +236,67 @@ class AnimationIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 1)
 
 
+@unittest.skipUnless(SIMULATOR.is_file(), f"simulator not built at {SIMULATOR}")
+class FootprintVisualizationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.results = Path(self.tmp.name)
+        self.assertEqual(run_simulator(self.results, FINE_MAP, (20, 2), (20, 37), *FINE_ARGS), 0)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_inflated_map_is_loaded_from_the_simulator(self):
+        grid, metrics, *_ = load_results(self.results, FINE_MAP)
+        self.assertEqual(metrics.robot_radius, 0.2)
+        inflated = vm.load_inflated_map(self.results, grid, metrics)
+        self.assertEqual(inflated.shape, grid.shape)
+        self.assertTrue(np.all(inflated >= grid))      # obstacles stay obstacles
+        self.assertEqual(int((inflated > grid).sum()), 372)  # as reported by the CLI
+
+    def test_mismatched_inflated_map_is_rejected(self):
+        grid, metrics, *_ = load_results(self.results, FINE_MAP)
+        (self.results / "inflated_map.csv").write_text("0,0\n0,0\n")
+        with self.assertRaises(vm.ResultFileError):
+            vm.load_inflated_map(self.results, grid, metrics)
+
+    def test_animated_robot_is_a_true_size_disc(self):
+        grid, metrics, waypoints, trajectory, sim = load_results(self.results, FINE_MAP)
+        inflated = vm.load_inflated_map(self.results, grid, metrics)
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=5, playback_speed=4.0, inflated=inflated)
+        robot, *_ = robot_anim.update(7)
+        self.assertAlmostEqual(robot.get_radius(), 0.2 / 0.25)  # radius in grid cells
+        t = ar.frame_times(trajectory[0, 0], trajectory[-1, 0], 5, 4.0)[7]
+        x, y = ar.position_at(trajectory, t)
+        np.testing.assert_allclose(robot.center, (x / 0.25 - 0.5, y / 0.25 - 0.5))
+
+    def test_blitted_disc_frames_equal_full_renders(self):
+        grid, metrics, waypoints, trajectory, sim = load_results(self.results, FINE_MAP)
+        inflated = vm.load_inflated_map(self.results, grid, metrics)
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=5, playback_speed=6.0, inflated=inflated)
+        canvas = robot_anim.figure.canvas
+        checked = {0, 11, robot_anim.frame_count - 1}
+        blitted = {frame: np.array(canvas.buffer_rgba())
+                   for frame in ar.render_frames_blitted(robot_anim) if frame in checked}
+        for frame in sorted(checked):
+            for artist in robot_anim.update(frame):
+                artist.set_animated(False)
+            canvas.draw()
+            np.testing.assert_array_equal(blitted[frame], np.array(canvas.buffer_rgba()),
+                                          err_msg=f"frame {frame}")
+
+    def test_static_figures_and_gif_with_footprint(self):
+        self.assertEqual(vm.main(["--map", str(FINE_MAP), "--results-dir", str(self.results)]), 0)
+        self.assertEqual(ar.main(["--map", str(FINE_MAP), "--results-dir", str(self.results),
+                                  "--save-gif", "--fps", "4", "--playback-speed", "12"]), 0)
+        for name in ("map_visualization.png", "planned_path.png", "trajectory.png",
+                     "navigation.gif"):
+            self.assertTrue((self.results / name).is_file(), name)
+
+
 class AnalysisTests(unittest.TestCase):
     def test_wilson_interval(self):
         low, high = analyze_results.wilson_interval(120, 120)
@@ -323,6 +386,10 @@ class RunDemoTests(unittest.TestCase):
         self.assertIn("maps/a b;rm -rf.csv", command)  # passed verbatim, one argument
         self.assertEqual(command[command.index("--speed") + 1], "0.75")
         self.assertNotIn("--dt", command)  # unset options keep the C++ defaults
+        self.assertNotIn("--robot-radius", command)
+        radius_args = run_demo.parse_args(["--robot-radius", "0.3"])
+        radius_command = run_demo.simulator_command(radius_args)
+        self.assertEqual(radius_command[radius_command.index("--robot-radius") + 1], "0.3")
 
     def test_animation_only_when_requested(self):
         self.assertIsNone(run_demo.animation_args(run_demo.parse_args([])))

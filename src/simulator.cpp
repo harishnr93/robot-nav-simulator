@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "astar.hpp"
+#include "footprint.hpp"
 
 namespace amr {
 
@@ -105,7 +106,14 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
     result.trajectory.reserve(std::min(expected_steps, max_steps) + 1);
 
     record(0.0);
-    if (!isSegmentCollisionFree(map, position, position)) {
+    // Point robot: the Phase 3 point check. Disc robot: exact swept-disc check.
+    const auto step_is_free = [&](WorldPoint from, WorldPoint to) {
+        return config.robot_radius > 0.0
+                   ? !sweptDiscOverlapsObstacle(map, from, to, config.robot_radius)
+                   : isSegmentCollisionFree(map, from, to);
+    };
+
+    if (!step_is_free(position, position)) {
         result.collision_count = 1;
         result.status = NavigationStatus::Collision;
     }
@@ -116,7 +124,7 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
             break;
         }
         const StepResult step = stepToward(position, waypoints[target], step_limit);
-        if (!isSegmentCollisionFree(map, position, step.position)) {
+        if (!step_is_free(position, step.position)) {
             // The unsafe step is not executed; the robot stops at its last safe pose.
             result.collision_count = 1;
             result.status = NavigationStatus::Collision;

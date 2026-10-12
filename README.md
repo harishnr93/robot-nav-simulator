@@ -36,13 +36,17 @@ comes from a reproducible benchmark.
   tie-breaking**. Optimized for speed (1 byte of state per cell, a two-bucket open set,
   reusable buffers) while giving bit-identical results to the straightforward version.
 - Explicit planner status: `SUCCESS`, `NO_PATH`, `START_OUT_OF_BOUNDS`,
-  `GOAL_OUT_OF_BOUNDS`, `START_OCCUPIED`, `GOAL_OCCUPIED`. A failed plan never returns a
-  fabricated path.
+  `GOAL_OUT_OF_BOUNDS`, `START_OCCUPIED`, `GOAL_OCCUPIED`, `START_TOO_CLOSE_TO_OBSTACLE`,
+  `GOAL_TOO_CLOSE_TO_OBSTACLE`. A failed plan never returns a fabricated path.
+- Robot footprint (`--robot-radius`): the robot is a disc; obstacles are inflated by its
+  radius for planning, and every simulated step is checked with an exact swept-disc test
+  against the real map. A radius of 0 keeps the point robot, with byte-identical results.
 - Planning metrics: time (steady clock, search only), expanded nodes, path length in
   steps and meters.
 - Point-robot motion simulation: constant speed, fixed timestep, step clamped so the
   robot never overshoots a waypoint, time limit against endless runs.
-- Motion-time collision checking of every movement segment against the occupancy grid.
+- Motion-time collision checking of every movement segment against the occupancy grid
+  (point or disc robot).
 - Navigation status: `GOAL_REACHED`, `COLLISION`, `TIMEOUT`, `INVALID_PATH`,
   `INVALID_CONFIG`, or `NOT_RUN` when planning failed.
 - CSV export (`path.csv`, `planning_metrics.csv`, `trajectory.csv`,
@@ -59,7 +63,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 36 C++ test cases, 12 end-to-end CLI checks and 27 Python tests, including A* vs. BFS
+- 44 C++ test cases, 16 end-to-end CLI checks and 32 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -177,6 +181,7 @@ and no timeout.
 | `--dt S` | simulation timestep, s | `0.1` |
 | `--goal-tolerance M` | allowed final distance to the goal center, m | `0.05` |
 | `--max-time S` | simulation time limit, s | `600` |
+| `--robot-radius M` | robot footprint radius, m; obstacles are inflated by it | `0` (point robot) |
 | `--reference-bfs` | also run the reference BFS and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
@@ -233,7 +238,7 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 ```
 
 `run_demo.py` accepts the simulator's options (`--speed`, `--dt`, `--goal-tolerance`,
-`--max-time`, `--resolution`, `--output`), the animation options `--animate`,
+`--max-time`, `--robot-radius`, `--resolution`, `--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
 Its exit code is the simulator's (for example `4` when there is no path).
@@ -246,6 +251,36 @@ Its exit code is the simulator's (for example `4` when there is no path).
 | `maps/obstacles.csv` | `1 1` → `18 18` |
 | `maps/corridor.csv` | `1 1` → `18 18` |
 | `maps/maze.csv` | `1 1` → `19 19` |
+| `maps/obstacles_fine.csv` | `20 2` → `20 37` with `--resolution 0.25` (footprint demo) |
+
+The first four maps have one-cell (0.5 m) gaps and are meant for a point robot. Use
+`maps/obstacles_fine.csv` for a robot footprint: it has the same layout at 0.25 m cells.
+
+### Robot footprint
+
+```bash
+python3 python/run_demo.py --map maps/obstacles_fine.csv --resolution 0.25 \
+    --start 20 2 --goal 20 37 --robot-radius 0.2 --save-gif
+```
+
+```text
+Footprint:      radius 0.200 m, 372 cells inflated (0.067 ms)
+Planner status: SUCCESS
+Path:           46 waypoints, 45 steps, 11.25 m
+Navigation:     GOAL_REACHED
+```
+
+| `--robot-radius 0.2` (45 steps) | `--robot-radius 0.4` (65 steps) |
+|---|---|
+| ![Footprint r = 0.2 m](docs/images/footprint_r020.png) | ![Footprint r = 0.4 m](docs/images/footprint_r040.png) |
+
+The shaded band marks cells where the robot's *center* may not go. The robot is drawn
+at its true size. With `r = 0.4 m` (0.8 m wide) the robot no longer fits between the bars and
+takes the long way round. A point robot needs 41 steps for the same trip. If the robot
+cannot fit anywhere, the result is `NO_PATH`; if it cannot even stand at the start or
+goal, the result is `START_TOO_CLOSE_TO_OBSTACLE` / `GOAL_TOO_CLOSE_TO_OBSTACLE`. Details,
+including why inflation is safe and when it is conservative:
+[docs/algorithms.md](docs/algorithms.md#8-robot-footprint-and-obstacle-inflation).
 
 ### Generate maps
 
@@ -267,9 +302,12 @@ line is row `y = 0`. Blank lines and lines starting with `#` are ignored.
 goal. Header only when planning fails.
 
 **`planning_metrics.csv`**: one row with
-`status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,reference_bfs_cost`.
+`status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,reference_bfs_cost,robot_radius_m,inflation_time_ms`.
 The two path-length fields are empty when planning fails. `reference_bfs_cost` is empty
 unless `--reference-bfs` was given, and `-1` when the reference BFS found no path.
+
+**`inflated_map.csv`** (only with `--robot-radius` > 0): the map A* planned on, in the
+same format as input maps.
 
 **`trajectory.csv`**: `time,x,y,target_waypoint_index`. One row per timestep, from
 `t = 0` (start-cell center) to the final position; `x`, `y` in meters.
@@ -277,7 +315,7 @@ unless `--reference-bfs` was given, and `-1` when the reference BFS found no pat
 last index once the goal is reached). Header only when planning fails.
 
 **`simulation_metrics.csv`**: one row with
-`status,success,navigation_success,steps,travel_time_s,distance_traveled_m,final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s`.
+`status,success,navigation_success,steps,travel_time_s,distance_traveled_m,final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,robot_radius_m`.
 Travel time is the final timestamp minus the initial timestamp. The distance, time and
 error fields are empty when the simulation did not run.
 
@@ -342,7 +380,7 @@ python3 python/analyze_results.py run --results-dir results   # metrics of one r
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 16 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 21 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -359,7 +397,7 @@ robot-nav-simulator/
 ├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
 ├── python/                 generate_map, visualize_map, animate_robot, run_demo,
 │                           run_benchmark, analyze_results
-├── maps/                   sample maps (empty, obstacles, corridor, maze)
+├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine)
 ├── scripts/                build.sh, test.sh, run.sh
 ├── docs/                   architecture, algorithms, testing, performance,
 │                           benchmark data and images
@@ -368,9 +406,10 @@ robot-nav-simulator/
 
 ## Known limitations
 
-- Point robot: no physical footprint, orientation or dynamics, so paths and the
-  trajectory may run right next to obstacles. The collision check does not account for
-  a robot radius.
+- The footprint is a disc, and the robot has no orientation or dynamics. Inflation is
+  evaluated at cell centers, so on a coarse grid it can reject a passage the robot would
+  physically fit through (safe, but conservative); use a resolution that is small
+  compared with the radius.
 - Leftover step distance is not carried over to the next waypoint. When `speed × dt`
   does not divide the cell size, the robot loses part of a timestep at every waypoint,
   so travel time is slightly longer than `path length / speed`.
@@ -403,8 +442,8 @@ robot-nav-simulator/
 
 ### Future improvements
 
+- ✅ **Robot footprint:** disc robot with obstacle inflation (`--robot-radius`).
 - **8-connected A*:** diagonal moves with an octile heuristic and no corner-cutting.
-- **Finite robot footprint:** obstacle inflation by the robot radius.
 - **Differential-drive robot:** `x, y, θ` with linear and angular velocity, plus a
   waypoint-following controller (P vs. PID comparison).
 - **Simulated 2D LiDAR:** ray casting.

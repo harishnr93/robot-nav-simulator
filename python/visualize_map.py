@@ -34,7 +34,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import ListedColormap
-from matplotlib.patches import Patch
+from matplotlib.patches import Circle, Patch
 
 FREE_COLOR = "#f2f2f2"
 OCCUPIED_COLOR = "#3c3c3c"
@@ -42,6 +42,7 @@ START_COLOR = "#2ca02c"
 GOAL_COLOR = "#d62728"
 PATH_COLOR = "#1f77b4"
 ROBOT_COLOR = "#ff7f0e"
+INFLATED_COLOR = "#e7c9a9"   # free cells where the robot footprint does not fit
 TRAJECTORY_COLOR = "#7b2d9e"
 GRID_LINE_COLOR = "#c8c8c8"
 MAX_LABELED_TICKS = 25
@@ -80,6 +81,7 @@ class PlanningMetrics:
     expanded_nodes: int
     path_length_steps: int | None
     path_length_m: float | None
+    robot_radius: float = 0.0       # m; 0 = point robot (older results have no column)
 
 
 def load_map(path: Path) -> np.ndarray:
@@ -135,9 +137,25 @@ def load_metrics(path: Path) -> PlanningMetrics:
             expanded_nodes=int(row["expanded_nodes"]),
             path_length_steps=int(row["path_length_steps"]) if success else None,
             path_length_m=float(row["path_length_m"]) if success else None,
+            robot_radius=float(row.get("robot_radius_m") or 0.0),
         )
     except ValueError as error:
         raise ResultFileError(f"'{path}' has a malformed value: {error}") from error
+
+
+def load_inflated_map(results_dir: Path, grid: np.ndarray,
+                      metrics: PlanningMetrics) -> np.ndarray | None:
+    """The planning map written by the simulator for a robot footprint, or None.
+
+    The inflation itself is computed only in C++; Python just displays it.
+    """
+    if metrics.robot_radius <= 0.0:
+        return None
+    path = results_dir / "inflated_map.csv"
+    inflated = load_map(path)
+    if inflated.shape != grid.shape or np.any(grid > inflated):
+        raise ResultFileError(f"'{path}' does not match the map (re-run the simulator)")
+    return inflated
 
 
 def load_path(path: Path) -> np.ndarray:
@@ -262,6 +280,25 @@ def draw_grid(ax, grid: np.ndarray, resolution: float) -> None:
     ax.secondary_yaxis("right", functions=(to_meters, to_grid)).set_ylabel("y (m)")
 
 
+def draw_inflation(ax, grid: np.ndarray, inflated: np.ndarray | None) -> list:
+    """Shade free cells that are blocked for the robot center. Returns legend handles."""
+    if inflated is None:
+        return []
+    band = (inflated == 1) & (grid == 0)
+    height, width = grid.shape
+    ax.imshow(np.ma.masked_where(~band, band), cmap=ListedColormap([INFLATED_COLOR]),
+              vmin=0, vmax=1, interpolation="nearest", zorder=0.5,
+              extent=(-0.5, width - 0.5, height - 0.5, -0.5))
+    return [Patch(facecolor=INFLATED_COLOR, label="Inflated (too close for the robot)")]
+
+
+def robot_disc(center_grid: tuple[float, float], radius_m: float, resolution: float,
+               label: str | None = None) -> Circle:
+    """True-size robot footprint in grid coordinates."""
+    return Circle(center_grid, radius_m / resolution, facecolor=ROBOT_COLOR,
+                  edgecolor="black", linewidth=1.0, alpha=0.9, zorder=3.5, label=label)
+
+
 def draw_start_goal(ax, start: tuple[int, int], goal: tuple[int, int]) -> None:
     ax.plot(*start, marker="o", markersize=11, color=START_COLOR,
             markeredgecolor="white", markeredgewidth=1.5, linestyle="none",
@@ -276,30 +313,39 @@ def _legend_handles():
             Patch(facecolor=OCCUPIED_COLOR, label="Obstacle")]
 
 
-def _finish(fig, ax, output: Path) -> None:
+def _finish(fig, ax, output: Path, extra_handles: list | None = None) -> None:
     handles, _ = ax.get_legend_handles_labels()
-    fig.legend(handles=_legend_handles() + handles, loc="outside lower center",
-               ncol=3, frameon=False)
+    fig.legend(handles=_legend_handles() + (extra_handles or []) + handles,
+               loc="outside lower center", ncol=3, frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=FIGURE_DPI)
     print(f"Saved {output}")
 
 
-def plot_map(grid: np.ndarray, resolution: float, start, goal, output: Path):
+def _radius_note(robot_radius: float) -> str:
+    return f", robot radius {robot_radius:g} m" if robot_radius > 0 else ""
+
+
+def plot_map(grid: np.ndarray, resolution: float, start, goal, output: Path,
+             inflated: np.ndarray | None = None, robot_radius: float = 0.0):
     fig, ax = plt.subplots(figsize=FIGURE_SIZE, layout="constrained")
     draw_grid(ax, grid, resolution)
+    extra = draw_inflation(ax, grid, inflated)
     if start is not None and goal is not None:
         draw_start_goal(ax, start, goal)
     height, width = grid.shape
-    fig.suptitle(f"Occupancy grid  ({width} x {height} cells, {resolution:g} m/cell)")
-    _finish(fig, ax, output)
+    fig.suptitle(f"Occupancy grid  ({width} x {height} cells, {resolution:g} m/cell"
+                 f"{_radius_note(robot_radius)})")
+    _finish(fig, ax, output, extra)
     return fig
 
 
 def plot_planned_path(grid: np.ndarray, metrics: PlanningMetrics,
-                      waypoints: np.ndarray, output: Path):
+                      waypoints: np.ndarray, output: Path,
+                      inflated: np.ndarray | None = None):
     fig, ax = plt.subplots(figsize=FIGURE_SIZE, layout="constrained")
     draw_grid(ax, grid, metrics.resolution)
+    extra = draw_inflation(ax, grid, inflated)
     if metrics.success and len(waypoints) > 0:
         ax.plot(waypoints[:, 0], waypoints[:, 1], color=PATH_COLOR, linewidth=2.5,
                 marker="o", markersize=3.5, label="Planned A* path", zorder=3)
@@ -314,16 +360,18 @@ def plot_planned_path(grid: np.ndarray, metrics: PlanningMetrics,
                           edgecolor=GOAL_COLOR, linewidth=2))
         title = f"Planning failed: {metrics.status}"
     draw_start_goal(ax, metrics.start, metrics.goal)
-    fig.suptitle(title)
-    _finish(fig, ax, output)
+    fig.suptitle(title + _radius_note(metrics.robot_radius))
+    _finish(fig, ax, output, extra)
     return fig
 
 
 def plot_trajectory(grid: np.ndarray, metrics: PlanningMetrics, waypoints: np.ndarray,
-                    trajectory: np.ndarray, sim: SimulationMetrics, output: Path):
+                    trajectory: np.ndarray, sim: SimulationMetrics, output: Path,
+                    inflated: np.ndarray | None = None):
     """Planned path (blue) underneath the actual robot trajectory (purple)."""
     fig, ax = plt.subplots(figsize=FIGURE_SIZE, layout="constrained")
     draw_grid(ax, grid, metrics.resolution)
+    extra = draw_inflation(ax, grid, inflated)
     if len(waypoints) > 0:
         ax.plot(waypoints[:, 0], waypoints[:, 1], color=PATH_COLOR, linewidth=6,
                 alpha=0.35, solid_capstyle="round", label="Planned A* path", zorder=2)
@@ -333,14 +381,19 @@ def plot_trajectory(grid: np.ndarray, metrics: PlanningMetrics, waypoints: np.nd
             label="Robot trajectory", zorder=3)
     draw_start_goal(ax, metrics.start, metrics.goal)
     # Drawn beneath the goal star (zorder 4) so both stay visible at the goal.
-    ax.plot(traj_x[-1], traj_y[-1], marker="o", markersize=15, color=ROBOT_COLOR,
-            markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
-            label="Robot (final position)", zorder=3.5)
+    if metrics.robot_radius > 0:
+        ax.add_patch(robot_disc((traj_x[-1], traj_y[-1]), metrics.robot_radius,
+                                metrics.resolution,
+                                f"Robot footprint, final (r = {metrics.robot_radius:g} m)"))
+    else:
+        ax.plot(traj_x[-1], traj_y[-1], marker="o", markersize=15, color=ROBOT_COLOR,
+                markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
+                label="Robot (final position)", zorder=3.5)
     time_s = trajectory[-1, TRAJ_TIME] - trajectory[0, TRAJ_TIME]
     distance = sim.distance_traveled_m or 0.0
     fig.suptitle(f"Navigation: {sim.status}  |  {time_s:.1f} s, {distance:.2f} m "
                  f"traveled, {sim.collision_count} collision(s)")
-    _finish(fig, ax, output)
+    _finish(fig, ax, output, extra)
     return fig
 
 
@@ -368,7 +421,7 @@ def plot_position_vs_time(trajectory: np.ndarray, sim: SimulationMetrics, output
 
 def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
                             waypoints: np.ndarray, results_dir: Path,
-                            output_dir: Path) -> None:
+                            output_dir: Path, inflated: np.ndarray | None = None) -> None:
     """Trajectory figures, if the simulator produced a trajectory."""
     trajectory_file = results_dir / "trajectory.csv"
     if not trajectory_file.is_file():
@@ -381,7 +434,7 @@ def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
               f"skipping trajectory figures")
         return
     plot_trajectory(grid, metrics, waypoints, trajectory, sim,
-                    output_dir / "trajectory.png")
+                    output_dir / "trajectory.png", inflated)
     plot_position_vs_time(trajectory, sim, output_dir / "robot_position_vs_time.png")
 
 
@@ -424,12 +477,13 @@ def main(argv: list[str] | None = None) -> int:
             metrics = load_metrics(args.results_dir / "planning_metrics.csv")
             waypoints = load_path(args.results_dir / "path.csv")
             check_results_match_map(grid, metrics, waypoints, args.map)
+            inflated = load_inflated_map(args.results_dir, grid, metrics)
             plot_map(grid, metrics.resolution, metrics.start, metrics.goal,
-                     output_dir / "map_visualization.png")
+                     output_dir / "map_visualization.png", inflated, metrics.robot_radius)
             plot_planned_path(grid, metrics, waypoints,
-                              output_dir / "planned_path.png")
+                              output_dir / "planned_path.png", inflated)
             plot_simulation_results(grid, metrics, waypoints, args.results_dir,
-                                    output_dir)
+                                    output_dir, inflated)
     except ResultFileError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

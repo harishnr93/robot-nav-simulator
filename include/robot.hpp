@@ -34,7 +34,11 @@ struct MotionConfig {
     double dt = 0.1;               ///< simulation timestep, s
     double goal_tolerance = 0.05;  ///< max final distance to the goal center, m
     double max_time = 600.0;       ///< simulation time limit, s (prevents endless runs)
+    double robot_radius = 0.0;     ///< footprint disc radius, m (0 = point robot)
 };
+
+/// Upper bound on the robot radius, m (keeps footprint searches bounded).
+constexpr double kMaxRobotRadius = 100.0;
 
 /// Upper bound on max_time / dt, which bounds the trajectory's memory use.
 constexpr double kMaxSimulationSteps = 1e7;

@@ -27,6 +27,7 @@ add_library(amr_core STATIC
     src/astar.cpp
     src/robot.cpp
     src/simulator.cpp
+    src/footprint.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -54,7 +55,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -91,6 +92,31 @@ if(AMR_BUILD_TESTS)
                 --start 0 0 --goal 4 4 --reference-bfs --output ${CLI_OUT}/reference_none)
     set_tests_properties(cli_reference_bfs_no_path PROPERTIES
         PASS_REGULAR_EXPRESSION "Reference BFS: +no path \\(matches A\\*\\)")
+
+    add_test(NAME cli_footprint_fine_map
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles_fine.csv
+                --resolution 0.25 --start 20 2 --goal 20 37 --robot-radius 0.2
+                --reference-bfs --output ${CLI_OUT}/footprint_fine)
+    set_tests_properties(cli_footprint_fine_map PROPERTIES
+        PASS_REGULAR_EXPRESSION "Reference BFS: +45 steps \\(matches A\\*\\).*Navigation: +GOAL_REACHED")
+
+    add_test(NAME cli_footprint_too_wide_for_gaps
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-radius 0.3 --output ${CLI_OUT}/footprint_wide)
+    set_tests_properties(cli_footprint_too_wide_for_gaps PROPERTIES
+        PASS_REGULAR_EXPRESSION "Planner status: NO_PATH")
+
+    add_test(NAME cli_footprint_start_too_close
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 3 5 --goal 18 18 --robot-radius 0.3 --output ${CLI_OUT}/footprint_close)
+    set_tests_properties(cli_footprint_start_too_close PROPERTIES
+        PASS_REGULAR_EXPRESSION "Planner status: START_TOO_CLOSE_TO_OBSTACLE")
+
+    add_test(NAME cli_rejects_negative_radius
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --robot-radius -0.1)
+    set_tests_properties(cli_rejects_negative_radius PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid motion parameters: robot radius")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv
