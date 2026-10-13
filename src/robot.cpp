@@ -29,6 +29,21 @@ std::string validateMotionConfig(const MotionConfig& config) {
         config.robot_radius > kMaxRobotRadius) {
         return "robot radius must be between 0 and 100 m";
     }
+    if (config.model == RobotModel::DiffDrive) {  // parameters used only by this model
+        if (!isPositiveFinite(config.max_angular_speed)) {
+            return "maximum angular speed must be a positive finite number";
+        }
+        if (!isPositiveFinite(config.heading_gain) || config.heading_gain * config.dt > 1.0) {
+            return "heading gain must be positive with heading_gain * dt <= 1 (no overshoot)";
+        }
+        if (!isPositiveFinite(config.heading_tolerance) ||
+            config.heading_tolerance > config.max_angular_speed * config.dt) {
+            return "heading tolerance must be positive and at most max_angular_speed * dt";
+        }
+        if (!std::isfinite(config.initial_heading)) {
+            return "initial heading must be finite";
+        }
+    }
     if (config.max_time / config.dt > kMaxSimulationSteps) {
         return "max_time / dt exceeds the supported number of simulation steps";
     }

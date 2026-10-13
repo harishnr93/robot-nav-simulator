@@ -19,6 +19,17 @@
 //     see footprint.hpp). Touching is allowed.
 // The check always uses the real map, never the inflated planning map, so it is an
 // independent verification of the planned path.
+//
+// Robot models (MotionConfig::model):
+//   * Point: moves straight toward the next waypoint at constant speed.
+//   * DiffDrive: pose (x, y, theta), inputs (v, omega), unicycle kinematics
+//     (diff_drive.hpp). Turn-then-drive controller: if the heading differs from the
+//     direction to the next waypoint by more than kDriveAlignment, the robot rotates
+//     in place (v = 0) with the P heading controller, limited to max_angular_speed;
+//     otherwise it drives straight to the waypoint (omega = 0) exactly like the
+//     point robot. The center therefore stays on the planned path, so the
+//     planner's footprint and corner guarantees still hold. Collinear waypoints
+//     are passed without stopping.
 #pragma once
 
 #include <cstddef>
@@ -57,6 +68,10 @@ struct TrajectorySample {
     /// Index of the waypoint the robot is heading to after this sample.
     /// Equals the last waypoint index once the goal has been reached.
     std::size_t target_waypoint_index = 0;
+    /// Differential drive: velocities applied during the step that ended at this
+    /// sample (0 for the first sample).
+    double linear_velocity = 0.0;   ///< m/s
+    double angular_velocity = 0.0;  ///< rad/s
 };
 
 struct SimulationResult {
@@ -68,6 +83,10 @@ struct SimulationResult {
     std::size_t collision_count = 0;      ///< 0 or 1: the simulation stops at a collision
     double distance_traveled = 0.0;       ///< m
     double final_goal_error = 0.0;        ///< distance from final position to goal center, m
+    // Differential drive only:
+    double turn_time = 0.0;               ///< time spent rotating in place, s
+    double total_rotation = 0.0;          ///< sum of |omega| * dt, rad
+    std::size_t turns = 0;                ///< number of separate turn-in-place maneuvers
 
     bool success() const { return status == NavigationStatus::GoalReached; }
     /// final timestamp - initial timestamp, s (0 if no trajectory).
@@ -77,6 +96,10 @@ struct SimulationResult {
 /// True if every point of segment a->b lies in a free, in-bounds cell
 /// (sampled at intervals of at most resolution / kCollisionSamplesPerCell).
 bool isSegmentCollisionFree(const GridMap& map, WorldPoint a, WorldPoint b);
+
+/// Differential drive: the robot drives only when its heading is within this
+/// angle of the direction to the next waypoint; otherwise it turns in place, rad.
+constexpr double kDriveAlignment = 1e-6;
 
 /// Number of collision samples per cell length along a segment.
 constexpr int kCollisionSamplesPerCell = 20;

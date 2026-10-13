@@ -49,6 +49,14 @@ comes from a reproducible benchmark.
   steps and meters.
 - Point-robot motion simulation: constant speed, fixed timestep, step clamped so the
   robot never overshoots a waypoint, time limit against endless runs.
+- Differential-drive robot (`--robot-model diff-drive`): pose `(x, y, θ)` driven by linear
+  and angular velocity with exact unicycle kinematics, a proportional heading controller
+  with turn-rate limit, and a turn-then-drive waypoint follower that keeps the robot on
+  the planned path. The trajectory, plots and animation show the heading.
+- P vs. PID heading-control study (`heading_experiment`): a heading with motor lag and a
+  disturbance, both controllers (PID with derivative on the measurement and anti-windup)
+  in four scenarios, with overshoot, settling time, steady-state and tracking error and
+  control effort, and plots. Validated against second-order control theory.
 - Motion-time collision checking of every movement segment against the occupancy grid
   (point or disc robot).
 - Navigation status: `GOAL_REACHED`, `COLLISION`, `TIMEOUT`, `INVALID_PATH`,
@@ -67,7 +75,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 55 C++ test cases, 20 end-to-end CLI checks and 36 Python tests, including A* vs. BFS
+- 73 C++ test cases, 26 end-to-end CLI checks and 45 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -187,6 +195,10 @@ and no timeout.
 | `--max-time S` | simulation time limit, s | `600` |
 | `--robot-radius M` | robot footprint radius, m; obstacles are inflated by it | `0` (point robot) |
 | `--connectivity 4\|8` | grid moves: 4 = straight only, 8 = also diagonal | `4` |
+| `--robot-model MODEL` | `point` or `diff-drive` | `point` |
+| `--max-angular-speed W` | differential drive: turn-rate limit, rad/s | `1.5` |
+| `--heading-gain K` | differential drive: heading P gain, 1/s (`K × dt ≤ 1`) | `5.0` |
+| `--initial-heading DEG` | differential drive: heading at t = 0 (0 = facing +x, 90 = facing down the map) | `0` |
 | `--reference-bfs` | also run the reference search (BFS, or exact Dijkstra for 8-connectivity) and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
@@ -243,7 +255,8 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 ```
 
 `run_demo.py` accepts the simulator's options (`--speed`, `--dt`, `--goal-tolerance`,
-`--max-time`, `--robot-radius`, `--connectivity`, `--resolution`, `--output`), the animation options `--animate`,
+`--max-time`, `--robot-radius`, `--connectivity`, `--robot-model`, `--max-angular-speed`,
+`--heading-gain`, `--initial-heading`, `--resolution`, `--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
 Its exit code is the simulator's (for example `4` when there is no path).
@@ -260,6 +273,72 @@ Its exit code is the simulator's (for example `4` when there is no path).
 
 The first four maps have one-cell (0.5 m) gaps and are meant for a point robot. Use
 `maps/obstacles_fine.csv` for a robot footprint: it has the same layout at 0.25 m cells.
+
+### P vs. PID heading control
+
+```bash
+./build/heading_experiment                       # -> results/heading/*.csv + summary table
+python3 python/plot_heading_control.py           # -> results/heading/*.png
+./build/heading_experiment --sweep               # the PID gain grid behind the default gains
+```
+
+The study compares P (`Kp = 4`) and PID (`Kp = 4, Ki = 2, Kd = 0.4`) on a robot heading
+whose motor follows commands with a 0.25 s lag, in four scenarios:
+
+- a 90° step;
+- a 90° step with a constant 0.3 rad/s disturbance (wheel slip);
+- following an arc (a ramp);
+- the heading profile of a planned path.
+
+| | P | PID |
+|---|---|---|
+| 90° step: overshoot / settling time | 7.3 % / 2.08 s | 5.4 % / 2.52 s |
+| with disturbance: settling / steady-state error | never / −4.3° | 3.55 s / −0.05° |
+| arc (ramp): steady-state lag / IAE | 7.2° / 1.25 rad·s | 0.04° / 0.35 rad·s |
+| planned path: IAE / control effort | 4.24 rad·s / 10.5 rad | 4.49 rad·s / 8.9 rad |
+
+| Step with a disturbance | All metrics |
+|---|---|
+| ![Step with disturbance](docs/images/heading_step_disturbance.png) | ![P vs. PID metrics](docs/images/heading_metrics.png) |
+
+PID is the only one of the two that removes a persistent heading error, whether from a
+disturbance or from following a curve. It also overshoots less and uses less control
+effort. P settles a little faster on a clean step and tracks frequent steps marginally
+better. The simulation is validated against theory: P's overshoot matches the
+closed-form second-order value within 0.2 percentage points, and its steady-state errors
+equal `d/Kp` and `rate/Kp`. Full analysis:
+[docs/algorithms.md](docs/algorithms.md#11-p-vs-pid-heading-control-heading_experiment).
+
+### Differential-drive robot
+
+```bash
+python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
+    --connectivity 8 --robot-model diff-drive --save-gif
+```
+
+```text
+Navigation:     GOAL_REACHED
+Motion:         385 steps of 0.10 s at 0.50 m/s, travel time 38.50 s, distance 14.66 m
+Heading:        differential drive, 8 turns in place, 8.50 s turning, total rotation 7.07 rad, final heading 45.00 deg
+```
+
+![Differential-drive robot turning and driving](docs/images/navigation_diff_drive.gif)
+
+| Trajectory with heading arrows | Position and heading vs. time |
+|---|---|
+| ![Differential-drive trajectory](docs/images/diff_drive_trajectory.png) | ![Heading vs. time](docs/images/diff_drive_heading_vs_time.png) |
+
+The robot has a heading `θ` and is driven by a linear velocity `v ≤ --speed` and an
+angular velocity `|ω| ≤ --max-angular-speed`. At each waypoint where the path changes
+direction, it **turns in place** under a proportional heading controller: saturated at
+the turn-rate limit, then an exponential approach, then an exact final step, with no
+overshoot. Then it **drives straight** to the next waypoint. Its center therefore stays
+exactly on the planned path, so the footprint and corner-cutting guarantees still hold.
+
+Turning costs time. On the obstacles map, the 8-connected path is 14 % shorter than the
+4-connected one but has 8 turns instead of 3, so both take 38.5 s. In the maze, 14 turns
+add 21 s to a 60 s drive. Details and measurements:
+[docs/algorithms.md](docs/algorithms.md#10-differential-drive-robot---robot-model-diff-drive).
 
 ### 8-connected planning
 
@@ -346,12 +425,16 @@ same format as input maps.
 **`trajectory.csv`**: `time,x,y,target_waypoint_index`. One row per timestep, from
 `t = 0` (start-cell center) to the final position; `x`, `y` in meters.
 `target_waypoint_index` is the waypoint the robot is heading to after that sample (the
-last index once the goal is reached). Header only when planning fails.
+last index once the goal is reached). With `--robot-model diff-drive` three columns
+follow: `theta` (heading, rad), `linear_velocity` (m/s) and `angular_velocity` (rad/s),
+where the velocities are those applied during the step that ended at the sample. Header
+only when planning fails.
 
 **`simulation_metrics.csv`**: one row with
-`status,success,navigation_success,steps,travel_time_s,distance_traveled_m,final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,robot_radius_m`.
+`status,success,navigation_success,steps,travel_time_s,distance_traveled_m,final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,robot_radius_m,robot_model,turns,turn_time_s,total_rotation_rad,final_heading_rad`.
 Travel time is the final timestamp minus the initial timestamp. The distance, time and
-error fields are empty when the simulation did not run.
+error fields are empty when the simulation did not run. `turns` through
+`final_heading_rad` are filled for the differential-drive model only.
 
 ## Algorithm summary
 
@@ -418,7 +501,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 26 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 34 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -430,11 +513,12 @@ and static-analysis results.
 ```text
 robot-nav-simulator/
 ├── CMakeLists.txt          build, tests (CTest) and benchmark targets
-├── include/, src/          C++17 core: grid_map, astar, robot, simulator, csv_writer, main (CLI)
+├── include/, src/          C++17 core: grid_map, astar, footprint, robot, diff_drive, simulator,
+│                           heading_control, csv_writer, main (CLI), heading_experiment
 ├── tests/                  C++ unit tests, Python tests, test map fixtures (tests/data/)
 ├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
 ├── python/                 generate_map, visualize_map, animate_robot, run_demo,
-│                           run_benchmark, analyze_results
+│                           run_benchmark, analyze_results, plot_heading_control
 ├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine)
 ├── scripts/                build.sh, test.sh, run.sh
 ├── docs/                   architecture, algorithms, testing, performance,
@@ -444,7 +528,10 @@ robot-nav-simulator/
 
 ## Known limitations
 
-- The footprint is a disc, and the robot has no orientation or dynamics. Inflation is
+- The differential-drive model has turn-rate but no acceleration limits, and it stops to
+  turn at every corner. The planner minimises path length, not travel time including
+  turns.
+- The footprint is a disc (no rectangular or oriented robots). Inflation is
   evaluated at cell centers, so on a coarse grid it can reject a passage the robot would
   physically fit through (safe, but conservative); use a resolution that is small
   compared with the radius.
@@ -483,8 +570,14 @@ robot-nav-simulator/
 - ✅ **Robot footprint:** disc robot with obstacle inflation (`--robot-radius`).
 - ✅ **8-connected A*:** diagonal moves with an octile heuristic and no corner-cutting
   (`--connectivity 8`).
-- **Differential-drive robot:** `x, y, θ` with linear and angular velocity, plus a
-  waypoint-following controller (P vs. PID comparison).
+- ✅ **Differential-drive robot:** `x, y, θ` with linear and angular velocity and a
+  waypoint-following controller (`--robot-model diff-drive`).
+- ✅ **P vs. PID heading control:** compared on tracking error, overshoot, settling
+  time and control effort (`heading_experiment`).
+- **Realistic actuator in navigation:** use the lagged, disturbed heading plant and the
+  PID controller inside the navigation simulator (with path-tracking error as a metric).
+- **Turn-aware planning:** charge for turns so a differential-drive robot gets the
+  fastest route, not just the shortest.
 - **Simulated 2D LiDAR:** ray casting.
 - **EKF localization:** from noisy odometry.
 - **Dynamic obstacles:** with replanning, where `AStarPlanner`'s reusable buffers already

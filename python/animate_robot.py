@@ -104,6 +104,22 @@ def target_waypoint_at(trajectory: np.ndarray, t: float) -> int:
     return int(trajectory[index, vm.TRAJ_TARGET])
 
 
+def heading_at(trajectory: np.ndarray, t: float) -> float:
+    """Heading (rad) at time t, interpolated on the unwrapped angle so the robot never
+    spins the long way round between two samples."""
+    return float(np.interp(t, trajectory[:, vm.TRAJ_TIME],
+                           np.unwrap(trajectory[:, vm.TRAJ_THETA])))
+
+
+def is_turning_at(trajectory: np.ndarray, t: float) -> bool:
+    """True if the timestep containing t is a turn in place (v = 0, omega != 0)."""
+    index = int(np.searchsorted(trajectory[:, vm.TRAJ_TIME], t, side="right"))
+    if index >= len(trajectory):
+        return False
+    return (trajectory[index, vm.TRAJ_V] == 0.0 and
+            trajectory[index, vm.TRAJ_OMEGA] != 0.0)
+
+
 def check_trajectory_matches(metrics: vm.PlanningMetrics,
                              trajectory: np.ndarray) -> None:
     """The trajectory must start at the planned start-cell center."""
@@ -145,6 +161,12 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
         (robot,) = ax.plot([], [], marker="o", markersize=13, color=vm.ROBOT_COLOR,
                            markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
                            label="Robot", zorder=3.5)
+    with_heading = vm.has_heading(trajectory)
+    if with_heading:
+        # Heading indicator: from the robot center, in the direction it faces.
+        heading_length = max(metrics.robot_radius / res, 0.9)  # grid cells
+        (heading_line,) = ax.plot([], [], color=vm.HEADING_COLOR, linewidth=2.5,
+                                  solid_capstyle="round", label="Heading", zorder=3.6)
     text_box = dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.9,
                     edgecolor=vm.GRID_LINE_COLOR)
     time_text = ax.text(0.02, 0.98, "", transform=ax.transAxes, ha="left", va="top",
@@ -152,7 +174,8 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
     status_text = ax.text(0.98, 0.98, "", transform=ax.transAxes, ha="right",
                           va="top", fontsize=11, fontweight="bold", zorder=6,
                           bbox=dict(text_box))
-    fig.suptitle(f"Robot navigation  ({sim.speed_mps:g} m/s, dt {sim.dt_s:g} s, "
+    model = "differential drive, " if with_heading else ""
+    fig.suptitle(f"Robot navigation  ({model}{sim.speed_mps:g} m/s, dt {sim.dt_s:g} s, "
                  f"playback {playback_speed:.1f}x)")
     handles, _ = ax.get_legend_handles_labels()
     fig.legend(handles=vm._legend_handles() + extra_handles + handles,
@@ -175,12 +198,19 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
         time_text.set_text(f"t = {t - t_start:5.1f} s / {t_end - t_start:.1f} s")
         if frame < len(moving_times) - 1:
             target = target_waypoint_at(trajectory, t)
-            status_text.set_text(f"NAVIGATING  waypoint {target}/{last_waypoint}")
+            action = "TURNING" if with_heading and is_turning_at(trajectory, t) else "NAVIGATING"
+            status_text.set_text(f"{action}  waypoint {target}/{last_waypoint}")
             status_text.get_bbox_patch().set_edgecolor(vm.GRID_LINE_COLOR)
         else:
             status_text.set_text(sim.status)
             status_text.get_bbox_patch().set_edgecolor(
                 STATUS_EDGE_COLORS.get(sim.status, vm.GOAL_COLOR))
+        if with_heading:
+            theta = heading_at(trajectory, t)
+            cx, cy = vm.world_to_grid(x, res), vm.world_to_grid(y, res)
+            heading_line.set_data([cx, cx + heading_length * np.cos(theta)],
+                                  [cy, cy + heading_length * np.sin(theta)])
+            return robot, trail, heading_line, time_text, status_text
         return robot, trail, time_text, status_text
 
     anim = animation.FuncAnimation(fig, update, frames=len(times),

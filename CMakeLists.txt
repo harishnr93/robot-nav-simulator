@@ -28,6 +28,8 @@ add_library(amr_core STATIC
     src/robot.cpp
     src/simulator.cpp
     src/footprint.cpp
+    src/diff_drive.cpp
+    src/heading_control.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -38,6 +40,13 @@ target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
 add_executable(robot_simulator src/main.cpp)
 target_link_libraries(robot_simulator PRIVATE amr_core)
 target_compile_options(robot_simulator PRIVATE ${AMR_WARNING_FLAGS})
+
+# ---------------------------------------------------------------------------
+# P vs. PID heading-control experiment (run with: ./build/heading_experiment)
+# ---------------------------------------------------------------------------
+add_executable(heading_experiment src/heading_experiment.cpp)
+target_link_libraries(heading_experiment PRIVATE amr_core)
+target_compile_options(heading_experiment PRIVATE ${AMR_WARNING_FLAGS})
 
 # ---------------------------------------------------------------------------
 # Micro-benchmark (run with: ./build/bench_planner [--quick])
@@ -55,7 +64,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -143,6 +152,42 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 2 2 --connectivity 6)
     set_tests_properties(cli_rejects_bad_connectivity PROPERTIES
         PASS_REGULAR_EXPRESSION "--connectivity must be 4 or 8")
+
+    add_test(NAME cli_diff_drive_obstacles_map
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --output ${CLI_OUT}/diff_drive)
+    set_tests_properties(cli_diff_drive_obstacles_map PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*travel time 38.50 s.*3 turns in place, 4.50 s turning")
+
+    add_test(NAME cli_diff_drive_footprint_octile
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles_fine.csv
+                --resolution 0.25 --start 20 2 --goal 20 37 --robot-radius 0.2
+                --connectivity 8 --robot-model diff-drive --initial-heading 90
+                --output ${CLI_OUT}/diff_drive_combined)
+    set_tests_properties(cli_diff_drive_footprint_octile PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*collisions 0.*differential drive")
+
+    add_test(NAME cli_rejects_bad_robot_model
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --robot-model tank)
+    set_tests_properties(cli_rejects_bad_robot_model PROPERTIES
+        PASS_REGULAR_EXPRESSION "--robot-model must be point or diff-drive")
+
+    add_test(NAME cli_rejects_overshooting_heading_gain
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --robot-model diff-drive --heading-gain 20)
+    set_tests_properties(cli_rejects_overshooting_heading_gain PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid motion parameters: heading gain")
+
+    add_test(NAME heading_experiment_p_vs_pid
+        COMMAND heading_experiment --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --output ${CLI_OUT}/heading)
+    set_tests_properties(heading_experiment_p_vs_pid PROPERTIES
+        PASS_REGULAR_EXPRESSION "step_disturbance  P +[0-9.]+% +never.*step_disturbance  PID +[0-9.]+% +[0-9.]+ s")
+
+    add_test(NAME heading_experiment_rejects_bad_gain
+        COMMAND heading_experiment --kp -1)
+    set_tests_properties(heading_experiment_rejects_bad_gain PROPERTIES WILL_FAIL TRUE)
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

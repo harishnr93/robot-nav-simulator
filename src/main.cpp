@@ -36,6 +36,7 @@ enum ExitCode : int {
 };
 
 constexpr double kDefaultResolution = 0.5;  // meters per cell
+constexpr double kRadiansPerDegree = 3.14159265358979323846 / 180.0;
 
 struct CliOptions {
     std::string map_file;
@@ -74,6 +75,12 @@ void printUsage(std::ostream& os) {
           "  --dt S                Simulation timestep in s (default 0.1)\n"
           "  --goal-tolerance M    Allowed final distance to the goal in m (default 0.05)\n"
           "  --max-time S          Simulation time limit in s (default 600)\n"
+          "  --robot-model MODEL   point (default) or diff-drive (heading, turn-then-drive)\n"
+          "  --max-angular-speed W Differential drive: angular speed limit in rad/s (1.5)\n"
+          "  --heading-gain K      Differential drive: P gain of the heading controller\n"
+          "                        in 1/s (5.0); K * dt must be at most 1\n"
+          "  --initial-heading DEG Differential drive: heading at t = 0 in degrees, 0 =\n"
+          "                        facing +x, 90 = facing +y (down the map) (default 0)\n"
           "  --robot-radius M      Robot footprint radius in m; obstacles are inflated\n"
           "                        by it for planning (default 0 = point robot)\n"
           "  --output DIR          Output directory (default results/)\n"
@@ -182,6 +189,26 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             ok = parseNumber(options.motion.goal_tolerance);
         } else if (arg == "--max-time") {
             ok = parseNumber(options.motion.max_time);
+        } else if (arg == "--robot-model") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string text = argv[++i];
+                if (text == "point" || text == "diff-drive") {
+                    options.motion.model = text == "point" ? amr::RobotModel::Point
+                                                           : amr::RobotModel::DiffDrive;
+                } else {
+                    error = "--robot-model must be point or diff-drive, got '" + text + "'";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--max-angular-speed") {
+            ok = parseNumber(options.motion.max_angular_speed);
+        } else if (arg == "--heading-gain") {
+            ok = parseNumber(options.motion.heading_gain);
+        } else if (arg == "--initial-heading") {
+            double degrees = 0.0;
+            ok = parseNumber(degrees);
+            options.motion.initial_heading = degrees * kRadiansPerDegree;
         } else if (arg == "--robot-radius") {
             ok = parseNumber(options.motion.robot_radius);
         } else if (arg == "--connectivity") {
@@ -317,6 +344,13 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
         std::cout << std::setprecision(4) << "Goal error:     " << sim.final_goal_error
                   << " m (tolerance " << options.motion.goal_tolerance << " m), collisions "
                   << sim.collision_count << '\n';
+        if (options.motion.model == amr::RobotModel::DiffDrive) {
+            std::cout << std::setprecision(2) << "Heading:        differential drive, "
+                      << sim.turns << " turns in place, " << sim.turn_time
+                      << " s turning, total rotation " << sim.total_rotation
+                      << " rad, final heading "
+                      << sim.trajectory.back().state.theta / kRadiansPerDegree << " deg\n";
+        }
     }
     std::cout << "Results:        " << options.output_dir.string() << '\n';
 }
@@ -361,7 +395,8 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
                                         options.goal, plan, reference.result,
                                         options.motion.robot_radius, inflation.time_ms,
                                         options.connectivity, error) &&
-           amr::writeTrajectoryCsv(dir / "trajectory.csv", sim.trajectory, error) &&
+           amr::writeTrajectoryCsv(dir / "trajectory.csv", sim.trajectory,
+                                   options.motion.model == amr::RobotModel::DiffDrive, error) &&
            amr::writeSimulationMetricsCsv(dir / "simulation_metrics.csv", plan.success(),
                                           options.motion, sim, error);
 }

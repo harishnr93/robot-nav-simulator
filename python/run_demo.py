@@ -53,6 +53,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="allowed final distance to the goal in m (default 0.05)")
     parser.add_argument("--max-time", type=float,
                         help="simulation time limit in s (default 600)")
+    parser.add_argument("--robot-model", choices=("point", "diff-drive"),
+                        help="robot motion model (default point)")
+    parser.add_argument("--max-angular-speed", type=float,
+                        help="differential drive: angular speed limit in rad/s (default 1.5)")
+    parser.add_argument("--heading-gain", type=float,
+                        help="differential drive: heading P gain in 1/s (default 5.0)")
+    parser.add_argument("--initial-heading", type=float,
+                        help="differential drive: heading at t = 0 in degrees (default 0)")
     parser.add_argument("--connectivity", type=int, choices=(4, 8),
                         help="grid moves: 4 = straight (default), 8 = also diagonal")
     parser.add_argument("--robot-radius", type=float,
@@ -84,10 +92,13 @@ def simulator_command(args: argparse.Namespace) -> list[str]:
     optional = (("--resolution", args.resolution), ("--speed", args.speed),
                 ("--dt", args.dt), ("--goal-tolerance", args.goal_tolerance),
                 ("--max-time", args.max_time), ("--robot-radius", args.robot_radius),
-                ("--connectivity", args.connectivity))
+                ("--connectivity", args.connectivity), ("--robot-model", args.robot_model),
+                ("--max-angular-speed", args.max_angular_speed),
+                ("--heading-gain", args.heading_gain),
+                ("--initial-heading", args.initial_heading))
     for flag, value in optional:
         if value is not None:
-            command += [flag, repr(value)]
+            command += [flag, value if isinstance(value, str) else repr(value)]
     return command
 
 

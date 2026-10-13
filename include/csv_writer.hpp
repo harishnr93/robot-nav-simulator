@@ -16,10 +16,14 @@
 // in cell units with 6 decimals (exact Dijkstra) for 8-connectivity.
 // trajectory.csv columns:
 //   time,x,y,target_waypoint_index
+// plus, for the differential-drive model only:
+//   theta,linear_velocity,angular_velocity
+// (heading in rad; velocities applied during the step that ended at the sample)
 // simulation_metrics.csv (one header row, one data row):
 //   status,success,navigation_success,steps,travel_time_s,distance_traveled_m,
 //   final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,
-//   robot_radius_m
+//   robot_radius_m,robot_model,turns,turn_time_s,total_rotation_rad,final_heading_rad
+// (the last four are empty for the point robot)
 // inflated_map.csv (only for robot_radius_m > 0): the planning map, in the same
 // format as input maps (rows of comma-separated 0/1, row 0 first).
 // navigation_success = planning succeeded AND the robot reached the goal without
@@ -63,8 +67,10 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
 bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error);
 
 /// Writes trajectory.csv. An empty trajectory produces a header-only file.
+/// with_heading adds the differential-drive columns.
 bool writeTrajectoryCsv(const std::filesystem::path& file,
-                        const std::vector<TrajectorySample>& trajectory, std::string& error);
+                        const std::vector<TrajectorySample>& trajectory, bool with_heading,
+                        std::string& error);
 
 /// Writes simulation_metrics.csv. `planning_succeeded` feeds navigation_success.
 bool writeSimulationMetricsCsv(const std::filesystem::path& file, bool planning_succeeded,

@@ -13,6 +13,7 @@ constexpr int kMetersPrecision = 4;
 constexpr int kMillisecondsPrecision = 6;
 constexpr int kSecondsPrecision = 6;
 constexpr int kCellsPrecision = 6;
+constexpr int kAnglePrecision = 9;
 
 bool finishWrite(std::ofstream& out, const std::filesystem::path& file, std::string& error) {
     out.flush();
@@ -105,18 +106,25 @@ bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std:
 }
 
 bool writeTrajectoryCsv(const std::filesystem::path& file,
-                        const std::vector<TrajectorySample>& trajectory, std::string& error) {
+                        const std::vector<TrajectorySample>& trajectory, bool with_heading,
+                        std::string& error) {
     std::ofstream out(file);
     if (!out) {
         error = "cannot open '" + file.string() + "' for writing";
         return false;
     }
-    out << "time,x,y,target_waypoint_index\n";
+    out << "time,x,y,target_waypoint_index"
+        << (with_heading ? ",theta,linear_velocity,angular_velocity" : "") << '\n';
     out << std::fixed;
     for (const TrajectorySample& sample : trajectory) {
         out << std::setprecision(kSecondsPrecision) << sample.state.time << ','
             << std::setprecision(kMillisecondsPrecision) << sample.state.x << ','
-            << sample.state.y << ',' << sample.target_waypoint_index << '\n';
+            << sample.state.y << ',' << sample.target_waypoint_index;
+        if (with_heading) {
+            out << ',' << std::setprecision(kAnglePrecision) << sample.state.theta << ','
+                << sample.linear_velocity << ',' << sample.angular_velocity;
+        }
+        out << '\n';
     }
     return finishWrite(out, file, error);
 }
@@ -131,7 +139,7 @@ bool writeSimulationMetricsCsv(const std::filesystem::path& file, bool planning_
     }
     out << "status,success,navigation_success,steps,travel_time_s,distance_traveled_m,"
            "final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,"
-           "robot_radius_m\n";
+           "robot_radius_m,robot_model,turns,turn_time_s,total_rotation_rad,final_heading_rad\n";
     const bool ran = !result.trajectory.empty();
     out << toString(result.status) << ',' << (result.success() ? 1 : 0) << ','
         << (planning_succeeded && result.success() ? 1 : 0) << ',' << result.steps << ',';
@@ -145,7 +153,14 @@ bool writeSimulationMetricsCsv(const std::filesystem::path& file, bool planning_
     }
     out << result.collision_count << ',' << std::setprecision(kMillisecondsPrecision)
         << config.speed << ',' << config.dt << ',' << config.goal_tolerance << ','
-        << config.max_time << ',' << config.robot_radius << '\n';
+        << config.max_time << ',' << config.robot_radius << ',';
+    if (config.model == RobotModel::DiffDrive) {
+        out << "diff-drive," << result.turns << ',' << result.turn_time << ','
+            << result.total_rotation << ',' << std::setprecision(kAnglePrecision)
+            << (ran ? result.trajectory.back().state.theta : config.initial_heading) << '\n';
+    } else {
+        out << "point,,,,\n";
+    }
     return finishWrite(out, file, error);
 }
 

@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #include "astar.hpp"
+#include "diff_drive.hpp"
 #include "footprint.hpp"
 
 namespace amr {
@@ -100,10 +101,13 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
         static_cast<std::size_t>(std::floor(config.max_time / config.dt + 1e-9));
 
     WorldPoint position = waypoints.front();
+    const bool diff_drive = config.model == RobotModel::DiffDrive;
+    double theta = diff_drive ? wrapAngle(config.initial_heading) : 0.0;
     std::size_t target = skipReachedWaypoints(waypoints, 1, position);
-    auto record = [&](double time) {
+    auto record = [&](double time, double v = 0.0, double omega = 0.0) {
         const std::size_t recorded_target = target < waypoints.size() ? target : last_index;
-        result.trajectory.push_back({RobotState{position.x, position.y, time}, recorded_target});
+        result.trajectory.push_back(
+            {RobotState{position.x, position.y, time, theta}, recorded_target, v, omega});
     };
 
     // Exact number of samples for an uninterrupted run: each leg takes
@@ -132,10 +136,37 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
         result.status = NavigationStatus::Collision;
     }
 
+    bool turning = false;
     while (result.status == NavigationStatus::NotRun && target < waypoints.size()) {
         if (result.steps >= max_steps) {
             result.status = NavigationStatus::Timeout;
             break;
+        }
+        if (diff_drive) {
+            // Turn-then-drive controller. While the heading is off the direction to
+            // the next waypoint, rotate in place (v = 0) under the P heading
+            // controller. Once aligned, drive straight to the waypoint (omega = 0),
+            // so the robot's center follows the planned, collision-checked segments.
+            const WorldPoint& waypoint = waypoints[target];
+            const double desired = std::atan2(waypoint.y - position.y, waypoint.x - position.x);
+            const double error = wrapAngle(desired - theta);
+            if (std::fabs(error) > kDriveAlignment) {
+                const double omega = headingControl(error, config.heading_gain,
+                                                    config.max_angular_speed,
+                                                    config.heading_tolerance, config.dt);
+                theta = integrateUnicycle({position.x, position.y, theta}, 0.0, omega,
+                                          config.dt).theta;
+                // A disc rotating in place sweeps no new area: no collision check.
+                result.turns += turning ? 0 : 1;
+                turning = true;
+                result.turn_time += config.dt;
+                result.total_rotation += std::fabs(omega) * config.dt;
+                ++result.steps;
+                record(static_cast<double>(result.steps) * config.dt, 0.0, omega);
+                continue;
+            }
+            turning = false;
+            theta = desired;  // residual error <= kDriveAlignment is absorbed
         }
         const StepResult step = stepToward(position, waypoints[target], step_limit);
         if (!step_is_free(position, step.position)) {
@@ -151,7 +182,8 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
             target = skipReachedWaypoints(waypoints, target + 1, position);
         }
         // Time is computed from the step count (not accumulated) to avoid drift.
-        record(static_cast<double>(result.steps) * config.dt);
+        record(static_cast<double>(result.steps) * config.dt,
+               diff_drive ? step.distance / config.dt : 0.0, 0.0);
     }
 
     result.final_goal_error = distanceBetween(position, goal);

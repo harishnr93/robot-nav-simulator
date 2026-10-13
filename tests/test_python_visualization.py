@@ -33,6 +33,7 @@ from PIL import Image  # noqa: E402
 
 import analyze_results  # noqa: E402
 import animate_robot as ar  # noqa: E402
+import plot_heading_control  # noqa: E402
 import run_benchmark  # noqa: E402
 import run_demo  # noqa: E402
 import visualize_map as vm  # noqa: E402
@@ -361,6 +362,141 @@ class ConnectivityTests(unittest.TestCase):
                                                  self.dir / "b" / "benchmark_runs.csv")
 
 
+@unittest.skipUnless(SIMULATOR.is_file(), f"simulator not built at {SIMULATOR}")
+class DiffDriveVisualizationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18),
+                                       "--robot-model", "diff-drive"), 0)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_heading_columns_are_loaded(self):
+        *_, trajectory, sim = load_results(self.dir, OBSTACLES_MAP)
+        self.assertTrue(vm.has_heading(trajectory))
+        self.assertEqual(trajectory.shape[1], 7)
+        self.assertEqual(sim.robot_model, "diff-drive")
+        self.assertEqual(sim.turns, 3)
+        self.assertAlmostEqual(sim.turn_time_s, 4.5)
+        # Turn-in-place samples: no translation, non-zero angular velocity.
+        turning = (trajectory[:, vm.TRAJ_V] == 0) & (trajectory[:, vm.TRAJ_OMEGA] != 0)
+        self.assertEqual(int(turning.sum()), 45)            # 3 turns x 15 steps
+        moved = np.hypot(np.diff(trajectory[:, vm.TRAJ_X]), np.diff(trajectory[:, vm.TRAJ_Y]))
+        np.testing.assert_array_equal(moved[turning[1:]], 0.0)
+
+    def test_point_trajectory_has_no_heading(self):
+        point_dir = self.dir / "point"
+        self.assertEqual(run_simulator(point_dir, OBSTACLES_MAP, (1, 1), (18, 18)), 0)
+        *_, trajectory, sim = load_results(point_dir, OBSTACLES_MAP)
+        self.assertFalse(vm.has_heading(trajectory))
+        self.assertEqual(trajectory.shape[1], 4)
+        self.assertEqual(sim.robot_model, "point")
+        self.assertIsNone(sim.turns)
+
+    def test_heading_interpolation_takes_the_short_way(self):
+        # theta jumps from +179 deg to -179 deg: the robot turned 2 deg, not 358 deg.
+        trajectory = np.array([[0.0, 1.0, 1.0, 1, np.radians(179), 0.0, 0.2],
+                               [1.0, 1.0, 1.0, 1, np.radians(-179), 0.0, 0.2]])
+        mid = ar.heading_at(trajectory, 0.5)
+        self.assertAlmostEqual(np.degrees(mid) % 360, 180.0, places=6)
+        self.assertTrue(ar.is_turning_at(trajectory, 0.5))
+        self.assertFalse(ar.is_turning_at(trajectory, 1.0))   # after the last sample
+
+    def test_animation_shows_heading_and_turning(self):
+        grid, metrics, waypoints, trajectory, sim = load_results(self.dir, OBSTACLES_MAP)
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=10, playback_speed=1.0)
+        times = ar.frame_times(trajectory[0, 0], trajectory[-1, 0], 10, 1.0)
+        turn_frame = int(np.argmax([ar.is_turning_at(trajectory, t) for t in times]))
+        drive_frame = 5   # t = 0.5 s, driving east along the first row
+        robot, trail, heading, time_text, status_text = robot_anim.update(drive_frame)
+        self.assertTrue(status_text.get_text().startswith("NAVIGATING"))
+        xs, ys = heading.get_data()
+        self.assertAlmostEqual(ys[1] - ys[0], 0.0)           # heading 0: points along +x
+        self.assertGreater(xs[1] - xs[0], 0.0)
+        robot, trail, heading, time_text, status_text = robot_anim.update(turn_frame)
+        self.assertTrue(status_text.get_text().startswith("TURNING"))
+        xs, ys = heading.get_data()
+        expected = ar.heading_at(trajectory, times[turn_frame])
+        self.assertAlmostEqual(np.arctan2(ys[1] - ys[0], xs[1] - xs[0]), expected, places=9)
+
+    def test_blitted_heading_frames_equal_full_renders(self):
+        grid, metrics, waypoints, trajectory, sim = load_results(self.dir, OBSTACLES_MAP)
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=5, playback_speed=4.0)
+        canvas = robot_anim.figure.canvas
+        checked = {0, 18, robot_anim.frame_count - 1}
+        blitted = {frame: np.array(canvas.buffer_rgba())
+                   for frame in ar.render_frames_blitted(robot_anim) if frame in checked}
+        for frame in sorted(checked):
+            for artist in robot_anim.update(frame):
+                artist.set_animated(False)
+            canvas.draw()
+            np.testing.assert_array_equal(blitted[frame], np.array(canvas.buffer_rgba()),
+                                          err_msg=f"frame {frame}")
+
+    def test_position_figure_has_heading_panel(self):
+        *_, trajectory, sim = load_results(self.dir, OBSTACLES_MAP)
+        fig = vm.plot_position_vs_time(trajectory, sim, self.dir / "pos.png")
+        self.assertEqual(len(fig.axes), 3)
+        self.assertIn("heading", fig.axes[2].get_ylabel())
+        point_dir = self.dir / "point"
+        run_simulator(point_dir, OBSTACLES_MAP, (1, 1), (18, 18))
+        *_, point_traj, point_sim = load_results(point_dir, OBSTACLES_MAP)
+        self.assertEqual(len(vm.plot_position_vs_time(point_traj, point_sim,
+                                                      self.dir / "p2.png").axes), 2)
+
+
+HEADING_EXPERIMENT = SIMULATOR.parent / "heading_experiment"
+
+
+@unittest.skipUnless(HEADING_EXPERIMENT.is_file(), f"not built: {HEADING_EXPERIMENT}")
+class HeadingControlPlotTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        completed = subprocess.run([str(HEADING_EXPERIMENT), "--map", str(OBSTACLES_MAP),
+                                    "--output", str(self.dir)], capture_output=True, check=False)
+        self.assertEqual(completed.returncode, 0)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_metrics_and_figures(self):
+        rows = plot_heading_control.load_metrics(self.dir / "heading_metrics.csv")
+        self.assertEqual(len(rows), 8)       # 4 scenarios x {P, PID}
+        by_key = {(r["scenario"], r["controller"]): r for r in rows}
+        # Theory: P leaves -d/Kp under a disturbance and w/Kp on a ramp; PID ~ 0.
+        self.assertAlmostEqual(float(by_key[("step_disturbance", "P")]["steady_state_error_rad"]),
+                               -0.3 / 4, places=3)
+        self.assertAlmostEqual(float(by_key[("ramp", "P")]["steady_state_error_rad"]),
+                               0.5 / 4, places=3)
+        self.assertLess(abs(float(by_key[("ramp", "PID")]["steady_state_error_rad"])), 0.002)
+        self.assertEqual(by_key[("step_disturbance", "P")]["settling_time_s"], "")  # never
+        self.assertEqual(plot_heading_control.main(["--input", str(self.dir)]), 0)
+        for name in ("heading_step.png", "heading_step_disturbance.png", "heading_ramp.png",
+                     "heading_path_profile.png", "heading_metrics.png"):
+            self.assertTrue((self.dir / name).is_file(), name)
+
+    def test_run_files_are_consistent(self):
+        run = plot_heading_control.load_run(self.dir / "heading_step_p.csv")
+        self.assertEqual(run["time"][0], 0.0)
+        np.testing.assert_allclose(np.diff(run["time"]), 0.01, atol=1e-9)
+        np.testing.assert_allclose(run["error"], np.angle(np.exp(1j * (run["reference"] - run["theta"]))),
+                                   atol=1e-8)
+        self.assertLessEqual(np.abs(run["command"]).max(), 1.5 + 1e-9)
+
+    def test_missing_or_malformed_input_is_reported(self):
+        self.assertEqual(plot_heading_control.main(["--input", str(self.dir / "nothing")]), 1)
+        (self.dir / "heading_step_pid.csv").write_text("time,theta\n0,0\n")
+        with self.assertRaises(plot_heading_control.HeadingResultError):
+            plot_heading_control.load_run(self.dir / "heading_step_pid.csv")
+
+
 class AnalysisTests(unittest.TestCase):
     def test_wilson_interval(self):
         low, high = analyze_results.wilson_interval(120, 120)
@@ -457,6 +593,12 @@ class RunDemoTests(unittest.TestCase):
         self.assertNotIn("--connectivity", command)
         octile_command = run_demo.simulator_command(run_demo.parse_args(["--connectivity", "8"]))
         self.assertEqual(octile_command[octile_command.index("--connectivity") + 1], "8")
+        # String options are passed as-is (not repr()-quoted), numbers as numbers.
+        dd_command = run_demo.simulator_command(run_demo.parse_args(
+            ["--robot-model", "diff-drive", "--initial-heading", "90", "--heading-gain", "4"]))
+        self.assertEqual(dd_command[dd_command.index("--robot-model") + 1], "diff-drive")
+        self.assertEqual(dd_command[dd_command.index("--initial-heading") + 1], "90.0")
+        self.assertEqual(dd_command[dd_command.index("--heading-gain") + 1], "4.0")
 
     def test_animation_only_when_requested(self):
         self.assertIsNone(run_demo.animation_args(run_demo.parse_args([])))

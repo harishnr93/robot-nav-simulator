@@ -15,6 +15,7 @@ between them.
                                         │        └ AStarPlanner      astar.cpp     │
                                         │   5. simulatePath()        simulator.cpp │
                                         │        └ stepToward()      robot.cpp     │
+                                        │        └ headingControl()  diff_drive.cpp│
                                         │   6. write*Csv()           csv_writer.cpp│
                                         └───────────────┬──────────────────────────┘
                                                         │ results/path.csv
@@ -62,6 +63,9 @@ uses.
 | `benchmarks/bench_planner.cpp` | In-process micro-benchmark of fresh vs. reused planning, with a result checksum for comparing builds. |
 | `include/robot.hpp`, `src/robot.cpp` | `RobotState`, `MotionConfig` (+ validation), and `stepToward()`: one clamped kinematic step of the point robot. |
 | `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking (point or disc robot), timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
+| `include/diff_drive.hpp`, `src/diff_drive.cpp` | Differential-drive kinematics: exact unicycle integration (`integrateUnicycle`), angle wrapping and the saturated P heading controller (`headingControl`). The turn-then-drive follower that uses them is in `simulatePath()`. |
+| `include/heading_control.hpp`, `src/heading_control.cpp` | Heading-control study: the heading plant with motor lag and disturbance (`HeadingPlant`, exact discretisation), P and PID controllers (`HeadingController`: derivative on the measurement, anti-windup), the closed-loop simulation and the metrics (`computeHeadingMetrics`). |
+| `src/heading_experiment.cpp` | `heading_experiment` executable: runs the four P vs. PID scenarios (and `--sweep`), writes CSV files and a summary table. |
 | `include/footprint.hpp`, `src/footprint.cpp` | Disc footprint: exact disc and swept-disc overlap tests, obstacle inflation, and `planWithFootprint()` (A* on the inflated map with footprint-specific statuses). |
 | `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv` and `simulation_metrics.csv`. |
 | `src/main.cpp` | CLI parsing, orchestration, console summary, exit codes. |
@@ -87,8 +91,13 @@ uses.
   100 m.
 - **Inflated map**: a second `GridMap` that A* plans on. For a point robot it is a copy
   of the input map. The simulator always collision-checks against the input map.
-- **`SimulationResult`**: navigation status, trajectory samples (`RobotState` + target
-  waypoint index), steps, collision count, distance traveled, final goal error.
+- **`SimulationResult`**: navigation status, trajectory samples (`RobotState` including
+  the heading θ, target waypoint index, and the applied `v` and `ω`), steps, collision
+  count, distance traveled, final goal error, and for the differential drive the number
+  of turns, turning time and total rotation.
+- **`RobotModel`** (in `MotionConfig`): `Point` (default) or `DiffDrive`, which uses the
+  differential-drive settings in `MotionConfig` (turn-rate limit, heading gain, heading
+  tolerance, initial heading); they are validated only for that model.
 - **`MapLoadResult`**: `ok` flag + `GridMap` + human-readable error. Loading never
   throws on bad input. The `GridMap` constructor *does* throw `std::invalid_argument`,
   but only for programming errors (the loader validates before constructing).
@@ -119,6 +128,7 @@ mistaken for the current one. The simulator only runs when planning succeeded.
 | `python/visualize_map.py` | Loads a map and the C++ results, checks they belong together (size, path free on this map, path/metrics agree, trajectory timestamps increasing), and saves static figures. Its loaders and drawing helpers are shared with `animate_robot.py`. |
 | `python/animate_robot.py` | Builds a `FuncAnimation` from `trajectory.csv` and exports GIF (Pillow) and optionally MP4 (FFmpeg) with blitted rendering. Draws a static "No valid path" figure instead when there is no trajectory. |
 | `python/run_demo.py` | One-command demo: runs `build/robot_simulator`, then the static figures and the animation. |
+| `python/plot_heading_control.py` | Plots the `heading_experiment` results: per-scenario heading and command figures, and the metrics comparison. |
 | `python/run_benchmark.py` | Benchmark sweep: seeded random maps (reusing `generate_map.generate_random`), one `robot_simulator --reference-bfs` process per run, raw results plus machine/build metadata. |
 | `python/analyze_results.py` | `run`: recomputes path length, travel time and success of one run from the raw CSV files and cross-checks them with the simulator. `benchmark`: per-configuration statistics (median, mean, min, max, p95, counts) and the performance plots. `compare`: matches a 4-connected and an 8-connected benchmark map by map and reports path length, planning time and expanded nodes. |
 
@@ -177,5 +187,6 @@ frames with full renders pixel by pixel.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
-| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control` | executables | unit tests (registered with CTest) |
+| `heading_experiment` | executable | P vs. PID heading-control study |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

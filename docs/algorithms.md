@@ -388,13 +388,240 @@ plus 8 diagonal legs × 1.5 s give 30.0 s for the 14.66 m path (ideal: 29.3 s).
 - Planning is 2–8× slower (median per grid size), because the search has more neighbors,
   more expansions with obstacles, and a general priority queue.
 
+## 10. Differential-drive robot (`--robot-model diff-drive`)
+
+**Why:** most real mobile robots have two driven wheels. Such a robot cannot move
+sideways. It moves along its heading and changes heading by turning, so a sharp corner
+in the path costs time. The point robot (section 6) ignores this; the
+differential-drive model captures it.
+
+**Model.** State `(x, y, θ)`, inputs `v` (linear velocity) and `ω` (angular velocity):
+
+```text
+dx/dt = v · cos θ      dy/dt = v · sin θ      dθ/dt = ω
+```
+
+`θ = 0` faces `+x`, and `θ` grows toward `+y`, which points down the map like everywhere
+in this project. So `θ = 90°` faces down the map. The limits are `0 ≤ v ≤ --speed` and
+`|ω| ≤ --max-angular-speed` (default 1.5 rad/s). With `v` and `ω` constant over a
+timestep, the equations have an exact solution: a straight line, or an arc of radius
+`v/ω`. `integrateUnicycle()` uses it, so no integration error accumulates. A test checks
+it against a 200 000-step Euler integration and against splitting a step in two.
+
+**Heading controller (P).** `headingControl()`:
+
+```text
+ω = clamp(k · e, −ω_max, +ω_max)       e = heading error, wrapped to (−π, π]
+once |e| ≤ tolerance (0.01 rad):  ω = e / dt    (one final step lands exactly on target)
+```
+
+- Far from the target heading, the controller is saturated at the angular speed limit.
+- Close to it, the proportional term dominates. Each step multiplies the error by
+  `1 − k·dt`, so the error decays geometrically.
+- `k·dt ≤ 1` is enforced, so the heading never overshoots (default `k = 5 /s`, `k·dt = 0.5`).
+- The last step cancels the remaining error exactly, using an `|ω|` well within the limit.
+- The θ(t) panel of `robot_position_vs_time.png` shows the result: a straight ramp at
+  1.5 rad/s, then the exponential approach.
+
+**Waypoint follower: turn, then drive.** Each timestep:
+
+1. compute the direction to the next waypoint and the heading error `e`;
+2. if `|e| > 10⁻⁶ rad`: **turn in place**, with `v = 0` and `ω` from the controller;
+3. otherwise **drive straight** to the waypoint, with `ω = 0` and `v ≤ v_max`, clamped so
+   the robot never overshoots the waypoint (exactly like the point robot).
+
+Collinear waypoints need no turn, so the robot passes them at full speed. Time is
+counted the same way as for the point robot, so turning time simply adds to the travel
+time. A test checks that removing the turn-in-place samples leaves exactly the point
+robot's trajectory (bit-for-bit), and that the travel time equals the point robot's
+plus the turning time.
+
+**Why turn-then-drive, rather than a smoother controller such as pure pursuit?**
+
+- A controller that turns while driving cuts the inside of corners, or swings wide on
+  the outside. Either way, the robot's center leaves the planned path.
+- The planner's guarantees (footprint clearance, section 8; no corner cutting, section 9)
+  only cover the planned segments between cell centers. A wall in this project's maps is
+  often just half a cell (0.25 m) from the path.
+- Turn-then-drive keeps the center exactly on those segments, so every guarantee still
+  holds; the property tests confirm 0 collisions with footprints and diagonals.
+- A rotating disc covers no new area, so turning in place needs no collision check.
+- The cost is a stop at every corner. Smoother tracking would need a clearance-aware
+  path smoother first.
+
+**Example: one 90° corner** (defaults: 1.5 rad/s, `k = 5 /s`, `dt = 0.1 s`):
+
+- 9 saturated steps at 1.5 rad/s take the error from 1.571 to 0.221 rad;
+- 5 proportional steps halve it each time, down to 0.0069 rad (below the 0.01 rad tolerance);
+- 1 settling step cancels the rest.
+
+That is 15 steps, so the corner takes 1.5 s. A 180° turn takes 2.5 s.
+
+**Measured cost of turning** (default settings; turning time from the simulator's
+summary):
+
+| Map | Moves | Path | Point robot | Differential drive | Turns | Turning time |
+|---|---|---|---|---|---|---|
+| obstacles.csv | 4 | 17.00 m | 34.0 s | 38.5 s | 3 | 4.5 s |
+| obstacles.csv | 8 | 14.66 m | 30.0 s | 38.5 s | 8 | 8.5 s |
+| corridor.csv | 4 | 34.00 m | 68.0 s | 75.5 s | 5 | 7.5 s |
+| corridor.csv | 8 | 31.36 m | 63.5 s | 74.0 s | 9 | 10.5 s |
+| maze.csv | 4 or 8 | 30.00 m | 60.0 s | 81.0 s | 14 | 21.0 s |
+| obstacles_fine.csv, r = 0.2 m | 4 | 11.25 m | 22.5 s | 36.0 s | 9 | 13.5 s |
+| obstacles_fine.csv, r = 0.2 m | 8 | 9.79 m | 20.5 s | 30.0 s | 9 | 9.5 s |
+
+For a differential-drive robot, path *length* is not the whole story:
+
+- On the obstacles map, the shorter 8-connected path has 5 more turns and ends up exactly
+  as fast as the 4-connected one.
+- On the fine map, it is still clearly faster.
+
+A planner that charges for turns (a heading-aware search, or a turn penalty in the
+cost) would optimise travel time directly. That is a possible extension.
+
+## 11. P vs. PID heading control (`heading_experiment`)
+
+**Why:** section 10 uses an ideal actuator, whose turn rate follows the command
+instantly. With such an actuator a P controller already lands the heading exactly, and
+PID has nothing to add. Real motors respond with a lag, and wheels slip. This study
+adds both and compares the two classic controllers on the robot's heading.
+
+**Plant** (`HeadingPlant`):
+
+```text
+dθ/dt = ω + d          heading driven by the actual turn rate ω plus a disturbance d
+dω/dt = (u − ω) / τ    the motor follows the command u with time constant τ (first-order lag)
+|u| ≤ ω_max
+```
+
+Defaults: τ = 0.25 s, ω_max = 1.5 rad/s, control period dt = 0.01 s; d = 0.3 rad/s where
+a disturbance is used. The command is held constant over each control period, and the
+plant uses the exact solution for that case:
+
+```text
+ω(t) = u + (ω₀ − u)·e^(−t/τ)
+θ(dt) = θ₀ + (u + d)·dt + (ω₀ − u)·τ·(1 − e^(−dt/τ))
+```
+
+So results do not depend on an integration step. Tests check it against a 500 000-step
+Euler integration and against splitting a step in two.
+
+**Controllers** (`HeadingController`), with error `e = wrap(θ_ref − θ)`:
+
+```text
+P:    u = Kp·e
+PID:  u = Kp·e + Ki·∫e dt − Kd·dθ/dt        both clamped to ±ω_max
+```
+
+- **Derivative on the measurement:** the derivative uses the measured heading rate,
+  not the rate of change of the error. When the reference jumps, the error jumps but
+  the heading does not, so there is no "derivative kick" (a spike in `u`). A test
+  checks the first command after a step.
+- **Anti-windup:** while the output is saturated and the error pushes further in the
+  same direction, the integral is frozen (conditional integration). Without this, the
+  integral would build up during long saturated turns and cause a large overshoot.
+
+**Validating the simulation against theory.** With P control and no saturation, the
+closed loop is `τs² + s + Kp`: a damped second-order system with
+`ζ = 1/(2√(Kp·τ))` and overshoot `exp(−ζπ/√(1−ζ²))`. The simulated overshoot matches
+it:
+
+| Kp (1/s) | ζ | theory | simulated (dt = 1 ms, 0.1 rad step) |
+|---|---|---|---|
+| 2 | 0.707 | 4.32 % | 4.35 % |
+| 4 | 0.500 | 16.30 % | 16.38 % |
+| 8 | 0.354 | 30.50 % | 30.67 % |
+
+The steady-state errors also match theory:
+
+- **P under a disturbance `d`:** the heading settles where `Kp·e = −d`, so `e = −d/Kp`.
+  That is −0.075 rad (−4.30°) for d = 0.3 rad/s and Kp = 4.
+- **P on a ramp at rate `w`:** the heading lags by `w/Kp` = 0.125 rad (7.16°).
+- **PID:** the integral term removes both errors.
+
+**Choosing the gains.** Both controllers use the same `Kp = 4` (ζ = 0.5), so the
+comparison isolates what the I and D terms add. The PID gains `Ki = 2, Kd = 0.4` come
+from a grid over `Ki ∈ [0.5, 4]` and `Kd ∈ [0, 1.2]`. `heading_experiment --sweep`
+reprints that grid. The chosen setting is a balanced point:
+
+- it overshoots less than P;
+- it settles within the 2 % band in all step tests, including under the disturbance;
+- it tracks a ramp well.
+
+Larger `Kd` lowers the overshoot further but makes disturbance rejection slower.
+Larger `Ki` speeds up disturbance rejection but raises the overshoot. No setting wins
+every metric.
+
+**Metrics** (`computeHeadingMetrics`):
+
+| Metric | Definition |
+|---|---|
+| overshoot | largest excursion beyond the target, in % of the step |
+| rise time | 10 % → 90 % of the step |
+| settling time | the time after which the error stays within ±2 % of the step (1.8° for 90°) |
+| steady-state error | mean error over the last 1 s |
+| tracking error | IAE `∫\|e\| dt` and RMS error |
+| control effort | `∫\|u\| dt` (total commanded rotation), `∫u² dt` (energy-like), `Σ\|Δu\|` (command variation: how jerky the command is) |
+
+**Results** (`./build/heading_experiment`; data in
+[`heading_control/heading_metrics.csv`](heading_control/heading_metrics.csv)):
+
+| Scenario | Controller | Overshoot | Settling | Steady-state error | IAE (rad·s) | RMS error (rad) | Effort ∫\|u\| (rad) | Σ\|Δu\| (rad/s) |
+|---|---|---|---|---|---|---|---|---|
+| 90° step | P | 7.29 % | 2.08 s | 0.00° | 1.254 | 0.371 | 2.07 | 2.61 |
+| 90° step | PID | **5.38 %** | 2.52 s | −0.02° | 1.295 | 0.371 | **1.84** | **1.87** |
+| 90° step + disturbance | P | 13.44 % | never | −4.30° | 1.695 | 0.343 | 4.38 | 3.11 |
+| 90° step + disturbance | PID | **10.17 %** | **3.55 s** | **−0.05°** | **1.221** | 0.337 | 4.25 | **2.30** |
+| ramp, 0.5 rad/s | P | – | – | 7.16° | 1.250 | 0.126 | 5.00 | 0.87 |
+| ramp, 0.5 rad/s | PID | – | – | **0.04°** | **0.349** | **0.059** | 5.12 | 0.79 |
+| planned-path profile | P | – | – | 0.00° | **4.242** | 0.306 | 10.50 | 29.63 |
+| planned-path profile | PID | – | – | 0.06° | 4.490 | 0.308 | **8.92** | **24.78** |
+
+The planned-path profile takes the 8-connected A* path on `maps/obstacles.csv` (1, 1) →
+(18, 18). Each straight run's direction is held for the time it takes to drive at
+0.5 m/s, so the reference is a series of 45° and 90° steps over 31 s.
+
+![P vs. PID metrics](images/heading_metrics.png)
+
+**Interpretation.**
+
+- **Disturbances and ramps are where PID clearly wins.**
+  - P cannot remove a constant disturbance; it settles 4.3° off target and never enters
+    the 2 % band. PID settles in 3.55 s with a 0.05° residual.
+  - On a ramp (following an arc), P lags by a constant 7.2°. PID removes the lag: tracking
+    error 3.6× lower in IAE and 2.1× lower in RMS.
+- **On a plain step, PID is gentler but slower to settle.**
+  - The derivative term damps the motion, giving less overshoot (5.4 % vs. 7.3 %), 11 %
+    less control effort and 28 % less command variation.
+  - The integral term then slowly removes the last part of the error, so PID settles
+    0.4 s later than P (2.52 s vs. 2.08 s).
+- **On the path profile (frequent steps, no disturbance), P has slightly lower tracking
+  error** (IAE 4.24 vs. 4.49). The integral term only helps against persistent errors,
+  and there are none here. PID still uses 15 % less control effort and produces a smoother
+  command.
+- **Both controllers saturate at the start of large turns** (about 10 % of the time in
+  the step runs). There, both simply turn at the limit and behave identically (see
+  `heading_step.png`). The differences appear only in the final approach.
+
+**Recommendation.** For the navigation follower (section 10), a heading without
+disturbance and stops between turns, the simple P controller is adequate. On a real
+robot with motor lag and wheel slip, use PID (or at least PI). It is the only one of
+the two that holds the heading against a persistent disturbance and that can track a
+curving path without a constant lag.
+
+**Scope.** This is a controlled study of the heading loop alone. The navigation
+simulator keeps the ideal actuator of section 10 (`--robot-model diff-drive`), so its
+paths, collision guarantees and earlier results are unchanged.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
   cell centers, so on coarse grids it may reject passages the robot could physically
   use (section 8).
-- The robot has no orientation, acceleration limits or dynamics: it changes direction
-  instantly at waypoints (a differential-drive model is a planned extension).
+- The point robot has no orientation and changes direction instantly. The
+  differential-drive model (section 10) adds heading and turn-rate limits, but no
+  acceleration limits or dynamics: velocities change instantly. It stops to turn at every
+  corner, and the planner minimises path length, not travel time including turns.
 - Paths are optimal on the grid graph (4- or 8-connected), not in continuous space: they
   turn only at cell centers and in 45° steps. Any-angle planning (e.g. Theta*) or path
   smoothing could shorten them further.

@@ -58,6 +58,10 @@ PATH_COLUMNS = ("waypoint_index", "grid_x", "grid_y", "world_x", "world_y")
 TRAJECTORY_COLUMNS = ("time", "x", "y", "target_waypoint_index")
 # Column indices of the array returned by load_trajectory().
 TRAJ_TIME, TRAJ_X, TRAJ_Y, TRAJ_TARGET = range(4)
+# Extra columns of a differential-drive trajectory (see has_heading()).
+HEADING_COLUMNS = ("theta", "linear_velocity", "angular_velocity")
+TRAJ_THETA, TRAJ_V, TRAJ_OMEGA = range(4, 7)
+HEADING_COLOR = "#1a1a1a"   # heading arrows / line (neutral ink, not a series color)
 SIMULATION_COLUMNS = (
     "status", "success", "navigation_success", "steps", "travel_time_s",
     "distance_traveled_m", "final_goal_error_m", "collision_count",
@@ -183,6 +187,9 @@ class SimulationMetrics:
     collision_count: int
     speed_mps: float
     dt_s: float
+    robot_model: str = "point"           # "point" or "diff-drive" (older results: point)
+    turns: int | None = None             # differential drive only
+    turn_time_s: float | None = None
 
 
 def _optional_float(text: str) -> float | None:
@@ -205,21 +212,28 @@ def load_simulation_metrics(path: Path) -> SimulationMetrics:
             collision_count=int(row["collision_count"]),
             speed_mps=float(row["speed_mps"]),
             dt_s=float(row["dt_s"]),
+            robot_model=row.get("robot_model") or "point",
+            turns=int(row["turns"]) if row.get("turns") else None,
+            turn_time_s=_optional_float(row.get("turn_time_s") or ""),
         )
     except ValueError as error:
         raise ResultFileError(f"'{path}' has a malformed value: {error}") from error
 
 
 def load_trajectory(path: Path) -> np.ndarray:
-    """Return an (N, 4) array of (time_s, x_m, y_m, target_waypoint_index).
+    """Return an (N, 4) array of (time_s, x_m, y_m, target_waypoint_index), or (N, 7)
+    with (theta_rad, v_mps, omega_radps) appended for a differential-drive trajectory.
 
     N may be 0. Columns are addressed with the TRAJ_* constants.
     """
     rows = _read_csv(path, TRAJECTORY_COLUMNS)
+    with_heading = bool(rows) and all(c in rows[0] for c in HEADING_COLUMNS)
+    width = 7 if with_heading else 4
     try:
         data = np.array([(float(r["time"]), float(r["x"]), float(r["y"]),
                           int(r["target_waypoint_index"]))
-                         for r in rows], dtype=float).reshape(-1, 4)
+                         + (tuple(float(r[c]) for c in HEADING_COLUMNS) if with_heading else ())
+                         for r in rows], dtype=float).reshape(-1, width)
     except ValueError as error:
         raise ResultFileError(f"'{path}' has a malformed value: {error}") from error
     if not np.isfinite(data).all():
@@ -227,6 +241,21 @@ def load_trajectory(path: Path) -> np.ndarray:
     if len(data) > 1 and not (np.diff(data[:, 0]) > 0).all():
         raise ResultFileError(f"'{path}' timestamps are not strictly increasing")
     return data
+
+
+def has_heading(trajectory: np.ndarray) -> bool:
+    """True for a differential-drive trajectory (heading and velocity columns)."""
+    return trajectory.ndim == 2 and trajectory.shape[1] > TRAJ_THETA
+
+
+def heading_arrow_indices(trajectory: np.ndarray, count: int = 14) -> np.ndarray:
+    """Sample indices for heading arrows, evenly spaced along the travelled distance."""
+    steps = np.hypot(np.diff(trajectory[:, TRAJ_X]), np.diff(trajectory[:, TRAJ_Y]))
+    distance = np.concatenate([[0.0], np.cumsum(steps)])
+    if distance[-1] == 0.0:
+        return np.array([0])
+    marks = np.linspace(0.0, distance[-1], count)
+    return np.unique(np.searchsorted(distance, marks).clip(0, len(trajectory) - 1))
 
 
 def world_to_grid(meters: np.ndarray, resolution: float) -> np.ndarray:
@@ -396,18 +425,40 @@ def plot_trajectory(grid: np.ndarray, metrics: PlanningMetrics, waypoints: np.nd
         ax.plot(traj_x[-1], traj_y[-1], marker="o", markersize=15, color=ROBOT_COLOR,
                 markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
                 label="Robot (final position)", zorder=3.5)
+    title_extra = ""
+    if has_heading(trajectory):
+        # Heading arrows (unit length in cells) along the trajectory, plus the final heading.
+        idx = heading_arrow_indices(trajectory)
+        theta = trajectory[idx, TRAJ_THETA]
+        ax.quiver(traj_x[idx], traj_y[idx], np.cos(theta), np.sin(theta), angles="xy",
+                  scale_units="xy", scale=1.25, width=0.004, color=HEADING_COLOR,
+                  zorder=4.5, label="Heading (differential drive)")
+        title_extra = (f", {sim.turns} turns ({sim.turn_time_s:.1f} s)"
+                       if sim.turns is not None and sim.turn_time_s is not None else "")
     time_s = trajectory[-1, TRAJ_TIME] - trajectory[0, TRAJ_TIME]
     distance = sim.distance_traveled_m or 0.0
     fig.suptitle(f"Navigation: {sim.status}  |  {time_s:.1f} s, {distance:.2f} m "
-                 f"traveled, {sim.collision_count} collision(s)")
+                 f"traveled, {sim.collision_count} collision(s){title_extra}")
     _finish(fig, ax, output, extra)
     return fig
 
 
 def plot_position_vs_time(trajectory: np.ndarray, sim: SimulationMetrics, output: Path):
-    """x(t) and y(t) in meters, one panel each (same units, separate axes)."""
-    fig, (ax_x, ax_y) = plt.subplots(2, 1, figsize=(8, 5.5), sharex=True,
-                                     layout="constrained")
+    """x(t) and y(t) in meters, one panel each (same units, separate axes); for a
+    differential-drive trajectory a third panel shows the heading theta(t)."""
+    if has_heading(trajectory):
+        fig, (ax_x, ax_y, ax_theta) = plt.subplots(3, 1, figsize=(8, 7.5), sharex=True,
+                                                   layout="constrained")
+        ax_theta.plot(trajectory[:, TRAJ_TIME],
+                      np.degrees(np.unwrap(trajectory[:, TRAJ_THETA])),
+                      color=TRAJECTORY_COLOR, linewidth=2)
+        ax_theta.set_ylabel("heading θ (deg, unwrapped)")
+        ax_theta.grid(color=GRID_LINE_COLOR, linewidth=0.5)
+        ax_theta.spines[["top", "right"]].set_visible(False)
+    else:
+        fig, (ax_x, ax_y) = plt.subplots(2, 1, figsize=(8, 5.5), sharex=True,
+                                         layout="constrained")
+        ax_theta = None
     time_s = trajectory[:, TRAJ_TIME]
     for ax, values, name in ((ax_x, trajectory[:, TRAJ_X], "x"),
                              (ax_y, trajectory[:, TRAJ_Y], "y")):
@@ -415,7 +466,7 @@ def plot_position_vs_time(trajectory: np.ndarray, sim: SimulationMetrics, output
         ax.set_ylabel(f"{name} (m)")
         ax.grid(color=GRID_LINE_COLOR, linewidth=0.5)
         ax.spines[["top", "right"]].set_visible(False)
-    ax_y.set_xlabel("simulation time (s)")
+    (ax_theta or ax_y).set_xlabel("simulation time (s)")
     ax_y.invert_yaxis()  # world +y points down, matching the map figures
     ax_y.set_ylabel("y (m, increases downward)")
     fig.suptitle(f"Robot position vs. time  ({sim.status}, speed {sim.speed_mps:g} m/s, "
