@@ -90,6 +90,25 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
     return finishWrite(out, file, error);
 }
 
+bool writeLidarCsv(const std::filesystem::path& file, const std::vector<LidarScan>& scans,
+                   std::string& error) {
+    std::ofstream out(file);
+    if (!out) {
+        error = "cannot open '" + file.string() + "' for writing";
+        return false;
+    }
+    out << "time,beam,angle,range,hit\n" << std::fixed;
+    for (const LidarScan& scan : scans) {
+        for (std::size_t i = 0; i < scan.ranges.size(); ++i) {
+            out << std::setprecision(kSecondsPrecision) << scan.time << ',' << i << ','
+                << std::setprecision(kAnglePrecision) << scan.angles[i] << ','
+                << std::setprecision(kMillisecondsPrecision) << scan.ranges[i] << ','
+                << (scan.hits[i] ? 1 : 0) << '\n';
+        }
+    }
+    return finishWrite(out, file, error);
+}
+
 bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error) {
     std::ofstream out(file);
     if (!out) {

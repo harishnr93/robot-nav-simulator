@@ -61,6 +61,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="differential drive: heading P gain in 1/s (default 5.0)")
     parser.add_argument("--initial-heading", type=float,
                         help="differential drive: heading at t = 0 in degrees (default 0)")
+    parser.add_argument("--lidar-beams", type=int,
+                        help="simulated LiDAR beams (default 0 = off)")
+    parser.add_argument("--lidar-fov", type=float, help="LiDAR field of view, deg (default 360)")
+    parser.add_argument("--lidar-range", type=float, help="LiDAR maximum range, m (default 5)")
+    parser.add_argument("--lidar-noise", type=float,
+                        help="LiDAR Gaussian range noise, m (default 0)")
+    parser.add_argument("--lidar-seed", type=int, help="LiDAR noise seed (default 0)")
     parser.add_argument("--connectivity", type=int, choices=(4, 8),
                         help="grid moves: 4 = straight (default), 8 = also diagonal")
     parser.add_argument("--robot-radius", type=float,
@@ -95,7 +102,10 @@ def simulator_command(args: argparse.Namespace) -> list[str]:
                 ("--connectivity", args.connectivity), ("--robot-model", args.robot_model),
                 ("--max-angular-speed", args.max_angular_speed),
                 ("--heading-gain", args.heading_gain),
-                ("--initial-heading", args.initial_heading))
+                ("--initial-heading", args.initial_heading),
+                ("--lidar-beams", args.lidar_beams), ("--lidar-fov", args.lidar_fov),
+                ("--lidar-range", args.lidar_range), ("--lidar-noise", args.lidar_noise),
+                ("--lidar-seed", args.lidar_seed))
     for flag, value in optional:
         if value is not None:
             command += [flag, value if isinstance(value, str) else repr(value)]

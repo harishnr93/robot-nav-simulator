@@ -53,6 +53,9 @@ comes from a reproducible benchmark.
   and angular velocity with exact unicycle kinematics, a proportional heading controller
   with turn-rate limit, and a turn-then-drive waypoint follower that keeps the robot on
   the planned path. The trajectory, plots and animation show the heading.
+- Simulated 2D LiDAR (`--lidar-beams N`): exact ray casting against the grid (cell-by-cell
+  traversal, no sampling), one scan per timestep relative to the robot's heading, optional
+  seeded range noise, the rays drawn in the animation and a scan snapshot figure.
 - P vs. PID heading-control study (`heading_experiment`): a heading with motor lag and a
   disturbance, both controllers (PID with derivative on the measurement and anti-windup)
   in four scenarios, with overshoot, settling time, steady-state and tracking error and
@@ -75,7 +78,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 73 C++ test cases, 26 end-to-end CLI checks and 45 Python tests, including A* vs. BFS
+- 81 C++ test cases, 28 end-to-end CLI checks and 50 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -199,6 +202,11 @@ and no timeout.
 | `--max-angular-speed W` | differential drive: turn-rate limit, rad/s | `1.5` |
 | `--heading-gain K` | differential drive: heading P gain, 1/s (`K × dt ≤ 1`) | `5.0` |
 | `--initial-heading DEG` | differential drive: heading at t = 0 (0 = facing +x, 90 = facing down the map) | `0` |
+| `--lidar-beams N` | simulated LiDAR beams, one scan per timestep | `0` (off) |
+| `--lidar-fov DEG` | LiDAR field of view, centred on the heading | `360` |
+| `--lidar-range M` | LiDAR maximum range | `5` |
+| `--lidar-noise SIGMA` | Gaussian range noise, m | `0` |
+| `--lidar-seed N` | seed of the range noise | `0` |
 | `--reference-bfs` | also run the reference search (BFS, or exact Dijkstra for 8-connectivity) and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
@@ -256,7 +264,8 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 
 `run_demo.py` accepts the simulator's options (`--speed`, `--dt`, `--goal-tolerance`,
 `--max-time`, `--robot-radius`, `--connectivity`, `--robot-model`, `--max-angular-speed`,
-`--heading-gain`, `--initial-heading`, `--resolution`, `--output`), the animation options `--animate`,
+`--heading-gain`, `--initial-heading`, `--lidar-beams`, `--lidar-fov`, `--lidar-range`,
+`--lidar-noise`, `--lidar-seed`, `--resolution`, `--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
 Its exit code is the simulator's (for example `4` when there is no path).
@@ -273,6 +282,33 @@ Its exit code is the simulator's (for example `4` when there is no path).
 
 The first four maps have one-cell (0.5 m) gaps and are meant for a point robot. Use
 `maps/obstacles_fine.csv` for a robot footprint: it has the same layout at 0.25 m cells.
+
+### Simulated 2D LiDAR
+
+```bash
+python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
+    --connectivity 8 --robot-model diff-drive --lidar-beams 36 --save-gif
+```
+
+```text
+LiDAR:          36 beams over 360.00 deg, range 5.00 m, 386 scans, 93.5 % returns, closest 0.250 m at t = 5.0 s
+```
+
+![LiDAR rays in the animation](docs/images/navigation_lidar.gif)
+
+![LiDAR scan snapshot](docs/images/lidar_scan.png)
+
+Every beam is traced cell by cell through the grid (Amanatides–Woo traversal), so the
+range is the exact distance to the first obstacle face or map edge, and no obstacle can
+be skipped. A 1 mm sampling approach missed a 0.66 mm sliver of an obstacle in testing;
+the traversal cannot. Beams turn with the robot, and `lidar_scans.csv` records every
+beam of every scan. `lidar_scan.png` shows the scan with the closest return. It costs
+about 75 ns per ray (2.2 ms for 72 beams × 386 scans). Details:
+[docs/algorithms.md](docs/algorithms.md#12-simulated-2d-lidar---lidar-beams-n).
+
+The animated GIF above uses `--fps 10 --dpi 70` to keep its size down. With many beams,
+GIFs get large (5 MB at 72 beams with the defaults), because the rays change many
+pixels every frame.
 
 ### P vs. PID heading control
 
@@ -419,6 +455,11 @@ reference search found no path. Otherwise it is an integer step count (BFS) for
 4-connectivity, and a cost in cell units with 6 decimals (exact Dijkstra) for
 8-connectivity.
 
+**`lidar_scans.csv`** (only with `--lidar-beams` > 0): one row per beam and scan,
+`time,beam,angle,range,hit`. `angle` is the world-frame beam direction in radians. `hit`
+is `0` when the beam found nothing within the maximum range, which is then reported as
+the range.
+
 **`inflated_map.csv`** (only with `--robot-radius` > 0): the map A* planned on, in the
 same format as input maps.
 
@@ -501,7 +542,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 34 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 37 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -514,7 +555,7 @@ and static-analysis results.
 robot-nav-simulator/
 ├── CMakeLists.txt          build, tests (CTest) and benchmark targets
 ├── include/, src/          C++17 core: grid_map, astar, footprint, robot, diff_drive, simulator,
-│                           heading_control, csv_writer, main (CLI), heading_experiment
+│                           heading_control, lidar, csv_writer, main (CLI), heading_experiment
 ├── tests/                  C++ unit tests, Python tests, test map fixtures (tests/data/)
 ├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
 ├── python/                 generate_map, visualize_map, animate_robot, run_demo,
@@ -578,7 +619,8 @@ robot-nav-simulator/
   PID controller inside the navigation simulator (with path-tracking error as a metric).
 - **Turn-aware planning:** charge for turns so a differential-drive robot gets the
   fastest route, not just the shortest.
-- **Simulated 2D LiDAR:** ray casting.
+- ✅ **Simulated 2D LiDAR:** exact ray casting, scans every timestep, rays in the
+  animation (`--lidar-beams`).
 - **EKF localization:** from noisy odometry.
 - **Dynamic obstacles:** with replanning, where `AStarPlanner`'s reusable buffers already
   avoid per-request set-up.

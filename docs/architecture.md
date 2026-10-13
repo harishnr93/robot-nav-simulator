@@ -23,6 +23,7 @@ between them.
                                                         │ results/trajectory.csv
                                                         │ results/simulation_metrics.csv
                                                         │ results/inflated_map.csv (r > 0)
+                                                        │ results/lidar_scans.csv (LiDAR on)
                                         ┌───────────────▼──────────────────────────┐
                                         │ python/visualize_map.py                  │
                                         │   → map_visualization.png                │
@@ -64,6 +65,7 @@ uses.
 | `include/robot.hpp`, `src/robot.cpp` | `RobotState`, `MotionConfig` (+ validation), and `stepToward()`: one clamped kinematic step of the point robot. |
 | `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking (point or disc robot), timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
 | `include/diff_drive.hpp`, `src/diff_drive.cpp` | Differential-drive kinematics: exact unicycle integration (`integrateUnicycle`), angle wrapping and the saturated P heading controller (`headingControl`). The turn-then-drive follower that uses them is in `simulatePath()`. |
+| `include/lidar.hpp`, `src/lidar.cpp` | Simulated 2D LiDAR: exact ray casting by grid traversal (`castRay`), beam layout, seeded range noise, and one scan per trajectory sample (`scanTrajectory`). Called by `main.cpp` after the simulation; the LiDAR does not influence the motion. |
 | `include/heading_control.hpp`, `src/heading_control.cpp` | Heading-control study: the heading plant with motor lag and disturbance (`HeadingPlant`, exact discretisation), P and PID controllers (`HeadingController`: derivative on the measurement, anti-windup), the closed-loop simulation and the metrics (`computeHeadingMetrics`). |
 | `src/heading_experiment.cpp` | `heading_experiment` executable: runs the four P vs. PID scenarios (and `--sweep`), writes CSV files and a summary table. |
 | `include/footprint.hpp`, `src/footprint.cpp` | Disc footprint: exact disc and swept-disc overlap tests, obstacle inflation, and `planWithFootprint()` (A* on the inflated map with footprint-specific statuses). |
@@ -187,6 +189,6 @@ frames with full renders pixel by pixel.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
-| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control`, `test_lidar` | executables | unit tests (registered with CTest) |
 | `heading_experiment` | executable | P vs. PID heading-control study |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

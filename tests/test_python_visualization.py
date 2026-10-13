@@ -450,6 +450,81 @@ class DiffDriveVisualizationTests(unittest.TestCase):
                                                       self.dir / "p2.png").axes), 2)
 
 
+@unittest.skipUnless(SIMULATOR.is_file(), f"simulator not built at {SIMULATOR}")
+class LidarVisualizationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18),
+                                       "--robot-model", "diff-drive", "--lidar-beams", "24"), 0)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_scans_are_loaded_and_match_the_trajectory(self):
+        *_, trajectory, _ = load_results(self.dir, OBSTACLES_MAP)
+        scans = vm.load_lidar(self.dir / "lidar_scans.csv")
+        self.assertEqual(scans.ranges.shape, (len(trajectory), 24))
+        np.testing.assert_allclose(scans.times, trajectory[:, vm.TRAJ_TIME])
+        vm.check_lidar_matches_trajectory(scans, trajectory)
+        self.assertTrue(np.all(scans.ranges[~scans.hits] == 5.0))   # no return: max range
+        self.assertTrue(np.all(scans.ranges[scans.hits] <= 5.0))
+        # Beams are heading-relative: beam 12 (offset 0) points along the heading.
+        np.testing.assert_allclose(scans.angles[:, 12],
+                                   trajectory[:, vm.TRAJ_THETA], atol=1e-8)
+        with self.assertRaises(vm.ResultFileError):
+            vm.check_lidar_matches_trajectory(scans, trajectory[:-1])
+
+    def test_malformed_scans_are_rejected(self):
+        path = self.dir / "lidar_scans.csv"
+        lines = path.read_text().splitlines()
+        path.write_text("\n".join(lines[:1] + lines[2:]) + "\n")   # drop beam 0 of scan 0
+        with self.assertRaises(vm.ResultFileError):
+            vm.load_lidar(path)
+        self.assertIsNone(vm.load_lidar(self.dir / "missing.csv"))
+
+    def test_ray_segments(self):
+        grid, metrics, *_ , trajectory, _ = load_results(self.dir, OBSTACLES_MAP)
+        scans = vm.load_lidar(self.dir / "lidar_scans.csv")
+        segments, hits = vm.lidar_segments(scans, trajectory, 7, metrics.resolution)
+        self.assertEqual(segments.shape, (24, 2, 2))
+        start = vm.world_to_grid(trajectory[7, [vm.TRAJ_X, vm.TRAJ_Y]], metrics.resolution)
+        np.testing.assert_allclose(segments[:, 0, :], np.tile(start, (24, 1)))
+        lengths = np.hypot(*(segments[:, 1, :] - segments[:, 0, :]).T) * metrics.resolution
+        np.testing.assert_allclose(lengths, scans.ranges[7], atol=1e-9)
+        self.assertEqual(len(hits), int(scans.hits[7].sum()))
+
+    def test_animation_draws_the_latest_scan(self):
+        grid, metrics, waypoints, trajectory, sim = load_results(self.dir, OBSTACLES_MAP)
+        scans = vm.load_lidar(self.dir / "lidar_scans.csv")
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=5, playback_speed=3.0, lidar=scans)
+        artists = robot_anim.update(9)              # t = 9 * 0.6 = 5.4 s -> scan at 5.4 s
+        rays, hits = artists[3], artists[4]          # after robot, trail, heading line
+        self.assertEqual(len(rays.get_segments()), 24)
+        index = int(np.searchsorted(scans.times, 5.4 + 1e-9) - 1)
+        self.assertEqual(len(hits.get_xdata()), int(scans.hits[index].sum()))
+        canvas = robot_anim.figure.canvas
+        checked = {0, 9, robot_anim.frame_count - 1}
+        blitted = {f: np.array(canvas.buffer_rgba())
+                   for f in ar.render_frames_blitted(robot_anim) if f in checked}
+        for frame in sorted(checked):
+            for artist in robot_anim.update(frame):
+                artist.set_animated(False)
+            canvas.draw()
+            np.testing.assert_array_equal(blitted[frame], np.array(canvas.buffer_rgba()),
+                                          err_msg=f"frame {frame}")
+
+    def test_scan_figure(self):
+        self.assertEqual(vm.main(["--map", str(OBSTACLES_MAP), "--results-dir", str(self.dir)]), 0)
+        self.assertTrue((self.dir / "lidar_scan.png").is_file())
+        point_dir = self.dir / "no_lidar"
+        run_simulator(point_dir, OBSTACLES_MAP, (1, 1), (18, 18))
+        vm.main(["--map", str(OBSTACLES_MAP), "--results-dir", str(point_dir)])
+        self.assertFalse((point_dir / "lidar_scan.png").exists())
+
+
 HEADING_EXPERIMENT = SIMULATOR.parent / "heading_experiment"
 
 
@@ -599,6 +674,10 @@ class RunDemoTests(unittest.TestCase):
         self.assertEqual(dd_command[dd_command.index("--robot-model") + 1], "diff-drive")
         self.assertEqual(dd_command[dd_command.index("--initial-heading") + 1], "90.0")
         self.assertEqual(dd_command[dd_command.index("--heading-gain") + 1], "4.0")
+        lidar_command = run_demo.simulator_command(run_demo.parse_args(
+            ["--lidar-beams", "36", "--lidar-noise", "0.02"]))
+        self.assertEqual(lidar_command[lidar_command.index("--lidar-beams") + 1], "36")
+        self.assertEqual(lidar_command[lidar_command.index("--lidar-noise") + 1], "0.02")
 
     def test_animation_only_when_requested(self):
         self.assertIsNone(run_demo.animation_args(run_demo.parse_args([])))

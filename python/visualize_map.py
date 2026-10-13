@@ -33,6 +33,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Circle, Patch
 
@@ -62,6 +63,9 @@ TRAJ_TIME, TRAJ_X, TRAJ_Y, TRAJ_TARGET = range(4)
 HEADING_COLUMNS = ("theta", "linear_velocity", "angular_velocity")
 TRAJ_THETA, TRAJ_V, TRAJ_OMEGA = range(4, 7)
 HEADING_COLOR = "#1a1a1a"   # heading arrows / line (neutral ink, not a series color)
+LIDAR_RAY_COLOR = "#2a9d8f"   # LiDAR beams
+LIDAR_HIT_COLOR = "#14605a"   # LiDAR returns (obstacle points)
+LIDAR_COLUMNS = ("time", "beam", "angle", "range", "hit")
 SIMULATION_COLUMNS = (
     "status", "success", "navigation_success", "steps", "travel_time_s",
     "distance_traveled_m", "final_goal_error_m", "collision_count",
@@ -477,6 +481,104 @@ def plot_position_vs_time(trajectory: np.ndarray, sim: SimulationMetrics, output
     return fig
 
 
+@dataclass
+class LidarScans:
+    """All scans of a run: one row per scan, one column per beam."""
+    times: np.ndarray     # (S,)
+    angles: np.ndarray    # (S, B), world frame, rad
+    ranges: np.ndarray    # (S, B), m
+    hits: np.ndarray      # (S, B), bool: False = no return within the maximum range
+
+
+def load_lidar(path: Path) -> LidarScans | None:
+    """lidar_scans.csv written by the simulator, or None if there is none."""
+    if not path.is_file():
+        return None
+    rows = _read_csv(path, LIDAR_COLUMNS)
+    if not rows:
+        return None
+    try:
+        data = np.array([(float(r["time"]), int(r["beam"]), float(r["angle"]),
+                          float(r["range"]), int(r["hit"])) for r in rows], dtype=float)
+    except ValueError as error:
+        raise ResultFileError(f"'{path}' has a malformed value: {error}") from error
+    beams = int(data[:, 1].max()) + 1
+    if len(data) % beams != 0 or not np.array_equal(data[:, 1],
+                                                     np.tile(np.arange(beams), len(data) // beams)):
+        raise ResultFileError(f"'{path}': every scan must list beams 0..{beams - 1} in order")
+    shape = (len(data) // beams, beams)
+    times = data[:, 0].reshape(shape)
+    if not np.all(times == times[:, :1]):
+        raise ResultFileError(f"'{path}': beams of one scan have different times")
+    return LidarScans(times[:, 0], data[:, 2].reshape(shape), data[:, 3].reshape(shape),
+                      data[:, 4].reshape(shape).astype(bool))
+
+
+def check_lidar_matches_trajectory(scans: LidarScans, trajectory: np.ndarray) -> None:
+    if len(scans.times) != len(trajectory) or not np.allclose(scans.times,
+                                                               trajectory[:, TRAJ_TIME]):
+        raise ResultFileError("lidar_scans.csv does not match trajectory.csv "
+                              "(one scan per trajectory sample); re-run the simulator")
+
+
+def lidar_segments(scans: LidarScans, trajectory: np.ndarray, index: int,
+                   resolution: float) -> tuple[np.ndarray, np.ndarray]:
+    """Rays of scan `index` as grid-coordinate segments, and the return points."""
+    ox, oy = trajectory[index, TRAJ_X], trajectory[index, TRAJ_Y]
+    ends_x = ox + scans.ranges[index] * np.cos(scans.angles[index])
+    ends_y = oy + scans.ranges[index] * np.sin(scans.angles[index])
+    starts = np.column_stack([np.full_like(ends_x, ox), np.full_like(ends_y, oy)])
+    ends = np.column_stack([ends_x, ends_y])
+    segments = world_to_grid(np.stack([starts, ends], axis=1), resolution)
+    hits = world_to_grid(ends[scans.hits[index]], resolution)
+    return segments, hits
+
+
+def plot_lidar_scan(grid: np.ndarray, metrics: PlanningMetrics, trajectory: np.ndarray,
+                    scans: LidarScans, output: Path, inflated: np.ndarray | None = None):
+    """The scan with the closest return: rays on the map, and range vs. beam angle."""
+    masked = np.where(scans.hits, scans.ranges, np.inf)
+    index = int(np.argmin(masked.min(axis=1)))
+    fig = plt.figure(figsize=(13, 6.6), layout="constrained")
+    ax = fig.add_subplot(1, 2, 1)
+    ax_polar = fig.add_subplot(1, 2, 2, projection="polar")
+    draw_grid(ax, grid, metrics.resolution)
+    extra = draw_inflation(ax, grid, inflated)
+    segments, hits = lidar_segments(scans, trajectory, index, metrics.resolution)
+    ax.add_collection(LineCollection(segments, colors=LIDAR_RAY_COLOR, linewidths=0.8,
+                                     alpha=0.7, zorder=2.5, label="LiDAR rays"))
+    ax.plot(hits[:, 0], hits[:, 1], linestyle="none", marker="o", markersize=3.5,
+            color=LIDAR_HIT_COLOR, zorder=2.6, label="LiDAR returns")
+    traj_x = world_to_grid(trajectory[:, TRAJ_X], metrics.resolution)
+    traj_y = world_to_grid(trajectory[:, TRAJ_Y], metrics.resolution)
+    ax.plot(traj_x[: index + 1], traj_y[: index + 1], color=TRAJECTORY_COLOR, linewidth=1.8,
+            label="Robot trajectory", zorder=3)
+    draw_start_goal(ax, metrics.start, metrics.goal)
+    ax.plot(traj_x[index], traj_y[index], marker="o", markersize=10, color=ROBOT_COLOR,
+            markeredgecolor="black", linestyle="none", label="Robot", zorder=3.5)
+    handles, _ = ax.get_legend_handles_labels()
+    ax.legend(handles=_legend_handles() + extra + handles, loc="upper center",
+              bbox_to_anchor=(0.5, -0.09), ncol=3, frameon=False, fontsize=9)
+    # Polar view in the image convention (+y down) so it matches the map: angles
+    # grow clockwise from +x.
+    ax_polar.set_theta_direction(-1)
+    ax_polar.plot(np.append(scans.angles[index], scans.angles[index][0]),
+                  np.append(scans.ranges[index], scans.ranges[index][0]),
+                  color=LIDAR_RAY_COLOR, linewidth=1.2)
+    ax_polar.plot(scans.angles[index][scans.hits[index]], scans.ranges[index][scans.hits[index]],
+                  linestyle="none", marker="o", markersize=3.5, color=LIDAR_HIT_COLOR)
+    ax_polar.set_title("range (m) by beam direction (0° = +x, 90° = down the map)",
+                       fontsize=10, pad=18)
+    closest = masked[index].min()
+    fig.suptitle(f"LiDAR scan at t = {scans.times[index]:.1f} s: closest return "
+                 f"{closest:.3f} m  ({scans.ranges.shape[1]} beams, "
+                 f"{100 * scans.hits.mean():.0f} % of all beams returned)")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=FIGURE_DPI)
+    print(f"Saved {output}")
+    return fig
+
+
 def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
                             waypoints: np.ndarray, results_dir: Path,
                             output_dir: Path, inflated: np.ndarray | None = None) -> None:
@@ -494,6 +596,11 @@ def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
     plot_trajectory(grid, metrics, waypoints, trajectory, sim,
                     output_dir / "trajectory.png", inflated)
     plot_position_vs_time(trajectory, sim, output_dir / "robot_position_vs_time.png")
+    scans = load_lidar(results_dir / "lidar_scans.csv")
+    if scans is not None:
+        check_lidar_matches_trajectory(scans, trajectory)
+        plot_lidar_scan(grid, metrics, trajectory, scans, output_dir / "lidar_scan.png",
+                        inflated)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

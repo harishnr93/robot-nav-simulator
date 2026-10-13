@@ -39,6 +39,7 @@ from typing import NamedTuple
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import animation
+from matplotlib.collections import LineCollection
 from matplotlib.backend_bases import FigureCanvasBase
 from PIL import Image
 
@@ -134,7 +135,8 @@ def check_trajectory_matches(metrics: vm.PlanningMetrics,
 def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
                     waypoints: np.ndarray, trajectory: np.ndarray,
                     sim: vm.SimulationMetrics, fps: float, playback_speed: float,
-                    dpi: int = ANIMATION_DPI, inflated: np.ndarray | None = None):
+                    dpi: int = ANIMATION_DPI, inflated: np.ndarray | None = None,
+                    lidar: vm.LidarScans | None = None):
     """Create the figure, the per-frame update function and a FuncAnimation."""
     res = metrics.resolution
     t_start = trajectory[0, vm.TRAJ_TIME]
@@ -161,6 +163,13 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
         (robot,) = ax.plot([], [], marker="o", markersize=13, color=vm.ROBOT_COLOR,
                            markeredgecolor="black", markeredgewidth=1.0, linestyle="none",
                            label="Robot", zorder=3.5)
+    if lidar is not None:
+        # Each frame shows the latest scan (taken at a trajectory sample).
+        lidar_rays = ax.add_collection(LineCollection(
+            [], colors=vm.LIDAR_RAY_COLOR, linewidths=0.8, alpha=0.6, zorder=2.5,
+            label="LiDAR rays"))
+        (lidar_hits,) = ax.plot([], [], linestyle="none", marker="o", markersize=3,
+                                color=vm.LIDAR_HIT_COLOR, zorder=2.6, label="LiDAR returns")
     with_heading = vm.has_heading(trajectory)
     if with_heading:
         # Heading indicator: from the robot center, in the direction it faces.
@@ -205,13 +214,20 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
             status_text.set_text(sim.status)
             status_text.get_bbox_patch().set_edgecolor(
                 STATUS_EDGE_COLORS.get(sim.status, vm.GOAL_COLOR))
+        artists = [robot, trail]
         if with_heading:
             theta = heading_at(trajectory, t)
             cx, cy = vm.world_to_grid(x, res), vm.world_to_grid(y, res)
             heading_line.set_data([cx, cx + heading_length * np.cos(theta)],
                                   [cy, cy + heading_length * np.sin(theta)])
-            return robot, trail, heading_line, time_text, status_text
-        return robot, trail, time_text, status_text
+            artists.append(heading_line)
+        if lidar is not None:
+            scan = max(int(np.searchsorted(lidar.times, t, side="right")) - 1, 0)
+            segments, hits = vm.lidar_segments(lidar, trajectory, scan, res)
+            lidar_rays.set_segments(segments)
+            lidar_hits.set_data(hits[:, 0], hits[:, 1])
+            artists += [lidar_rays, lidar_hits]
+        return (*artists, time_text, status_text)
 
     anim = animation.FuncAnimation(fig, update, frames=len(times),
                                    interval=1000.0 / fps, blit=True, repeat=True)
@@ -370,8 +386,11 @@ def main(argv: list[str] | None = None) -> int:
         trajectory = vm.load_trajectory(args.results_dir / "trajectory.csv")
         sim = vm.load_simulation_metrics(args.results_dir / "simulation_metrics.csv")
         inflated = vm.load_inflated_map(args.results_dir, grid, metrics)
+        lidar = vm.load_lidar(args.results_dir / "lidar_scans.csv")
         if len(trajectory) > 0:
             check_trajectory_matches(metrics, trajectory)
+            if lidar is not None:
+                vm.check_lidar_matches_trajectory(lidar, trajectory)
     except vm.ResultFileError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -388,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     duration = trajectory[-1, vm.TRAJ_TIME] - trajectory[0, vm.TRAJ_TIME]
     playback = args.playback_speed or default_playback_speed(duration)
     robot_anim = build_animation(grid, metrics, waypoints, trajectory,
-                                 sim, args.fps, playback, args.dpi, inflated)
+                                 sim, args.fps, playback, args.dpi, inflated, lidar)
     print(f"Animating {duration:.1f} s of simulation at {playback:.2f}x: "
           f"{robot_anim.frame_count} frames at {args.fps:g} fps")
 

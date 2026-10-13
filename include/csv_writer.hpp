@@ -24,6 +24,10 @@
 //   final_goal_error_m,collision_count,speed_mps,dt_s,goal_tolerance_m,max_time_s,
 //   robot_radius_m,robot_model,turns,turn_time_s,total_rotation_rad,final_heading_rad
 // (the last four are empty for the point robot)
+// lidar_scans.csv (only with LiDAR enabled), one row per beam and scan:
+//   time,beam,angle,range,hit
+// angle in the world frame (rad); hit = 0 means no return within the maximum range,
+// in which case range equals the maximum range.
 // inflated_map.csv (only for robot_radius_m > 0): the planning map, in the same
 // format as input maps (rows of comma-separated 0/1, row 0 first).
 // navigation_success = planning succeeded AND the robot reached the goal without
@@ -36,6 +40,7 @@
 #include <vector>
 
 #include "grid_map.hpp"
+#include "lidar.hpp"
 #include "simulator.hpp"
 #include "types.hpp"
 
@@ -62,6 +67,10 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
                              const ReferenceCost& reference, double robot_radius,
                              double inflation_time_ms, Connectivity connectivity,
                              std::string& error);
+
+/// Writes lidar_scans.csv (see the format above).
+bool writeLidarCsv(const std::filesystem::path& file, const std::vector<LidarScan>& scans,
+                   std::string& error);
 
 /// Writes a map in the input map format (rows of comma-separated 0/1).
 bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error);

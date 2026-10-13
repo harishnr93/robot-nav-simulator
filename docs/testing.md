@@ -32,6 +32,7 @@ values are compared with explicit tolerances.
 | `test_octile` | 8-connected A*: exact costs, corner rule, optimality against exact Dijkstra, diagonal motion |
 | `test_diff_drive` | differential drive: unicycle kinematics, P heading controller, turn-then-drive follower |
 | `test_heading_control` | P vs. PID study: heading plant, controllers, metrics |
+| `test_lidar` | simulated LiDAR: exact ray casting, beam layout, noise, scans along a trajectory |
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
 | `cli_plan_maze_map` | plans and simulates on `maps/maze.csv`, expects `GOAL_REACHED` |
@@ -48,6 +49,8 @@ values are compared with explicit tolerances.
 | `cli_diff_drive_obstacles_map` | `maps/obstacles.csv` with `--robot-model diff-drive`: expects `GOAL_REACHED`, travel time 38.50 s and 3 turns in place taking 4.50 s |
 | `cli_diff_drive_footprint_octile` | fine map with footprint, 8-connectivity, differential drive and `--initial-heading 90`: expects `GOAL_REACHED` with 0 collisions |
 | `cli_rejects_bad_robot_model` | `--robot-model tank`: expects "--robot-model must be point or diff-drive" |
+| `cli_lidar_scans` | obstacles map, differential drive, `--lidar-beams 72`: expects 386 scans and a closest return of 0.250 m |
+| `cli_rejects_bad_lidar_settings` | `--lidar-fov 400`: expects "invalid LiDAR parameters" |
 | `heading_experiment_p_vs_pid` | runs the P vs. PID experiment: expects P to never settle under the disturbance and PID to settle |
 | `heading_experiment_rejects_bad_gain` | `--kp -1`: expects a non-zero exit code |
 | `cli_rejects_overshooting_heading_gain` | `--heading-gain 20` (gain × dt = 2): expects "invalid motion parameters: heading gain" |
@@ -58,7 +61,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (45 tests, about 15 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (50 tests, about 22 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -72,6 +75,7 @@ binary into temporary directories.
 | Result validation | non-increasing timestamps and missing columns are rejected |
 | Animation integration | the robot in each frame is at the trajectory position for that frame's time, and in an independent check from the motion model, `x(t) = 0.75 + 0.5 t` on the first leg at a time *between* samples; the time label matches; the status reads `NAVIGATING …` and then `GOAL_REACHED` / `TIMEOUT` |
 | Blitting | blitted frames are pixel-identical to full renders of the same state (first, middle and last frame) |
+| LiDAR | scans load as (scans × beams), one per trajectory sample, with heading-relative beams; no-return beams carry the maximum range; scans of another run and malformed beam orders are rejected; ray segments start at the robot and have the measured lengths; the animation draws the latest scan, and its blitted frames equal full renders; `lidar_scan.png` is written only with LiDAR data; `run_demo.py` forwards the LiDAR options |
 | Heading control plots | the experiment's metrics show P's steady-state errors `−d/Kp` and `w/Kp` and PID's ≈ 0, and "never" settling for P under the disturbance; all five figures are written; run files have a uniform 10 ms time base, wrapped errors and commands within the limit; missing and malformed inputs are reported |
 | Differential drive | heading columns are loaded (45 turn samples for 3 turns, no translation while turning); point trajectories have no heading; heading interpolation takes the short way across ±180°; the animated heading line points along θ and the status reads TURNING / NAVIGATING; blitted frames with the heading line equal full renders; the position figure gains a θ(t) panel; `run_demo.py` passes string options unquoted |
 | Connectivity | an 8-connected plan is titled "8-connected A* path: 26 steps (8 diagonal)" and its drawn path contains the 8 diagonal moves; the 4-connected title is unchanged; an 8-connected benchmark marks every run optimal; `compare` writes its table and plot, measures the 29.3 % obstacle-free saving, and rejects benchmarks made on different maps; `run_demo.py` forwards `--connectivity` |
@@ -80,6 +84,25 @@ binary into temporary directories.
 | Analysis | the 95 % Wilson interval is correct (120/120, 10/20); summaries keep failed runs in counts, rates and planning-time statistics while path lengths use successful plans only; single-run metrics are recomputed from the raw CSV files (17.0 m, 34.0 s on the obstacles map) and a tampered `simulation_metrics.csv` is detected |
 | Benchmark | benchmark maps are identical for the same seed and differ between seeds, with start and goal cleared; a 12-run benchmark runs end to end and writes every summary file and plot |
 | `run_demo.py` | the simulator is called with an argument list (a map name containing spaces and `;` stays one argument); unset options are not passed, so the C++ defaults apply; animation runs only when requested; a missing executable gives exit code 127 |
+
+## LiDAR tests (`test_lidar.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Exact distances | to an obstacle face (3.5 m), the map border (1.5 m and 2.5 m), along a 30° beam (3.5 / cos 30°); no return beyond the range; a hit exactly at the range limit counts |
+| Corners | a 45° beam hits the diagonal obstacle at the shared corner (1.5·√2 m); a beam grazing an obstacle corner registers the touch |
+| Sensor inside an obstacle | range 0 |
+| Exact vs. reference | 2400 random rays on 60 random maps (0.25 and 0.5 m cells): the traversal equals an independent slab-intersection reference within 1e-9 m, and is never later than 1 mm sampling (which can miss thin slivers; it did on one ray) |
+| Beam layout | 8 beams over 360° from −180° with one beam straight ahead and none duplicated at +180°; 5 beams over 90° reach both ends of the field of view; a single beam points straight ahead |
+| Scans along a trajectory | one scan per sample with the sample's time and position; the forward beam follows the heading; exact ranges at the start (4.25 m ahead, 0.75 m behind) and at the end |
+| Noise | 8000 noisy ranges have mean ≈ 0 and standard deviation ≈ σ (within 3 mm); same seed gives the same scans, another seed different ones; huge noise is clamped to [0, max range] |
+| Validation | beams, field of view, range and noise limits |
+
+**LiDAR-off equivalence.** Without `--lidar-beams`, the new and previous binaries
+produce identical output files and console summaries on 400 random maps (mixing
+footprints, 8-connectivity, the differential drive and `--reference-bfs`), and a stale
+`lidar_scans.csv` is removed. The Python figures and GIFs of three scenarios are
+byte-identical.
 
 ## Heading-control tests (`test_heading_control.cpp`)
 
@@ -251,6 +274,11 @@ Additional unit tests:
   | Plant ignores the motor lag in the heading | 2 |
   | Integral term dropped | 2 |
   | Settling time measured at the first entry into the band | 2 |
+  | LiDAR: a corner touch is not counted (diagonal cell only) | 1 (LiDAR tests) |
+  | LiDAR: wrong first boundary for positive directions | 4 |
+  | LiDAR: range limit treated as exclusive | 1 |
+  | LiDAR: noise not clamped | 1 |
+  | LiDAR: duplicate beam at ±180° | 2 |
 
 - **Benchmark-scale optimality check:** every one of the 480 benchmark runs
   ([performance.md](performance.md)) compares A* with the reference BFS through

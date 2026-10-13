@@ -16,6 +16,7 @@
 #include "astar.hpp"
 #include "csv_writer.hpp"
 #include "footprint.hpp"
+#include "lidar.hpp"
 #include "grid_map.hpp"
 #include "robot.hpp"
 #include "simulator.hpp"
@@ -46,6 +47,7 @@ struct CliOptions {
     bool has_goal = false;
     double resolution = kDefaultResolution;
     amr::MotionConfig motion;
+    amr::LidarConfig lidar;
     std::filesystem::path output_dir = "results";
     bool reference_bfs = false;
     amr::Connectivity connectivity = amr::Connectivity::Four;
@@ -81,6 +83,13 @@ void printUsage(std::ostream& os) {
           "                        in 1/s (5.0); K * dt must be at most 1\n"
           "  --initial-heading DEG Differential drive: heading at t = 0 in degrees, 0 =\n"
           "                        facing +x, 90 = facing +y (down the map) (default 0)\n"
+          "  --lidar-beams N       Simulated 2D LiDAR with N beams, one scan per\n"
+          "                        trajectory sample (default 0 = off)\n"
+          "  --lidar-fov DEG       LiDAR field of view in degrees, centred on the heading\n"
+          "                        (default 360)\n"
+          "  --lidar-range M       LiDAR maximum range in m (default 5)\n"
+          "  --lidar-noise SIGMA   Gaussian range noise in m (default 0)\n"
+          "  --lidar-seed N        Seed of the range noise (default 0)\n"
           "  --robot-radius M      Robot footprint radius in m; obstacles are inflated\n"
           "                        by it for planning (default 0 = point robot)\n"
           "  --output DIR          Output directory (default results/)\n"
@@ -96,6 +105,7 @@ void printUsage(std::ostream& os) {
           "  DIR/trajectory.csv          time,x,y,target_waypoint_index\n"
           "  DIR/simulation_metrics.csv  navigation status, travel time, distance, collisions\n"
           "  DIR/inflated_map.csv        planning map after inflation (robot radius > 0)\n"
+          "  DIR/lidar_scans.csv         LiDAR scans: time,beam,angle,range,hit (LiDAR on)\n"
           "\n"
           "Exit codes:\n"
           "  0 goal reached, 1 usage error, 2 map error, 3 invalid start/goal,\n"
@@ -205,6 +215,30 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             ok = parseNumber(options.motion.max_angular_speed);
         } else if (arg == "--heading-gain") {
             ok = parseNumber(options.motion.heading_gain);
+        } else if (arg == "--lidar-beams") {
+            double beams = 0.0;
+            ok = parseNumber(beams);
+            if (ok && (beams != std::floor(beams) || beams < 0 || beams > amr::kMaxLidarBeams)) {
+                error = "--lidar-beams must be a whole number between 0 and 3600";
+                ok = false;
+            }
+            options.lidar.beams = static_cast<int>(beams);
+        } else if (arg == "--lidar-fov") {
+            double degrees = 0.0;
+            ok = parseNumber(degrees);
+            options.lidar.fov = degrees * kRadiansPerDegree;
+        } else if (arg == "--lidar-range") {
+            ok = parseNumber(options.lidar.max_range);
+        } else if (arg == "--lidar-noise") {
+            ok = parseNumber(options.lidar.noise_stddev);
+        } else if (arg == "--lidar-seed") {
+            double seed = 0.0;
+            ok = parseNumber(seed);
+            if (ok && (seed != std::floor(seed) || seed < 0 || seed > 4294967295.0)) {
+                error = "--lidar-seed must be a whole number between 0 and 4294967295";
+                ok = false;
+            }
+            options.lidar.seed = static_cast<std::uint32_t>(seed);
         } else if (arg == "--initial-heading") {
             double degrees = 0.0;
             ok = parseNumber(degrees);
@@ -247,8 +281,11 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
         error = "missing required option --goal";
     } else {
         const std::string motion_error = amr::validateMotionConfig(options.motion);
+        const std::string lidar_error = amr::validateLidarConfig(options.lidar);
         if (!motion_error.empty()) {
             error = "invalid motion parameters: " + motion_error;
+        } else if (!lidar_error.empty()) {
+            error = "invalid LiDAR parameters: " + lidar_error;
         }
     }
     if (!error.empty()) {
@@ -292,7 +329,8 @@ Inflation inflate(const amr::GridMap& map, double robot_radius) {
 
 void printSummary(const CliOptions& options, const amr::GridMap& map,
                   const Inflation& inflation, const amr::PlanResult& plan,
-                  const ReferenceCheck& reference, const amr::SimulationResult& sim) {
+                  const ReferenceCheck& reference, const amr::SimulationResult& sim,
+                  const std::vector<amr::LidarScan>& scans) {
     const amr::WorldPoint start_w = map.gridToWorld(options.start);
     const amr::WorldPoint goal_w = map.gridToWorld(options.goal);
     std::cout << std::fixed << std::setprecision(2);
@@ -352,6 +390,32 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
                       << sim.trajectory.back().state.theta / kRadiansPerDegree << " deg\n";
         }
     }
+    if (!scans.empty()) {
+        // Closest return over the run: the robot's minimum clearance as the LiDAR saw it.
+        double closest = options.lidar.max_range;
+        double closest_time = 0.0;
+        std::size_t returns = 0;
+        std::size_t beams = 0;
+        for (const amr::LidarScan& scan : scans) {
+            for (std::size_t i = 0; i < scan.ranges.size(); ++i) {
+                ++beams;
+                if (scan.hits[i]) {
+                    ++returns;
+                    if (scan.ranges[i] < closest) {
+                        closest = scan.ranges[i];
+                        closest_time = scan.time;
+                    }
+                }
+            }
+        }
+        std::cout << std::setprecision(2) << "LiDAR:          " << options.lidar.beams
+                  << " beams over " << options.lidar.fov / kRadiansPerDegree << " deg, range "
+                  << options.lidar.max_range << " m, " << scans.size() << " scans, "
+                  << std::setprecision(1) << 100.0 * static_cast<double>(returns) /
+                         static_cast<double>(beams)
+                  << " % returns, closest " << std::setprecision(3) << closest << " m at t = "
+                  << std::setprecision(1) << closest_time << " s\n";
+    }
     std::cout << "Results:        " << options.output_dir.string() << '\n';
 }
 
@@ -376,7 +440,7 @@ int exitCodeFor(amr::PlanStatus plan_status, amr::NavigationStatus nav_status) {
 bool writeResults(const CliOptions& options, const amr::GridMap& map,
                   const Inflation& inflation, const amr::PlanResult& plan,
                   const ReferenceCheck& reference, const amr::SimulationResult& sim,
-                  std::string& error) {
+                  const std::vector<amr::LidarScan>& scans, std::string& error) {
     const std::filesystem::path& dir = options.output_dir;
     // Every file is rewritten on every run (header-only when there is no data),
     // so results from an earlier run can never be mistaken for the current one.
@@ -389,6 +453,16 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
     } else {
         std::error_code ignored;
         std::filesystem::remove(inflated_file, ignored);
+    }
+    // lidar_scans.csv only exists with the LiDAR enabled; a stale one is removed.
+    const std::filesystem::path lidar_file = dir / "lidar_scans.csv";
+    if (options.lidar.enabled()) {
+        if (!amr::writeLidarCsv(lidar_file, scans, error)) {
+            return false;
+        }
+    } else {
+        std::error_code ignored;
+        std::filesystem::remove(lidar_file, ignored);
     }
     return amr::writePathCsv(dir / "path.csv", map, plan.path, error) &&
            amr::writePlanningMetricsCsv(dir / "planning_metrics.csv", map, options.start,
@@ -437,6 +511,10 @@ int main(int argc, char** argv) {
     if (plan.success()) {
         sim = amr::simulatePath(map, plan.path, options.motion, options.connectivity);
     }
+    // The LiDAR observes the real map from every trajectory sample; it does not
+    // influence the motion.
+    const std::vector<amr::LidarScan> scans =
+        amr::scanTrajectory(map, sim.trajectory, options.lidar);
 
     std::error_code ec;
     std::filesystem::create_directories(options.output_dir, ec);
@@ -445,12 +523,12 @@ int main(int argc, char** argv) {
                   << "': " << ec.message() << '\n';
         return kExitOutputError;
     }
-    if (!writeResults(options, map, inflation, plan, reference, sim, error)) {
+    if (!writeResults(options, map, inflation, plan, reference, sim, scans, error)) {
         std::cerr << "Error: " << error << '\n';
         return kExitOutputError;
     }
 
-    printSummary(options, map, inflation, plan, reference, sim);
+    printSummary(options, map, inflation, plan, reference, sim, scans);
     if (!reference.agrees) {
         std::cerr << "Error: A* result disagrees with the reference BFS\n";
         return kExitReferenceMismatch;

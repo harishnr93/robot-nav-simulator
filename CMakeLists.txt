@@ -30,6 +30,7 @@ add_library(amr_core STATIC
     src/footprint.cpp
     src/diff_drive.cpp
     src/heading_control.cpp
+    src/lidar.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -64,7 +65,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -188,6 +189,19 @@ if(AMR_BUILD_TESTS)
     add_test(NAME heading_experiment_rejects_bad_gain
         COMMAND heading_experiment --kp -1)
     set_tests_properties(heading_experiment_rejects_bad_gain PROPERTIES WILL_FAIL TRUE)
+
+    add_test(NAME cli_lidar_scans
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --lidar-beams 72
+                --output ${CLI_OUT}/lidar)
+    set_tests_properties(cli_lidar_scans PROPERTIES
+        PASS_REGULAR_EXPRESSION "LiDAR: +72 beams over 360.00 deg, range 5.00 m, 386 scans.*closest 0.250 m")
+
+    add_test(NAME cli_rejects_bad_lidar_settings
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --lidar-beams 8 --lidar-fov 400)
+    set_tests_properties(cli_rejects_bad_lidar_settings PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid LiDAR parameters: LiDAR field of view")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

@@ -613,6 +613,79 @@ curving path without a constant lag.
 simulator keeps the ideal actuator of section 10 (`--robot-model diff-drive`), so its
 paths, collision guarantees and earlier results are unchanged.
 
+## 12. Simulated 2D LiDAR (`--lidar-beams N`)
+
+**Why:** a LiDAR is a mobile robot's main exteroceptive sensor. It measures the distance
+to the nearest obstacle in many directions. Simulating one gives later extensions
+(localization, dynamic obstacles) realistic measurements to work with. It also shows,
+from the robot's own point of view, how close it gets to obstacles along its route.
+
+**Sensor model.**
+
+- Beams are evenly spaced over the field of view (`--lidar-fov`, default 360°),
+  centred on the robot's heading.
+  - The point robot has no heading, so its beams use the world frame.
+  - A full circle has no duplicate beam at ±180°.
+- Each beam reports the distance to the first obstacle within `--lidar-range`
+  (default 5 m), or **no return** if there is none (stored as the maximum range with
+  `hit = 0`).
+- The area outside the map counts as a wall, as in the planner and footprint checks.
+- One scan is taken at every trajectory sample. The LiDAR only observes; it never
+  changes the motion.
+- Optional zero-mean Gaussian noise (`--lidar-noise`, seeded with `--lidar-seed`) is
+  added to the returns and clamped to `[0, max range]`.
+
+**Ray casting: exact grid traversal** (`castRay`, after Amanatides & Woo, 1987).
+
+- Instead of sampling points along the beam, the ray is followed from one cell boundary
+  to the next. Each step crosses into the neighbouring cell through the nearer of the
+  next vertical and the next horizontal boundary:
+
+  ```text
+  t_max_x, t_max_y   = distance along the ray to the next vertical / horizontal boundary
+  t_delta_x, t_delta_y = distance between consecutive boundaries (res / |cos|, res / |sin|)
+  repeat: step into the next cell across the nearer boundary; if it is occupied (or off
+          the map), the range is that boundary's t; advance that t_max by its t_delta
+  ```
+
+- Every cell the ray passes through is visited exactly once, in order. The range is the
+  exact distance to the obstacle face, with no sampling error.
+- The cost is proportional to the number of cells crossed, not to the range. Measured:
+  about 75 ns per ray, so one run of 386 scans × 72 beams takes 2.2 ms.
+
+**Why exact matters, with a real example.** An early version of the test compared the
+traversal with brute-force sampling every 1 mm. On one random ray the two disagreed:
+
+- The ray enters an occupied cell at 0.15025 m but crosses into a free cell 0.66 mm later.
+- Sampling every 1 mm stepped over that sliver and reported the obstacle 0.8 m away.
+- The traversal cannot skip a cell, so the test now uses an independent exact
+  reference: a slab intersection of the ray with every occupied cell and with the map
+  border. The traversal matches it to 1e-9 m on 2400 random rays. Sampling is only
+  checked one way: it may report an obstacle later, never earlier.
+
+**Corners.** A beam can pass exactly through a grid corner; this happens for every 45°
+beam from a cell centre. When it does, the ray touches the two cells beside the corner
+and the one diagonally beyond it. If any of them is occupied, that is a hit at the
+corner. This matches the rule that touching an obstacle counts, used by the
+corner-cutting check (section 9).
+
+**Output.**
+
+- `lidar_scans.csv` has one row per beam and scan: `time, beam, angle, range, hit`,
+  where the angle is in the world frame.
+- The console summary reports the share of beams that returned and the **closest
+  return** over the run. That is the robot's minimum clearance as its sensor sees it:
+  0.25 m on the default maps, where paths run along cell centres next to walls.
+- `visualize_map.py` saves `lidar_scan.png`: the scan with the closest return, drawn on
+  the map and as a polar range plot.
+- The animation draws each frame's latest scan.
+
+**Limitations.**
+
+- No beam divergence, intensity, reflectivity or multipath: each beam is an ideal ray.
+- The noise is additive Gaussian on the range only, with no dropouts or angular error.
+- The scan rate is tied to the simulation timestep.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
