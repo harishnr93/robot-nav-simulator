@@ -14,6 +14,8 @@ constexpr int kMillisecondsPrecision = 6;
 constexpr int kSecondsPrecision = 6;
 constexpr int kCellsPrecision = 6;
 constexpr int kAnglePrecision = 9;
+constexpr int kCovariancePrecision = 6;  // significant digits after the first
+constexpr int kNeesPrecision = 4;
 
 bool finishWrite(std::ofstream& out, const std::filesystem::path& file, std::string& error) {
     out.flush();
@@ -105,6 +107,35 @@ bool writeLidarCsv(const std::filesystem::path& file, const std::vector<LidarSca
                 << std::setprecision(kMillisecondsPrecision) << scan.ranges[i] << ','
                 << (scan.hits[i] ? 1 : 0) << '\n';
         }
+    }
+    return finishWrite(out, file, error);
+}
+
+bool writeLocalizationCsv(const std::filesystem::path& file,
+                          const std::vector<LocalizationSample>& samples, std::string& error) {
+    std::ofstream out(file);
+    if (!out) {
+        error = "cannot open '" + file.string() + "' for writing";
+        return false;
+    }
+    out << "time,true_x,true_y,true_theta,odom_x,odom_y,odom_theta,est_x,est_y,est_theta,"
+           "var_x,cov_xy,var_y,cov_x_theta,cov_y_theta,var_theta,beams_used,beams_rejected,"
+           "nees\n";
+    const auto pose = [&out](const Pose& p) {
+        out << std::fixed << std::setprecision(kMillisecondsPrecision) << p.x << ',' << p.y
+            << ',' << std::setprecision(kAnglePrecision) << p.theta << ',';
+    };
+    for (const LocalizationSample& s : samples) {
+        out << std::fixed << std::setprecision(kSecondsPrecision) << s.time << ',';
+        pose(s.truth);
+        pose(s.odometry);
+        pose(s.estimate);
+        // Upper triangle of the covariance: xx, xy, yy, x theta, y theta, theta theta.
+        out << std::scientific << std::setprecision(kCovariancePrecision) << s.covariance[0]
+            << ',' << s.covariance[1] << ',' << s.covariance[4] << ',' << s.covariance[2] << ','
+            << s.covariance[5] << ',' << s.covariance[8] << ',' << s.update.used << ','
+            << s.update.rejected << ',' << std::fixed << std::setprecision(kNeesPrecision)
+            << s.nees << '\n';
     }
     return finishWrite(out, file, error);
 }

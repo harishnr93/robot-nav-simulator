@@ -31,6 +31,7 @@ add_library(amr_core STATIC
     src/diff_drive.cpp
     src/heading_control.cpp
     src/lidar.cpp
+    src/ekf.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -65,7 +66,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -202,6 +203,25 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 2 2 --lidar-beams 8 --lidar-fov 400)
     set_tests_properties(cli_rejects_bad_lidar_settings PROPERTIES
         PASS_REGULAR_EXPRESSION "invalid LiDAR parameters: LiDAR field of view")
+
+    add_test(NAME cli_ekf_localization
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --lidar-beams 72 --ekf
+                --output ${CLI_OUT}/ekf)
+    set_tests_properties(cli_ekf_localization PROPERTIES
+        PASS_REGULAR_EXPRESSION "EKF estimate: +position error RMS 0.004 m.*Dead reckoning: +position error RMS 0.533 m")
+
+    add_test(NAME cli_ekf_requires_diff_drive
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --ekf)
+    set_tests_properties(cli_ekf_requires_diff_drive PROPERTIES
+        PASS_REGULAR_EXPRESSION "--ekf requires --robot-model diff-drive")
+
+    add_test(NAME cli_rejects_bad_ekf_settings
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --robot-model diff-drive --ekf --ekf-range-sigma 0)
+    set_tests_properties(cli_rejects_bad_ekf_settings PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid EKF parameters: EKF range sigma")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

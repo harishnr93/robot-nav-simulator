@@ -500,10 +500,15 @@ class LidarVisualizationTests(unittest.TestCase):
         scans = vm.load_lidar(self.dir / "lidar_scans.csv")
         robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
                                         fps=5, playback_speed=3.0, lidar=scans)
-        artists = robot_anim.update(9)              # t = 9 * 0.6 = 5.4 s -> scan at 5.4 s
+        artists = robot_anim.update(9)
         rays, hits = artists[3], artists[4]          # after robot, trail, heading line
         self.assertEqual(len(rays.get_segments()), 24)
-        index = int(np.searchsorted(scans.times, 5.4 + 1e-9) - 1)
+        # The latest scan at the frame's time (about 9 * 0.6 = 5.4 s, computed exactly
+        # as the animation does).
+        t = ar.frame_times(trajectory[0, vm.TRAJ_TIME], trajectory[-1, vm.TRAJ_TIME], 5, 3.0)[9]
+        index = int(np.searchsorted(scans.times, t, side="right") - 1)
+        segments, _ = vm.lidar_segments(scans, trajectory, index, metrics.resolution)
+        np.testing.assert_allclose(rays.get_segments(), segments)
         self.assertEqual(len(hits.get_xdata()), int(scans.hits[index].sum()))
         canvas = robot_anim.figure.canvas
         checked = {0, 9, robot_anim.frame_count - 1}
@@ -523,6 +528,94 @@ class LidarVisualizationTests(unittest.TestCase):
         run_simulator(point_dir, OBSTACLES_MAP, (1, 1), (18, 18))
         vm.main(["--map", str(OBSTACLES_MAP), "--results-dir", str(point_dir)])
         self.assertFalse((point_dir / "lidar_scan.png").exists())
+
+
+class LocalizationVisualizationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18),
+                                       "--robot-model", "diff-drive", "--lidar-beams", "24",
+                                       "--ekf"), 0)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_localization_is_loaded_and_matches_the_trajectory(self):
+        *_, trajectory, _ = load_results(self.dir, OBSTACLES_MAP)
+        loc = vm.load_localization(self.dir / "localization.csv")
+        self.assertEqual(loc.truth.shape, (len(trajectory), 3))
+        vm.check_localization_matches_trajectory(loc, trajectory)
+        np.testing.assert_allclose(loc.truth[:, 2], trajectory[:, vm.TRAJ_THETA], atol=1e-8)
+        # Covariances are symmetric and positive definite.
+        np.testing.assert_allclose(loc.covariance, np.swapaxes(loc.covariance, 1, 2))
+        self.assertTrue(np.all(np.linalg.eigvalsh(loc.covariance) > 0))
+        # The LiDAR keeps the EKF far closer to the truth than dead reckoning.
+        est = np.hypot(*loc.errors(loc.estimate)[:, :2].T)
+        odom = np.hypot(*loc.errors(loc.odometry)[:, :2].T)
+        self.assertLess(est.max(), 0.05)
+        self.assertGreater(odom.max(), 10 * est.max())
+        self.assertGreater(loc.beams_used.sum(), 0)
+        with self.assertRaises(vm.ResultFileError):
+            vm.check_localization_matches_trajectory(loc, trajectory[:-1])
+        self.assertIsNone(vm.load_localization(self.dir / "missing.csv"))
+
+    def test_heading_errors_are_wrapped(self):
+        loc = vm.load_localization(self.dir / "localization.csv")
+        loc.estimate[0, 2] = loc.truth[0, 2] + 2 * np.pi - 0.01
+        self.assertAlmostEqual(loc.errors(loc.estimate)[0, 2], 0.01, places=9)
+
+    def test_covariance_ellipse(self):
+        # Variances 0.04 and 0.01 m^2 along rotated axes: 3-sigma semi-axes 0.6 and 0.3 m,
+        # i.e. 1.2 and 0.6 cells at 0.5 m per cell.
+        angle = np.radians(30)
+        rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+        covariance = rotation @ np.diag([0.04, 0.01]) @ rotation.T
+        ellipse = vm.covariance_ellipse((2.0, 3.0), covariance, 0.5)
+        self.assertAlmostEqual(ellipse.get_width(), 2.4)
+        self.assertAlmostEqual(ellipse.get_height(), 1.2)
+        self.assertAlmostEqual(ellipse.get_angle() % 180, 30.0)
+
+    def test_figures(self):
+        self.assertEqual(vm.main(["--map", str(OBSTACLES_MAP), "--results-dir", str(self.dir)]), 0)
+        self.assertTrue((self.dir / "localization.png").is_file())
+        self.assertTrue((self.dir / "localization_errors.png").is_file())
+        # Without --ekf there is no localization.csv (a stale one is removed) and no figure.
+        plain = self.dir / "plain"
+        run_simulator(plain, OBSTACLES_MAP, (1, 1), (18, 18), "--robot-model", "diff-drive")
+        (plain / "localization.csv").write_text("stale")
+        run_simulator(plain, OBSTACLES_MAP, (1, 1), (18, 18), "--robot-model", "diff-drive")
+        self.assertFalse((plain / "localization.csv").exists())
+        vm.main(["--map", str(OBSTACLES_MAP), "--results-dir", str(plain)])
+        self.assertFalse((plain / "localization.png").exists())
+
+    def test_animation_draws_the_estimate(self):
+        grid, metrics, waypoints, trajectory, sim = load_results(self.dir, OBSTACLES_MAP)
+        loc = vm.load_localization(self.dir / "localization.csv")
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=5, playback_speed=3.0, localization=loc)
+        artists = robot_anim.update(9)
+        odom_trail, odom_marker, ellipse, ekf_marker = artists[3:7]
+        # The latest sample at the frame's time (about 5.4 s; computed exactly as the
+        # animation does, since 9 * 0.6 is not exact in floating point).
+        t = ar.frame_times(trajectory[0, vm.TRAJ_TIME], trajectory[-1, vm.TRAJ_TIME], 5, 3.0)[9]
+        k = int(np.searchsorted(loc.times, t, side="right") - 1)
+        res = metrics.resolution
+        self.assertEqual(len(odom_trail.get_xdata()), k + 1)
+        self.assertAlmostEqual(odom_marker.get_xdata()[0], vm.world_to_grid(loc.odometry[k, 0], res))
+        self.assertAlmostEqual(ekf_marker.get_xdata()[0], vm.world_to_grid(loc.estimate[k, 0], res))
+        self.assertAlmostEqual(ellipse.get_center()[1], vm.world_to_grid(loc.estimate[k, 1], res))
+        canvas = robot_anim.figure.canvas
+        checked = {0, 9, robot_anim.frame_count - 1}
+        blitted = {f: np.array(canvas.buffer_rgba())
+                   for f in ar.render_frames_blitted(robot_anim) if f in checked}
+        for frame in sorted(checked):
+            for artist in robot_anim.update(frame):
+                artist.set_animated(False)
+            canvas.draw()
+            np.testing.assert_array_equal(blitted[frame], np.array(canvas.buffer_rgba()),
+                                          err_msg=f"frame {frame}")
 
 
 HEADING_EXPERIMENT = SIMULATOR.parent / "heading_experiment"
@@ -678,6 +771,12 @@ class RunDemoTests(unittest.TestCase):
             ["--lidar-beams", "36", "--lidar-noise", "0.02"]))
         self.assertEqual(lidar_command[lidar_command.index("--lidar-beams") + 1], "36")
         self.assertEqual(lidar_command[lidar_command.index("--lidar-noise") + 1], "0.02")
+        self.assertNotIn("--ekf", lidar_command)
+        ekf_command = run_demo.simulator_command(run_demo.parse_args(
+            ["--ekf", "--odom-noise-drift", "0.01", "--odom-seed", "4"]))
+        self.assertIn("--ekf", ekf_command)
+        self.assertEqual(ekf_command[ekf_command.index("--odom-noise-drift") + 1], "0.01")
+        self.assertEqual(ekf_command[ekf_command.index("--odom-seed") + 1], "4")
 
     def test_animation_only_when_requested(self):
         self.assertIsNone(run_demo.animation_args(run_demo.parse_args([])))

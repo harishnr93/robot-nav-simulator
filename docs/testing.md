@@ -33,6 +33,7 @@ values are compared with explicit tolerances.
 | `test_diff_drive` | differential drive: unicycle kinematics, P heading controller, turn-then-drive follower |
 | `test_heading_control` | P vs. PID study: heading plant, controllers, metrics |
 | `test_lidar` | simulated LiDAR: exact ray casting, beam layout, noise, scans along a trajectory |
+| `test_ekf` | EKF localization: odometry model, Jacobians, Kalman update, gate, convergence, NEES consistency |
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
 | `cli_plan_maze_map` | plans and simulates on `maps/maze.csv`, expects `GOAL_REACHED` |
@@ -51,6 +52,9 @@ values are compared with explicit tolerances.
 | `cli_rejects_bad_robot_model` | `--robot-model tank`: expects "--robot-model must be point or diff-drive" |
 | `cli_lidar_scans` | obstacles map, differential drive, `--lidar-beams 72`: expects 386 scans and a closest return of 0.250 m |
 | `cli_rejects_bad_lidar_settings` | `--lidar-fov 400`: expects "invalid LiDAR parameters" |
+| `cli_ekf_localization` | obstacles map, differential drive, 72 beams, `--ekf`: expects EKF position error RMS 0.004 m and dead reckoning 0.533 m |
+| `cli_ekf_requires_diff_drive` | `--ekf` with the point robot: expects a clear error |
+| `cli_rejects_bad_ekf_settings` | `--ekf-range-sigma 0`: expects "invalid EKF parameters" |
 | `heading_experiment_p_vs_pid` | runs the P vs. PID experiment: expects P to never settle under the disturbance and PID to settle |
 | `heading_experiment_rejects_bad_gain` | `--kp -1`: expects a non-zero exit code |
 | `cli_rejects_overshooting_heading_gain` | `--heading-gain 20` (gain × dt = 2): expects "invalid motion parameters: heading gain" |
@@ -61,7 +65,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (50 tests, about 22 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (55 tests, about 28 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -76,6 +80,7 @@ binary into temporary directories.
 | Animation integration | the robot in each frame is at the trajectory position for that frame's time, and in an independent check from the motion model, `x(t) = 0.75 + 0.5 t` on the first leg at a time *between* samples; the time label matches; the status reads `NAVIGATING …` and then `GOAL_REACHED` / `TIMEOUT` |
 | Blitting | blitted frames are pixel-identical to full renders of the same state (first, middle and last frame) |
 | LiDAR | scans load as (scans × beams), one per trajectory sample, with heading-relative beams; no-return beams carry the maximum range; scans of another run and malformed beam orders are rejected; ray segments start at the robot and have the measured lengths; the animation draws the latest scan, and its blitted frames equal full renders; `lidar_scan.png` is written only with LiDAR data; `run_demo.py` forwards the LiDAR options |
+| Localization | `localization.csv` loads with symmetric, positive-definite covariances and matches the trajectory (rejected otherwise); the EKF error stays below 5 cm and dead reckoning drifts more than 10 times as far; heading errors are wrapped; the 3σ ellipse of a known covariance has the right axes and angle; the figures exist only with `--ekf`, and a stale `localization.csv` is removed; the animation shows the latest dead-reckoning pose and estimate, and its blitted frames equal full renders; `run_demo.py` forwards `--ekf` and the odometry options |
 | Heading control plots | the experiment's metrics show P's steady-state errors `−d/Kp` and `w/Kp` and PID's ≈ 0, and "never" settling for P under the disturbance; all five figures are written; run files have a uniform 10 ms time base, wrapped errors and commands within the limit; missing and malformed inputs are reported |
 | Differential drive | heading columns are loaded (45 turn samples for 3 turns, no translation while turning); point trajectories have no heading; heading interpolation takes the short way across ±180°; the animated heading line points along θ and the status reads TURNING / NAVIGATING; blitted frames with the heading line equal full renders; the position figure gains a θ(t) panel; `run_demo.py` passes string options unquoted |
 | Connectivity | an 8-connected plan is titled "8-connected A* path: 26 steps (8 diagonal)" and its drawn path contains the 8 diagonal moves; the 4-connected title is unchanged; an 8-connected benchmark marks every run optimal; `compare` writes its table and plot, measures the 29.3 % obstacle-free saving, and rejects benchmarks made on different maps; `run_demo.py` forwards `--connectivity` |
@@ -103,6 +108,36 @@ produce identical output files and console summaries on 400 random maps (mixing
 footprints, 8-connectivity, the differential drive and `--reference-bfs`), and a stale
 `lidar_scans.csv` is removed. The Python figures and GIFs of three scenarios are
 byte-identical.
+
+## EKF localization tests (`test_ekf.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Odometry increments reproduce the trajectory | "turn by Δφ, then drive Δs" from the true increments rebuilds the simulated differential-drive trajectory to 1e-9 m; every step is a turn or a drive; the commanded increments equal the true ones |
+| Odometry variances | the formulas `k_dist²·Δs` and `k_turn²·Δφ + k_drift²·Δs`, zero without motion |
+| Prediction Jacobians | `P' = F P Fᵀ + V M Vᵀ` equals the result with `F` and `V` from central finite differences of the motion model |
+| Range Jacobian | the analytic `∂r/∂(x, y, θ)` matches finite differences of the ray caster at 500 random poses and beams (vertical and horizontal faces) |
+| Single-beam update | the information-form update equals the textbook `K = P Hᵀ / (H P Hᵀ + R)` update to 1e-12 |
+| Innovation gate | an outlier 1 m off is rejected and leaves the estimate unchanged; without the gate it is fused; beams without a return are ignored |
+| Convergence | from 0.3 m and 6° off, repeated exact scans bring the estimate within 1 mm and 1 mrad of the true pose |
+| Along a trajectory | one sample per trajectory sample; same seed, same odometry with or without the LiDAR; without the LiDAR the estimate equals dead reckoning and the uncertainty never shrinks; with it, the error stays under 3 cm while dead reckoning drifts over 10 cm; determinism and seeds |
+| Noise-free odometry | dead reckoning follows the truth to 1e-9 |
+| Consistency | mean NEES over 200 prediction-only runs and 40 runs with a noisy 36-beam LiDAR is within [2.5, 3.5] and [2.4, 3.8] (measured 3.21 and 3.15) |
+| Heading wrap | driving west (heading ±180°), where the estimate flips between +π and −π, errors and NEES stay small |
+| Initial error | over 2000 seeds the initial estimate's error has zero mean and the stated standard deviation; dead reckoning starts from the same pose |
+| Validation | noise, range sigma, gate and initial-uncertainty limits |
+
+**Monte Carlo check of the covariance.** Beyond the mean NEES, the per-axis variance
+of the actual errors over 200 prediction-only runs was compared with the filter's
+covariance at several times (ratios 1.0–1.2). This found a real modelling error: with
+turn noise and drift both on, the heading variance was 35 % too large (mean NEES 2.4),
+because the process noise was evaluated at the measured increments. See
+[algorithms.md](algorithms.md#13-ekf-localization---ekf).
+
+**EKF-off equivalence.** Without `--ekf`, the new and previous binaries produce
+identical output files and console summaries on 400 random maps (about half with the
+LiDAR on, which also covers the ray caster's new hit-face output), and the Python
+figures and GIFs of three scenarios are byte-identical.
 
 ## Heading-control tests (`test_heading_control.cpp`)
 
@@ -279,6 +314,17 @@ Additional unit tests:
   | LiDAR: range limit treated as exclusive | 1 |
   | LiDAR: noise not clamped | 1 |
   | LiDAR: duplicate beam at ±180° | 2 |
+  | EKF: wrong sign of the range Jacobian's heading term | 5 (EKF tests) |
+  | EKF: wrong sign in the prediction Jacobian F | 2 |
+  | EKF: odometry noise not added in the prediction | 4 |
+  | EKF: prior information dropped in the update | 1 |
+  | EKF: innovation gate disabled | 5 |
+  | EKF: odometry noise std = variance (missing square root) | 1 |
+  | EKF: drive before turning in the odometry model | 1 |
+  | EKF: turn variance uses the distance | 1 |
+  | EKF: grazing beams not skipped | 2 |
+  | EKF: no initial error drawn | 1 |
+  | EKF: heading error not wrapped in the NEES | 1 |
 
 - **Benchmark-scale optimality check:** every one of the 480 benchmark runs
   ([performance.md](performance.md)) compares A* with the reference BFS through
@@ -291,7 +337,7 @@ Additional unit tests:
 
 ## Sanitizers and static analysis
 
-Run in Phase 6 on the final code:
+Run in Phase 6, and again after each extension (latest: EKF localization):
 
 ```bash
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
@@ -301,7 +347,7 @@ cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
 
 | Tool | Result |
 |---|---|
-| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 16 CTest entries pass, no reports |
+| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 40 C++ and CLI CTest entries pass, no reports |
 | `cppcheck` 2.7 (`--enable=warning,performance,portability`) | no findings |
 | `clang-tidy` 14 (`bugprone-*`, `performance-*`, `clang-analyzer-*`) | 3 notes about string concatenation in CLI error messages (run only when reporting an error); left as is |
 | `ruff` (pyflakes, pycodestyle, bugbear, pyupgrade, simplify) | no findings |

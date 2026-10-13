@@ -68,6 +68,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lidar-noise", type=float,
                         help="LiDAR Gaussian range noise, m (default 0)")
     parser.add_argument("--lidar-seed", type=int, help="LiDAR noise seed (default 0)")
+    parser.add_argument("--ekf", action="store_true",
+                        help="EKF localization from noisy odometry (and the LiDAR, if on); "
+                             "needs --robot-model diff-drive")
+    parser.add_argument("--odom-noise-dist", type=float,
+                        help="odometry distance error, m per sqrt(m) (default 0.05)")
+    parser.add_argument("--odom-noise-turn", type=float,
+                        help="odometry heading error, rad per sqrt(rad) turned (default 0.05)")
+    parser.add_argument("--odom-noise-drift", type=float,
+                        help="odometry heading drift, rad per sqrt(m) driven (default 0.02)")
+    parser.add_argument("--odom-seed", type=int, help="odometry noise seed (default 0)")
+    parser.add_argument("--ekf-range-sigma", type=float,
+                        help="LiDAR range std assumed by the EKF, m (default 0.05)")
+    parser.add_argument("--ekf-gate", type=float,
+                        help="EKF innovation gate, standard deviations (default 3)")
     parser.add_argument("--connectivity", type=int, choices=(4, 8),
                         help="grid moves: 4 = straight (default), 8 = also diagonal")
     parser.add_argument("--robot-radius", type=float,
@@ -105,10 +119,16 @@ def simulator_command(args: argparse.Namespace) -> list[str]:
                 ("--initial-heading", args.initial_heading),
                 ("--lidar-beams", args.lidar_beams), ("--lidar-fov", args.lidar_fov),
                 ("--lidar-range", args.lidar_range), ("--lidar-noise", args.lidar_noise),
-                ("--lidar-seed", args.lidar_seed))
+                ("--lidar-seed", args.lidar_seed),
+                ("--odom-noise-dist", args.odom_noise_dist),
+                ("--odom-noise-turn", args.odom_noise_turn),
+                ("--odom-noise-drift", args.odom_noise_drift), ("--odom-seed", args.odom_seed),
+                ("--ekf-range-sigma", args.ekf_range_sigma), ("--ekf-gate", args.ekf_gate))
     for flag, value in optional:
         if value is not None:
             command += [flag, value if isinstance(value, str) else repr(value)]
+    if args.ekf:
+        command.append("--ekf")
     return command
 
 

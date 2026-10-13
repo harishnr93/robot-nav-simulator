@@ -686,6 +686,137 @@ corner-cutting check (section 9).
 - The noise is additive Gaussian on the range only, with no dropouts or angular error.
 - The scan rate is tied to the simulation timestep.
 
+## 13. EKF localization (`--ekf`)
+
+**Why:** a real robot does not know its pose. Wheel odometry tells it how far it drove
+and turned, but every small error is integrated, so the pose estimate drifts without
+bound (dead reckoning). An Extended Kalman Filter (EKF) fuses that odometry with
+measurements of the known map, here the LiDAR ranges of section 12, and keeps both an
+estimate and an honest measure of its uncertainty (a covariance).
+
+**State:** the pose `(x, y, θ)` and its 3 × 3 covariance `P`. The filter runs
+alongside the simulation; the robot is still controlled with its true pose, so turning
+the EKF on never changes the motion.
+
+**Odometry model.** Between two samples, the turn-then-drive robot first turns by `Δφ`,
+then drives `Δs` straight ahead (it never does both at once, and the residual turn of at
+most 1e-6 rad absorbed when driving starts is applied first):
+
+```text
+θ' = θ + Δφ,    x' = x + Δs cos θ',    y' = y + Δs sin θ'
+```
+
+From the true increments this reproduces the simulated trajectory to 1e-9 m (tested).
+The simulated odometry reports the increments with Gaussian errors whose variance grows
+with the motion, as encoder errors accumulate per metre and per radian:
+
+```text
+var(Δs) = k_dist² |Δs|                      --odom-noise-dist  (default 0.05 m/√m)
+var(Δφ) = k_turn² |Δφ| + k_drift² |Δs|      --odom-noise-turn  (0.05 rad/√rad)
+                                            --odom-noise-drift (0.02 rad/√m)
+```
+
+`k_drift` is heading drift while driving straight (e.g. unequal wheel radii). With the
+defaults, dead reckoning ends 0.27–2.4 m off after the 17 m demo route (obstacles map,
+4-connected), depending on the seed (`--odom-seed`; seeds 0–5).
+
+**Prediction.** The estimate is moved with the measured increments, and the covariance
+is propagated through the motion model's Jacobians:
+
+```text
+P' = F P Fᵀ + V M Vᵀ,     F = ∂(x', y', θ')/∂(x, y, θ) = [1 0 −Δs sin θ'; 0 1 Δs cos θ'; 0 0 1]
+                          V = ∂(x', y', θ')/∂(Δs, Δφ)  = [cos θ' −Δs sin θ'; sin θ' Δs cos θ'; 0 1]
+                          M = diag(var(Δs), var(Δφ))
+```
+
+**A pitfall found by Monte Carlo testing.** The first version evaluated `M` at the
+*measured* increments, as is common. Over 200 runs the filter's heading variance was
+35 % larger than the actual spread of its errors (mean NEES 2.4 instead of 3). Each
+noise source alone was fine; only turn noise and drift together showed it. The cause:
+while driving straight, the measured turn is pure drift noise, a few milliradians, and
+`k_turn² |Δφ|` turned that noise into turn variance that was never there. `M` is now
+evaluated at the *commanded* increments (`v dt`, `ω dt`), which the controller knows
+exactly, and the mean NEES is 3.2.
+
+**Correction with the LiDAR.** For every beam with a return, the expected range `r̂` is
+cast from the estimated pose on the known map (section 12). The ray caster also reports
+which kind of cell face it hit. On a vertical face `x = X` the range is
+`r = (X − x) / cos φ`, with `φ = θ + beam offset`, and on a horizontal face
+`r = (Y − y) / sin φ`. That gives the exact measurement Jacobian:
+
+```text
+vertical face:    H = [ −1/cos φ,   0,          r tan φ ]
+horizontal face:  H = [  0,        −1/sin φ,   −r / tan φ ]
+```
+
+(The tests check it against finite differences of the ray caster at 500 random poses.)
+Beams are skipped where this linearization is poor: a predicted corner hit, a grazing
+beam (incidence above about 78°, where `1/cos φ` explodes) and beams without a measured
+or predicted return. A beam whose innovation `ν = z − r̂` is larger than `--ekf-gate`
+(default 3) standard deviations `√(H P Hᵀ + R)` is rejected as an outlier. Typically the
+real beam passed an obstacle edge that the predicted one hit, or the other way round.
+About 0.25 % of the beams are rejected on the demo route.
+
+The accepted beams are fused in one batch update in **information form**:
+
+```text
+P⁺ = (P⁻¹ + Σ Hᵢᵀ Hᵢ / R)⁻¹,     x⁺ = x + P⁺ Σ Hᵢᵀ νᵢ / R,     R = --ekf-range-sigma² (0.05 m)
+```
+
+This is the standard Kalman update of all the beams stacked (tested against
+`K = P Hᵀ / (H P Hᵀ + R)` for one beam), but it only inverts 3 × 3 matrices, however
+many beams there are.
+
+**Starting pose.** The filter, and dead reckoning, start from the true start pose plus
+an error drawn from the initial uncertainty (1 cm, 0.01 rad). Starting exactly at the
+truth while claiming 1 cm of uncertainty would make the first samples look
+over-cautious and bias the consistency check below.
+
+**Consistency (NEES).** If the covariance is honest, the normalized estimation error
+squared `NEES = eᵀ P⁻¹ e` (`e` = true − estimated pose, heading wrapped) averages 3,
+the state dimension. Below 3 the filter is too cautious, above 3 overconfident. Measured
+on the obstacles route:
+
+| Setting | Mean NEES |
+|---|---|
+| Prediction only, 200 runs | 3.19 |
+| 72 beams, 5 cm range noise, `--ekf-range-sigma 0.05`, 100 runs | 3.16 |
+| 72 beams, exact ranges, default sigma 0.05 m (one run) | 0.49 |
+
+The last line is cautious on purpose: the default assumes 5 cm of range noise, while
+the default LiDAR is exact. Set `--ekf-range-sigma` to the actual noise for a consistent
+filter.
+
+**Results** (obstacles map, 72 beams, defaults, one run): position error RMS 4 mm and
+at most 1.5 cm, against 0.53 m RMS and 1.14 m at the end for dead reckoning; heading
+RMS 0.06° against 4.8°. Over odometry seeds 0–5, the EKF stays at 3–4 mm RMS (at most
+1.7 cm) while dead reckoning ranges from 0.16 to 0.94 m RMS.
+
+**Cost.** About 0.1 µs per beam (a ray cast plus a rank-one information update): 7.5 µs
+per timestep with 72 beams, 2.9 ms for the whole run.
+
+**Output.**
+
+- `localization.csv`: per sample, the true, dead-reckoning and EKF poses, the
+  covariance, the beams fused and rejected, and the NEES.
+- The console summary compares EKF and dead-reckoning errors and reports the mean NEES.
+- `visualize_map.py` saves `localization.png` (the three trajectories on the map, with
+  3σ ellipses when they are large enough to see) and `localization_errors.png` (position
+  error on a log scale, and the x, y and heading errors inside the EKF's ±3σ bounds).
+- The animation shows the dead-reckoning trail and pose, and the EKF estimate with its
+  3σ ellipse.
+
+**Limitations.**
+
+- The map is known and static. This is localization, not SLAM.
+- Range measurements of one scan are treated as independent. Map discretization makes
+  neighbouring beams' errors correlated, which a real implementation would model or
+  avoid by subsampling beams.
+- Requires the differential drive (`--robot-model diff-drive`): the odometry model
+  measures turns and distances driven.
+- The estimate does not feed back into the control. Closing that loop is part of the
+  "realistic actuator" future improvement.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at

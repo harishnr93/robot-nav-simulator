@@ -16,6 +16,9 @@ If planning failed (no trajectory), nothing is animated: a static map with a
 
 Reads (from --results-dir, written by build/robot_simulator):
     planning_metrics.csv, path.csv, trajectory.csv, simulation_metrics.csv
+    lidar_scans.csv     optional (--lidar-beams): the latest scan's rays each frame
+    localization.csv    optional (--ekf): dead reckoning and the EKF estimate with its
+                        3-sigma ellipse
 
 Writes (to --output-dir, default --results-dir):
     navigation.gif           with --save-gif (PillowWriter; the default output)
@@ -50,6 +53,7 @@ TARGET_ANIMATION_DURATION_S = 12.0   # used to pick the default playback speed
 END_HOLD_S = 1.5                     # final frame is held this long
 ANIMATION_DPI = 80                   # lower than the static figures: smaller GIFs
 START_TOLERANCE_M = 1e-6
+LEGEND_ROW_HEIGHT_IN = 0.3            # figure growth per legend row beyond four
 STATUS_EDGE_COLORS = {"GOAL_REACHED": vm.START_COLOR}  # every other status: GOAL_COLOR
 
 
@@ -136,7 +140,8 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
                     waypoints: np.ndarray, trajectory: np.ndarray,
                     sim: vm.SimulationMetrics, fps: float, playback_speed: float,
                     dpi: int = ANIMATION_DPI, inflated: np.ndarray | None = None,
-                    lidar: vm.LidarScans | None = None):
+                    lidar: vm.LidarScans | None = None,
+                    localization: vm.Localization | None = None):
     """Create the figure, the per-frame update function and a FuncAnimation."""
     res = metrics.resolution
     t_start = trajectory[0, vm.TRAJ_TIME]
@@ -170,6 +175,21 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
             label="LiDAR rays"))
         (lidar_hits,) = ax.plot([], [], linestyle="none", marker="o", markersize=3,
                                 color=vm.LIDAR_HIT_COLOR, zorder=2.6, label="LiDAR returns")
+    if localization is not None:
+        # Latest localization sample: dead-reckoning trail and pose, EKF estimate
+        # with its 3-sigma position ellipse.
+        (odom_trail,) = ax.plot([], [], color=vm.DEAD_RECKONING_COLOR, linewidth=1.6,
+                                linestyle="--", label="Dead reckoning", zorder=3.1)
+        (odom_marker,) = ax.plot([], [], marker="X", markersize=10,
+                                 color=vm.DEAD_RECKONING_COLOR, markeredgecolor="black",
+                                 linestyle="none", zorder=3.7)
+        (ekf_marker,) = ax.plot([], [], marker="o", markersize=17, markerfacecolor="none",
+                                markeredgecolor=vm.EKF_COLOR, markeredgewidth=2.2,
+                                linestyle="none", label="EKF estimate", zorder=3.8)
+        ekf_ellipse = ax.add_patch(vm.covariance_ellipse(
+            (np.nan, np.nan), np.eye(2), res, facecolor=vm.EKF_COLOR, alpha=0.25,
+            edgecolor=vm.EKF_COLOR, zorder=3.75, in_layout=False,
+            label=f"EKF {vm.ELLIPSE_SIGMA:g}σ uncertainty"))
     with_heading = vm.has_heading(trajectory)
     if with_heading:
         # Heading indicator: from the robot center, in the direction it faces.
@@ -187,8 +207,12 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
     fig.suptitle(f"Robot navigation  ({model}{sim.speed_mps:g} m/s, dt {sim.dt_s:g} s, "
                  f"playback {playback_speed:.1f}x)")
     handles, _ = ax.get_legend_handles_labels()
-    fig.legend(handles=vm._legend_handles() + extra_handles + handles,
-               loc="outside lower center", ncol=3, frameon=False)
+    legend_handles = vm._legend_handles() + extra_handles + handles
+    fig.legend(handles=legend_handles, loc="outside lower center", ncol=3, frameon=False)
+    # Up to four legend rows fit the standard figure; grow it for more (EKF overlay).
+    extra_rows = -(-len(legend_handles) // 3) - 4
+    if extra_rows > 0:
+        fig.set_figheight(vm.FIGURE_SIZE[1] + LEGEND_ROW_HEIGHT_IN * extra_rows)
     # Compute the layout once, then freeze it: re-running constrained layout on
     # every frame would roughly double the rendering time.
     fig.canvas.draw()
@@ -227,6 +251,21 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
             lidar_rays.set_segments(segments)
             lidar_hits.set_data(hits[:, 0], hits[:, 1])
             artists += [lidar_rays, lidar_hits]
+        if localization is not None:
+            k = max(int(np.searchsorted(localization.times, t, side="right")) - 1, 0)
+            odom = localization.odometry
+            odom_trail.set_data(vm.world_to_grid(odom[: k + 1, 0], res),
+                                vm.world_to_grid(odom[: k + 1, 1], res))
+            odom_marker.set_data([vm.world_to_grid(odom[k, 0], res)],
+                                 [vm.world_to_grid(odom[k, 1], res)])
+            ex, ey = (vm.world_to_grid(v, res) for v in localization.estimate[k, :2])
+            ekf_marker.set_data([ex], [ey])
+            shape = vm.covariance_ellipse((ex, ey), localization.covariance[k, :2, :2], res)
+            ekf_ellipse.set_center(shape.get_center())
+            ekf_ellipse.set_width(shape.get_width())
+            ekf_ellipse.set_height(shape.get_height())
+            ekf_ellipse.set_angle(shape.get_angle())
+            artists += [odom_trail, odom_marker, ekf_ellipse, ekf_marker]
         return (*artists, time_text, status_text)
 
     anim = animation.FuncAnimation(fig, update, frames=len(times),
@@ -387,10 +426,13 @@ def main(argv: list[str] | None = None) -> int:
         sim = vm.load_simulation_metrics(args.results_dir / "simulation_metrics.csv")
         inflated = vm.load_inflated_map(args.results_dir, grid, metrics)
         lidar = vm.load_lidar(args.results_dir / "lidar_scans.csv")
+        localization = vm.load_localization(args.results_dir / "localization.csv")
         if len(trajectory) > 0:
             check_trajectory_matches(metrics, trajectory)
             if lidar is not None:
                 vm.check_lidar_matches_trajectory(lidar, trajectory)
+            if localization is not None:
+                vm.check_localization_matches_trajectory(localization, trajectory)
     except vm.ResultFileError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -407,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
     duration = trajectory[-1, vm.TRAJ_TIME] - trajectory[0, vm.TRAJ_TIME]
     playback = args.playback_speed or default_playback_speed(duration)
     robot_anim = build_animation(grid, metrics, waypoints, trajectory,
-                                 sim, args.fps, playback, args.dpi, inflated, lidar)
+                                 sim, args.fps, playback, args.dpi, inflated, lidar,
+                                 localization)
     print(f"Animating {duration:.1f} s of simulation at {playback:.2f}x: "
           f"{robot_anim.frame_count} frames at {args.fps:g} fps")
 

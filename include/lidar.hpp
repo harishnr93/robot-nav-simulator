@@ -42,10 +42,19 @@ constexpr double kMaxLidarRange = 1000.0;
 /// Empty string if the configuration is valid, otherwise the reason.
 std::string validateLidarConfig(const LidarConfig& config);
 
+/// Which kind of cell boundary a ray hit (used for the range Jacobian of the EKF).
+enum class RayFace {
+    None,        ///< no hit, or the sensor is inside an obstacle
+    Vertical,    ///< a boundary x = const (the ray entered a cell left or right)
+    Horizontal,  ///< a boundary y = const (the ray entered a cell above or below)
+    Corner,      ///< a cell corner (both at once)
+};
+
 /// Result of one ray cast.
 struct RayHit {
     bool hit = false;   ///< true if an obstacle or the map border is within max_range
     double range = 0.0; ///< distance to the hit, m (max_range when there is no hit)
+    RayFace face = RayFace::None;
 };
 
 /// Cast one ray from origin in direction `angle` (rad, world frame).

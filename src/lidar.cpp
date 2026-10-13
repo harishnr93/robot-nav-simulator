@@ -48,7 +48,7 @@ RayHit castRay(const GridMap& map, WorldPoint origin, double angle, double max_r
     int cx = static_cast<int>(std::floor(origin.x / res));
     int cy = static_cast<int>(std::floor(origin.y / res));
     if (blocked(map, cx, cy)) {
-        return {true, 0.0};  // the sensor itself is inside an obstacle (or off the map)
+        return {true, 0.0, RayFace::None};  // the sensor is inside an obstacle (or off the map)
     }
     // Distance along the ray to the next vertical / horizontal cell boundary, and the
     // distance between consecutive boundaries.
@@ -64,7 +64,7 @@ RayHit castRay(const GridMap& map, WorldPoint origin, double angle, double max_r
     while (true) {
         const double t = std::min(t_max_x, t_max_y);
         if (t > max_range) {
-            return {false, max_range};
+            return {false, max_range, RayFace::None};
         }
         const bool corner =
             std::fabs(t_max_x - t_max_y) <= kCornerTolerance * std::max(1.0, t);
@@ -72,7 +72,7 @@ RayHit castRay(const GridMap& map, WorldPoint origin, double angle, double max_r
             // Through a corner: the ray touches both side cells and the diagonal one.
             if (blocked(map, cx + step_x, cy) || blocked(map, cx, cy + step_y) ||
                 blocked(map, cx + step_x, cy + step_y)) {
-                return {true, t};
+                return {true, t, RayFace::Corner};
             }
             cx += step_x;
             cy += step_y;
@@ -82,13 +82,13 @@ RayHit castRay(const GridMap& map, WorldPoint origin, double angle, double max_r
             cx += step_x;
             t_max_x += t_delta_x;
             if (blocked(map, cx, cy)) {
-                return {true, t};
+                return {true, t, RayFace::Vertical};
             }
         } else {
             cy += step_y;
             t_max_y += t_delta_y;
             if (blocked(map, cx, cy)) {
-                return {true, t};
+                return {true, t, RayFace::Horizontal};
             }
         }
     }

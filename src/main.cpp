@@ -15,6 +15,7 @@
 
 #include "astar.hpp"
 #include "csv_writer.hpp"
+#include "ekf.hpp"
 #include "footprint.hpp"
 #include "lidar.hpp"
 #include "grid_map.hpp"
@@ -48,6 +49,7 @@ struct CliOptions {
     double resolution = kDefaultResolution;
     amr::MotionConfig motion;
     amr::LidarConfig lidar;
+    amr::EkfConfig ekf;
     std::filesystem::path output_dir = "results";
     bool reference_bfs = false;
     amr::Connectivity connectivity = amr::Connectivity::Four;
@@ -90,6 +92,14 @@ void printUsage(std::ostream& os) {
           "  --lidar-range M       LiDAR maximum range in m (default 5)\n"
           "  --lidar-noise SIGMA   Gaussian range noise in m (default 0)\n"
           "  --lidar-seed N        Seed of the range noise (default 0)\n"
+          "  --ekf                 EKF localization (differential drive): noisy wheel\n"
+          "                        odometry, corrected by the LiDAR scans if enabled\n"
+          "  --odom-noise-dist K   Odometry distance error, m per sqrt(m) driven (0.05)\n"
+          "  --odom-noise-turn K   Odometry heading error, rad per sqrt(rad) turned (0.05)\n"
+          "  --odom-noise-drift K  Odometry heading drift, rad per sqrt(m) driven (0.02)\n"
+          "  --odom-seed N         Seed of the odometry noise (default 0)\n"
+          "  --ekf-range-sigma M   LiDAR range std assumed by the EKF in m (default 0.05)\n"
+          "  --ekf-gate N          Reject beams whose innovation exceeds N std (default 3)\n"
           "  --robot-radius M      Robot footprint radius in m; obstacles are inflated\n"
           "                        by it for planning (default 0 = point robot)\n"
           "  --output DIR          Output directory (default results/)\n"
@@ -106,6 +116,7 @@ void printUsage(std::ostream& os) {
           "  DIR/simulation_metrics.csv  navigation status, travel time, distance, collisions\n"
           "  DIR/inflated_map.csv        planning map after inflation (robot radius > 0)\n"
           "  DIR/lidar_scans.csv         LiDAR scans: time,beam,angle,range,hit (LiDAR on)\n"
+          "  DIR/localization.csv        true, dead-reckoning and EKF poses, covariance (--ekf)\n"
           "\n"
           "Exit codes:\n"
           "  0 goal reached, 1 usage error, 2 map error, 3 invalid start/goal,\n"
@@ -239,6 +250,26 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
                 ok = false;
             }
             options.lidar.seed = static_cast<std::uint32_t>(seed);
+        } else if (arg == "--ekf") {
+            options.ekf.enabled = true;
+        } else if (arg == "--odom-noise-dist") {
+            ok = parseNumber(options.ekf.odometry.distance);
+        } else if (arg == "--odom-noise-turn") {
+            ok = parseNumber(options.ekf.odometry.turn);
+        } else if (arg == "--odom-noise-drift") {
+            ok = parseNumber(options.ekf.odometry.drift);
+        } else if (arg == "--odom-seed") {
+            double seed = 0.0;
+            ok = parseNumber(seed);
+            if (ok && (seed != std::floor(seed) || seed < 0 || seed > 4294967295.0)) {
+                error = "--odom-seed must be a whole number between 0 and 4294967295";
+                ok = false;
+            }
+            options.ekf.odometry.seed = static_cast<std::uint32_t>(seed);
+        } else if (arg == "--ekf-range-sigma") {
+            ok = parseNumber(options.ekf.range_sigma);
+        } else if (arg == "--ekf-gate") {
+            ok = parseNumber(options.ekf.gate);
         } else if (arg == "--initial-heading") {
             double degrees = 0.0;
             ok = parseNumber(degrees);
@@ -282,10 +313,16 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
     } else {
         const std::string motion_error = amr::validateMotionConfig(options.motion);
         const std::string lidar_error = amr::validateLidarConfig(options.lidar);
+        const std::string ekf_error = amr::validateEkfConfig(options.ekf);
         if (!motion_error.empty()) {
             error = "invalid motion parameters: " + motion_error;
         } else if (!lidar_error.empty()) {
             error = "invalid LiDAR parameters: " + lidar_error;
+        } else if (!ekf_error.empty()) {
+            error = "invalid EKF parameters: " + ekf_error;
+        } else if (options.ekf.enabled && options.motion.model != amr::RobotModel::DiffDrive) {
+            error = "--ekf requires --robot-model diff-drive (the odometry measures turns "
+                    "and distances driven)";
         }
     }
     if (!error.empty()) {
@@ -330,7 +367,8 @@ Inflation inflate(const amr::GridMap& map, double robot_radius) {
 void printSummary(const CliOptions& options, const amr::GridMap& map,
                   const Inflation& inflation, const amr::PlanResult& plan,
                   const ReferenceCheck& reference, const amr::SimulationResult& sim,
-                  const std::vector<amr::LidarScan>& scans) {
+                  const std::vector<amr::LidarScan>& scans,
+                  const std::vector<amr::LocalizationSample>& localization) {
     const amr::WorldPoint start_w = map.gridToWorld(options.start);
     const amr::WorldPoint goal_w = map.gridToWorld(options.goal);
     std::cout << std::fixed << std::setprecision(2);
@@ -416,6 +454,29 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
                   << " % returns, closest " << std::setprecision(3) << closest << " m at t = "
                   << std::setprecision(1) << closest_time << " s\n";
     }
+    if (!localization.empty()) {
+        const amr::LocalizationSummary summary = amr::summarizeLocalization(localization);
+        const auto errors = [](const amr::PoseErrorStats& stats) {
+            std::cout << "position error RMS " << std::setprecision(3) << stats.position_rms
+                      << " m, max " << stats.position_max << " m, final "
+                      << stats.position_final << " m; heading RMS " << std::setprecision(2)
+                      << stats.heading_rms / kRadiansPerDegree << " deg\n";
+        };
+        std::cout << "EKF estimate:   ";
+        errors(summary.estimate);
+        std::cout << "Dead reckoning: ";
+        errors(summary.odometry);
+        std::cout << "EKF updates:    ";
+        if (scans.empty()) {
+            std::cout << "none (no LiDAR: prediction only)";
+        } else {
+            std::cout << summary.beams_used << " beams fused, " << summary.beams_rejected
+                      << " rejected by the " << std::setprecision(1) << options.ekf.gate
+                      << "-sigma gate";
+        }
+        std::cout << ", mean NEES " << std::setprecision(2) << summary.mean_nees
+                  << " (3 = consistent)\n";
+    }
     std::cout << "Results:        " << options.output_dir.string() << '\n';
 }
 
@@ -440,7 +501,8 @@ int exitCodeFor(amr::PlanStatus plan_status, amr::NavigationStatus nav_status) {
 bool writeResults(const CliOptions& options, const amr::GridMap& map,
                   const Inflation& inflation, const amr::PlanResult& plan,
                   const ReferenceCheck& reference, const amr::SimulationResult& sim,
-                  const std::vector<amr::LidarScan>& scans, std::string& error) {
+                  const std::vector<amr::LidarScan>& scans,
+                  const std::vector<amr::LocalizationSample>& localization, std::string& error) {
     const std::filesystem::path& dir = options.output_dir;
     // Every file is rewritten on every run (header-only when there is no data),
     // so results from an earlier run can never be mistaken for the current one.
@@ -463,6 +525,16 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
     } else {
         std::error_code ignored;
         std::filesystem::remove(lidar_file, ignored);
+    }
+    // localization.csv only exists with --ekf; a stale one is removed.
+    const std::filesystem::path localization_file = dir / "localization.csv";
+    if (options.ekf.enabled) {
+        if (!amr::writeLocalizationCsv(localization_file, localization, error)) {
+            return false;
+        }
+    } else {
+        std::error_code ignored;
+        std::filesystem::remove(localization_file, ignored);
     }
     return amr::writePathCsv(dir / "path.csv", map, plan.path, error) &&
            amr::writePlanningMetricsCsv(dir / "planning_metrics.csv", map, options.start,
@@ -515,6 +587,10 @@ int main(int argc, char** argv) {
     // influence the motion.
     const std::vector<amr::LidarScan> scans =
         amr::scanTrajectory(map, sim.trajectory, options.lidar);
+    // The EKF runs alongside as well: it estimates the pose from noisy odometry and
+    // the scans, but the robot is controlled with its true pose.
+    const std::vector<amr::LocalizationSample> localization =
+        amr::runLocalization(map, sim.trajectory, scans, options.lidar, options.ekf);
 
     std::error_code ec;
     std::filesystem::create_directories(options.output_dir, ec);
@@ -523,12 +599,12 @@ int main(int argc, char** argv) {
                   << "': " << ec.message() << '\n';
         return kExitOutputError;
     }
-    if (!writeResults(options, map, inflation, plan, reference, sim, scans, error)) {
+    if (!writeResults(options, map, inflation, plan, reference, sim, scans, localization, error)) {
         std::cerr << "Error: " << error << '\n';
         return kExitOutputError;
     }
 
-    printSummary(options, map, inflation, plan, reference, sim, scans);
+    printSummary(options, map, inflation, plan, reference, sim, scans, localization);
     if (!reference.agrees) {
         std::cerr << "Error: A* result disagrees with the reference BFS\n";
         return kExitReferenceMismatch;

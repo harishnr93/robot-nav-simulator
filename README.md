@@ -56,6 +56,10 @@ comes from a reproducible benchmark.
 - Simulated 2D LiDAR (`--lidar-beams N`): exact ray casting against the grid (cell-by-cell
   traversal, no sampling), one scan per timestep relative to the robot's heading, optional
   seeded range noise, the rays drawn in the animation and a scan snapshot figure.
+- EKF localization (`--ekf`): noisy wheel odometry, an Extended Kalman Filter corrected
+  by the LiDAR ranges on the known map (exact range Jacobians, outlier gate), and the
+  estimated vs. true trajectory with error plots and 3σ bounds. Checked for statistical
+  consistency (NEES) by Monte Carlo.
 - P vs. PID heading-control study (`heading_experiment`): a heading with motor lag and a
   disturbance, both controllers (PID with derivative on the measurement and anti-windup)
   in four scenarios, with overshoot, settling time, steady-state and tracking error and
@@ -78,7 +82,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 81 C++ test cases, 28 end-to-end CLI checks and 50 Python tests, including A* vs. BFS
+- 94 C++ test cases, 31 end-to-end CLI checks and 55 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -207,6 +211,13 @@ and no timeout.
 | `--lidar-range M` | LiDAR maximum range | `5` |
 | `--lidar-noise SIGMA` | Gaussian range noise, m | `0` |
 | `--lidar-seed N` | seed of the range noise | `0` |
+| `--ekf` | EKF localization (needs `diff-drive`); corrected by the LiDAR if it is on | off |
+| `--odom-noise-dist K` | odometry distance error, m per √m driven | `0.05` |
+| `--odom-noise-turn K` | odometry heading error, rad per √rad turned | `0.05` |
+| `--odom-noise-drift K` | odometry heading drift, rad per √m driven | `0.02` |
+| `--odom-seed N` | seed of the odometry noise | `0` |
+| `--ekf-range-sigma M` | LiDAR range noise assumed by the EKF, m | `0.05` |
+| `--ekf-gate N` | reject beams whose innovation exceeds N standard deviations | `3` |
 | `--reference-bfs` | also run the reference search (BFS, or exact Dijkstra for 8-connectivity) and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
@@ -227,6 +238,8 @@ python3 python/visualize_map.py --map maps/obstacles.csv
 ```
 
 The trajectory figures are skipped when there is no trajectory (planning failed).
+Runs with the LiDAR add `lidar_scan.png`; runs with `--ekf` add `localization.png` and
+`localization_errors.png`.
 
 `visualize_map.py` refuses to plot results that do not belong to the given map
 (different size, or a path that crosses its obstacles).
@@ -265,7 +278,9 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 `run_demo.py` accepts the simulator's options (`--speed`, `--dt`, `--goal-tolerance`,
 `--max-time`, `--robot-radius`, `--connectivity`, `--robot-model`, `--max-angular-speed`,
 `--heading-gain`, `--initial-heading`, `--lidar-beams`, `--lidar-fov`, `--lidar-range`,
-`--lidar-noise`, `--lidar-seed`, `--resolution`, `--output`), the animation options `--animate`,
+`--lidar-noise`, `--lidar-seed`, `--ekf`, `--odom-noise-dist`, `--odom-noise-turn`,
+`--odom-noise-drift`, `--odom-seed`, `--ekf-range-sigma`, `--ekf-gate`, `--resolution`,
+`--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
 Its exit code is the simulator's (for example `4` when there is no path).
@@ -309,6 +324,41 @@ about 75 ns per ray (2.2 ms for 72 beams × 386 scans). Details:
 The animated GIF above uses `--fps 10 --dpi 70` to keep its size down. With many beams,
 GIFs get large (5 MB at 72 beams with the defaults), because the rays change many
 pixels every frame.
+
+### EKF localization
+
+```bash
+python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
+    --connectivity 8 --robot-model diff-drive --lidar-beams 36 --ekf --save-gif
+```
+
+```text
+EKF estimate:   position error RMS 0.005 m, max 0.019 m, final 0.000 m; heading RMS 0.11 deg
+Dead reckoning: position error RMS 0.580 m, max 1.359 m, final 1.359 m; heading RMS 6.96 deg
+EKF updates:    12647 beams fused, 36 rejected by the 3.0-sigma gate, mean NEES 0.58 (3 = consistent)
+```
+
+![EKF estimate vs. dead reckoning in the animation](docs/images/navigation_ekf.gif)
+
+![True, dead-reckoning and EKF trajectories](docs/images/localization.png)
+
+![Estimation errors with 3-sigma bounds](docs/images/localization_errors.png)
+
+The robot's wheel odometry is simulated with errors that grow with distance driven and
+angle turned. Integrated on its own (dead reckoning, dashed grey) it drifts more than a
+metre over the route. The EKF predicts with the same odometry and corrects with every
+LiDAR scan. It casts the expected range of each beam on the known map, uses the exact
+derivative of that range with respect to the pose, and rejects beams whose mismatch is
+implausible (for example, a beam that just missed an obstacle edge). The estimate stays
+within 2 cm of the truth.
+
+The filter is checked for honesty, not just accuracy. Over many runs its normalized
+estimation error squared (NEES) averages 3.2 without the LiDAR and 3.2 with 5 cm range
+noise; 3 is ideal. The 0.58 above is cautious on purpose, because the filter assumes
+5 cm range noise and the default LiDAR is exact (set `--ekf-range-sigma` to the actual
+noise). Getting there exposed a subtle modelling error, described with the method in
+[docs/algorithms.md](docs/algorithms.md#13-ekf-localization---ekf). The EKF costs about
+0.1 µs per beam. The robot is still steered by its true pose, so the EKF only observes.
 
 ### P vs. PID heading control
 
@@ -460,6 +510,11 @@ reference search found no path. Otherwise it is an integer step count (BFS) for
 is `0` when the beam found nothing within the maximum range, which is then reported as
 the range.
 
+**`localization.csv`** (only with `--ekf`): one row per trajectory sample,
+`time,true_x,true_y,true_theta,odom_x,odom_y,odom_theta,est_x,est_y,est_theta,var_x,cov_xy,var_y,cov_x_theta,cov_y_theta,var_theta,beams_used,beams_rejected,nees`.
+`odom_*` is dead reckoning and `est_*` the EKF estimate (m, rad); the covariance entries
+are in scientific notation; `nees` is `eᵀ P⁻¹ e` for the EKF error `e`.
+
 **`inflated_map.csv`** (only with `--robot-radius` > 0): the map A* planned on, in the
 same format as input maps.
 
@@ -542,7 +597,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 37 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 41 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -555,7 +610,7 @@ and static-analysis results.
 robot-nav-simulator/
 ├── CMakeLists.txt          build, tests (CTest) and benchmark targets
 ├── include/, src/          C++17 core: grid_map, astar, footprint, robot, diff_drive, simulator,
-│                           heading_control, lidar, csv_writer, main (CLI), heading_experiment
+│                           heading_control, lidar, ekf, csv_writer, main (CLI), heading_experiment
 ├── tests/                  C++ unit tests, Python tests, test map fixtures (tests/data/)
 ├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
 ├── python/                 generate_map, visualize_map, animate_robot, run_demo,
@@ -621,7 +676,8 @@ robot-nav-simulator/
   fastest route, not just the shortest.
 - ✅ **Simulated 2D LiDAR:** exact ray casting, scans every timestep, rays in the
   animation (`--lidar-beams`).
-- **EKF localization:** from noisy odometry.
+- ✅ **EKF localization:** noisy odometry, an EKF corrected by the LiDAR, estimated vs.
+  true trajectory with error plots (`--ekf`).
 - **Dynamic obstacles:** with replanning, where `AStarPlanner`'s reusable buffers already
   avoid per-request set-up.
 - **ROS 2 integration:** publishing the map, path and robot state for RViz2, keeping the

@@ -14,6 +14,9 @@ Writes:
                                          "No valid path" message on failure
     OUTPUT_DIR/trajectory.png            planned path vs. actual robot trajectory
     OUTPUT_DIR/robot_position_vs_time.png  robot x(t) and y(t)
+    OUTPUT_DIR/lidar_scan.png            LiDAR scan with the closest return (LiDAR on)
+    OUTPUT_DIR/localization.png          true vs. dead-reckoning vs. EKF trajectory (--ekf)
+    OUTPUT_DIR/localization_errors.png   estimation errors with the EKF's 3-sigma bounds
 
 Plots use grid coordinates (x = column, y = row, origin upper-left, y down),
 with a secondary axis in meters: world = (grid + 0.5) * resolution.
@@ -35,7 +38,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap
-from matplotlib.patches import Circle, Patch
+from matplotlib.patches import Circle, Ellipse, Patch
 
 FREE_COLOR = "#f2f2f2"
 OCCUPIED_COLOR = "#3c3c3c"
@@ -66,6 +69,13 @@ HEADING_COLOR = "#1a1a1a"   # heading arrows / line (neutral ink, not a series c
 LIDAR_RAY_COLOR = "#2a9d8f"   # LiDAR beams
 LIDAR_HIT_COLOR = "#14605a"   # LiDAR returns (obstacle points)
 LIDAR_COLUMNS = ("time", "beam", "angle", "range", "hit")
+EKF_COLOR = "#2a9d8f"             # EKF estimate (LiDAR-corrected: same hue as the LiDAR)
+DEAD_RECKONING_COLOR = "#8a8a8a"  # odometry only
+LOCALIZATION_COLUMNS = (
+    "time", "true_x", "true_y", "true_theta", "odom_x", "odom_y", "odom_theta",
+    "est_x", "est_y", "est_theta", "var_x", "cov_xy", "var_y", "cov_x_theta", "cov_y_theta",
+    "var_theta", "beams_used", "beams_rejected", "nees")
+ELLIPSE_SIGMA = 3.0
 SIMULATION_COLUMNS = (
     "status", "success", "navigation_success", "steps", "travel_time_s",
     "distance_traveled_m", "final_goal_error_m", "collision_count",
@@ -579,6 +589,170 @@ def plot_lidar_scan(grid: np.ndarray, metrics: PlanningMetrics, trajectory: np.n
     return fig
 
 
+@dataclass
+class Localization:
+    """localization.csv: poses are (N, 3) arrays of (x_m, y_m, theta_rad)."""
+    times: np.ndarray
+    truth: np.ndarray
+    odometry: np.ndarray
+    estimate: np.ndarray
+    covariance: np.ndarray   # (N, 3, 3), m^2 / m rad / rad^2
+    beams_used: np.ndarray
+    beams_rejected: np.ndarray
+    nees: np.ndarray
+
+    def errors(self, poses: np.ndarray) -> np.ndarray:
+        """truth - poses as (N, 3), heading error wrapped to (-pi, pi]."""
+        error = self.truth - poses
+        error[:, 2] = np.angle(np.exp(1j * error[:, 2]))
+        return error
+
+
+def load_localization(path: Path) -> Localization | None:
+    """localization.csv written with --ekf, or None if there is none."""
+    if not path.is_file():
+        return None
+    rows = _read_csv(path, LOCALIZATION_COLUMNS)
+    if not rows:
+        return None
+    try:
+        data = np.array([[float(r[c]) for c in LOCALIZATION_COLUMNS] for r in rows], dtype=float)
+    except ValueError as error:
+        raise ResultFileError(f"'{path}' has a malformed value: {error}") from error
+    if not np.isfinite(data).all():
+        raise ResultFileError(f"'{path}' contains non-finite values")
+    column = {name: data[:, i] for i, name in enumerate(LOCALIZATION_COLUMNS)}
+    xx, xy, yy = column["var_x"], column["cov_xy"], column["var_y"]
+    xt, yt, tt = column["cov_x_theta"], column["cov_y_theta"], column["var_theta"]
+    covariance = np.stack([np.stack([xx, xy, xt], -1), np.stack([xy, yy, yt], -1),
+                           np.stack([xt, yt, tt], -1)], -2)
+    def poses(prefix):
+        return np.column_stack([column[f"{prefix}_x"], column[f"{prefix}_y"],
+                                column[f"{prefix}_theta"]])
+    return Localization(column["time"], poses("true"), poses("odom"), poses("est"), covariance,
+                        column["beams_used"].astype(int), column["beams_rejected"].astype(int),
+                        column["nees"])
+
+
+def check_localization_matches_trajectory(loc: Localization, trajectory: np.ndarray) -> None:
+    if (len(loc.times) != len(trajectory)
+            or not np.allclose(loc.times, trajectory[:, TRAJ_TIME])
+            or not np.allclose(loc.truth[:, :2], trajectory[:, [TRAJ_X, TRAJ_Y]], atol=1e-5)):
+        raise ResultFileError("localization.csv does not match trajectory.csv "
+                              "(one sample per trajectory sample); re-run the simulator")
+
+
+def covariance_ellipse(center_grid: tuple[float, float], covariance_xy: np.ndarray,
+                       resolution: float, sigma: float = ELLIPSE_SIGMA, **kwargs) -> Ellipse:
+    """The sigma-ellipse of a 2 x 2 position covariance (m^2), in grid units."""
+    values, vectors = np.linalg.eigh(covariance_xy)
+    values = np.clip(values, 0.0, None)
+    angle = np.degrees(np.arctan2(vectors[1, 1], vectors[0, 1]))  # major axis
+    width = 2 * sigma * np.sqrt(values[1]) / resolution
+    height = 2 * sigma * np.sqrt(values[0]) / resolution
+    return Ellipse(center_grid, width, height, angle=angle, **kwargs)
+
+
+def _position_errors(loc: Localization) -> tuple[np.ndarray, np.ndarray]:
+    est = loc.errors(loc.estimate)
+    odom = loc.errors(loc.odometry)
+    return np.hypot(est[:, 0], est[:, 1]), np.hypot(odom[:, 0], odom[:, 1])
+
+
+def plot_localization(grid: np.ndarray, metrics: PlanningMetrics, loc: Localization,
+                      output: Path, inflated: np.ndarray | None = None):
+    """True trajectory vs. dead reckoning vs. the EKF estimate on the map, with
+    3-sigma position ellipses of the EKF along the way."""
+    # Taller than the other map figures: room for a three-line title.
+    fig, ax = plt.subplots(figsize=(FIGURE_SIZE[0], FIGURE_SIZE[1] + 0.6), layout="constrained")
+    draw_grid(ax, grid, metrics.resolution)
+    extra = draw_inflation(ax, grid, inflated)
+    res = metrics.resolution
+    def grid_xy(poses):
+        return world_to_grid(poses[:, 0], res), world_to_grid(poses[:, 1], res)
+    # The truth as a wide translucent band: the EKF estimate usually lies on top of it.
+    ax.plot(*grid_xy(loc.truth), color=TRAJECTORY_COLOR, linewidth=5, alpha=0.45,
+            solid_capstyle="round", label="True trajectory", zorder=3)
+    ax.plot(*grid_xy(loc.odometry), color=DEAD_RECKONING_COLOR, linewidth=1.8,
+            linestyle="--", label="Dead reckoning (odometry only)", zorder=3.25)
+    ax.plot(*grid_xy(loc.estimate), color=EKF_COLOR, linewidth=1.6,
+            label="EKF estimate", zorder=3.2)
+    odom_x, odom_y = grid_xy(loc.odometry)
+    ax.plot(odom_x[-1], odom_y[-1], marker="X", markersize=11, color=DEAD_RECKONING_COLOR,
+            markeredgecolor="black", linestyle="none", zorder=3.6,
+            label="Dead reckoning, final")
+    draw_start_goal(ax, metrics.start, metrics.goal)
+    # Ellipses are clipped to the view of the map and trajectories, not fitted.
+    limits = ax.get_xlim(), ax.get_ylim()
+    largest = ELLIPSE_SIGMA * np.sqrt(np.linalg.eigvalsh(loc.covariance[:, :2, :2])[:, -1].clip(0))
+    if largest.max() / res >= 0.15:  # otherwise too small to see at this scale
+        est_x, est_y = grid_xy(loc.estimate)
+        for i in np.unique(np.linspace(0, len(loc.times) - 1, 12).astype(int)):
+            # Not part of the layout: clipped ellipses must not push the labels away.
+            ax.add_patch(covariance_ellipse((est_x[i], est_y[i]), loc.covariance[i, :2, :2],
+                                            res, facecolor="none", edgecolor=EKF_COLOR,
+                                            linewidth=1.0, zorder=3.3, in_layout=False))
+        extra.append(Patch(facecolor="none", edgecolor=EKF_COLOR,
+                           label=f"EKF {ELLIPSE_SIGMA:g}σ position uncertainty"))
+    ax.set_xlim(*limits[0])
+    ax.set_ylim(*limits[1])
+    # Dead reckoning can leave the map, making the view taller than wide: grow the
+    # figure with it so the title and legend keep their room.
+    aspect = abs(np.diff(limits[1])[0]) / abs(np.diff(limits[0])[0])
+    if aspect > 1:
+        fig.set_figheight(fig.get_figheight() + 0.8 * FIGURE_SIZE[0] * (aspect - 1))
+    est_err, odom_err = _position_errors(loc)
+    used = int(loc.beams_used.sum())
+    correction = (f"{used} LiDAR beams fused" if used else "no LiDAR: prediction only")
+    fig.suptitle(f"EKF localization ({correction})\nfinal position error: EKF "
+                 f"{est_err[-1]:.3f} m, dead reckoning {odom_err[-1]:.3f} m\n"
+                 f"largest EKF {ELLIPSE_SIGMA:g}σ position uncertainty: {largest.max():.3f} m")
+    _finish(fig, ax, output, extra)
+    return fig
+
+
+def plot_localization_errors(loc: Localization, output: Path):
+    """Position error of both estimates (log scale), and the EKF's x, y and heading
+    errors inside its 3-sigma bounds."""
+    fig, axes = plt.subplots(4, 1, figsize=(8.5, 10), sharex=True, layout="constrained")
+    t = loc.times
+    est_err, odom_err = _position_errors(loc)
+    floor = 1e-5  # log axis: exact zeros (e.g. at t = 0) are shown at the floor
+    axes[0].semilogy(t, np.maximum(est_err, floor), color=EKF_COLOR, linewidth=1.8,
+                     label=f"EKF (RMS {np.sqrt(np.mean(est_err**2)):.4f} m)")
+    # Dashed on top: without LiDAR updates the two curves coincide.
+    axes[0].semilogy(t, np.maximum(odom_err, floor), color=DEAD_RECKONING_COLOR, linewidth=1.8,
+                     linestyle="--",
+                     label=f"dead reckoning (RMS {np.sqrt(np.mean(odom_err**2)):.3f} m)")
+    axes[0].set_ylabel("position error (m)")
+    axes[0].legend(frameon=False, fontsize=9, loc="best")
+    errors = loc.errors(loc.estimate)
+    sigma = np.sqrt(np.clip(np.diagonal(loc.covariance, axis1=1, axis2=2), 0.0, None))
+    labels = ("x error (m)", "y error (m)", "heading error (deg)")
+    for k, (ax, label) in enumerate(zip(axes[1:], labels, strict=True)):
+        scale = np.degrees(1.0) if k == 2 else 1.0
+        bound = ELLIPSE_SIGMA * sigma[:, k] * scale
+        ax.fill_between(t, -bound, bound, color=EKF_COLOR, alpha=0.18, linewidth=0,
+                        label=f"±{ELLIPSE_SIGMA:g}σ (EKF covariance)")
+        ax.plot(t, errors[:, k] * scale, color=EKF_COLOR, linewidth=1.4, label="EKF error")
+        ax.axhline(0.0, color=GRID_LINE_COLOR, linewidth=0.8)
+        ax.set_ylabel(label)
+        inside = np.mean(np.abs(errors[:, k] * scale) <= bound)
+        ax.text(0.99, 0.95, f"{100 * inside:.1f} % of samples inside ±{ELLIPSE_SIGMA:g}σ",
+                transform=ax.transAxes, ha="right", va="top", fontsize=9)
+    axes[1].legend(frameon=False, fontsize=9, loc="lower left")
+    for ax in axes:
+        ax.grid(color=GRID_LINE_COLOR, linewidth=0.5)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[-1].set_xlabel("simulation time (s)")
+    fig.suptitle(f"EKF estimation errors (true − estimate); mean NEES {loc.nees.mean():.2f} "
+                 f"(3 = consistent)")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=FIGURE_DPI)
+    print(f"Saved {output}")
+    return fig
+
+
 def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
                             waypoints: np.ndarray, results_dir: Path,
                             output_dir: Path, inflated: np.ndarray | None = None) -> None:
@@ -601,6 +775,11 @@ def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
         check_lidar_matches_trajectory(scans, trajectory)
         plot_lidar_scan(grid, metrics, trajectory, scans, output_dir / "lidar_scan.png",
                         inflated)
+    localization = load_localization(results_dir / "localization.csv")
+    if localization is not None:
+        check_localization_matches_trajectory(localization, trajectory)
+        plot_localization(grid, metrics, localization, output_dir / "localization.png", inflated)
+        plot_localization_errors(localization, output_dir / "localization_errors.png")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

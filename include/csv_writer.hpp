@@ -28,6 +28,11 @@
 //   time,beam,angle,range,hit
 // angle in the world frame (rad); hit = 0 means no return within the maximum range,
 // in which case range equals the maximum range.
+// localization.csv (only with --ekf), one row per trajectory sample:
+//   time,true_x,true_y,true_theta,odom_x,odom_y,odom_theta,est_x,est_y,est_theta,
+//   var_x,cov_xy,var_y,cov_x_theta,cov_y_theta,var_theta,beams_used,beams_rejected,nees
+// odom_* is dead reckoning (noisy odometry only), est_* the EKF estimate; the
+// covariance entries (m^2, m rad, rad^2) are printed in scientific notation.
 // inflated_map.csv (only for robot_radius_m > 0): the planning map, in the same
 // format as input maps (rows of comma-separated 0/1, row 0 first).
 // navigation_success = planning succeeded AND the robot reached the goal without
@@ -39,6 +44,7 @@
 #include <string>
 #include <vector>
 
+#include "ekf.hpp"
 #include "grid_map.hpp"
 #include "lidar.hpp"
 #include "simulator.hpp"
@@ -71,6 +77,10 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
 /// Writes lidar_scans.csv (see the format above).
 bool writeLidarCsv(const std::filesystem::path& file, const std::vector<LidarScan>& scans,
                    std::string& error);
+
+/// Writes localization.csv (see the format above).
+bool writeLocalizationCsv(const std::filesystem::path& file,
+                          const std::vector<LocalizationSample>& samples, std::string& error);
 
 /// Writes a map in the input map format (rows of comma-separated 0/1).
 bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error);
