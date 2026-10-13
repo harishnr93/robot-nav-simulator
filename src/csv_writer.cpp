@@ -140,6 +140,62 @@ bool writeLocalizationCsv(const std::filesystem::path& file,
     return finishWrite(out, file, error);
 }
 
+bool writeDynamicObstaclesCsv(const std::filesystem::path& file, const GridMap& map,
+                              const std::vector<TrajectorySample>& trajectory,
+                              const std::vector<DynamicObstacle>& obstacles, double sensing_range,
+                              std::string& error) {
+    std::ofstream out(file);
+    if (!out) {
+        error = "cannot open '" + file.string() + "' for writing";
+        return false;
+    }
+    out << "time,obstacle,x,y,radius,visible\n" << std::fixed;
+    for (const TrajectorySample& sample : trajectory) {
+        const WorldPoint robot{sample.state.x, sample.state.y};
+        for (std::size_t i = 0; i < obstacles.size(); ++i) {
+            const WorldPoint p = obstaclePosition(obstacles[i], sample.state.time);
+            const bool visible =
+                isObstacleVisible(map, robot, p, obstacles[i].radius, sensing_range);
+            out << std::setprecision(kSecondsPrecision) << sample.state.time << ',' << i << ','
+                << std::setprecision(kMillisecondsPrecision) << p.x << ',' << p.y << ','
+                << std::setprecision(kMetersPrecision) << obstacles[i].radius << ','
+                << (visible ? 1 : 0) << '\n';
+        }
+    }
+    return finishWrite(out, file, error);
+}
+
+bool writeReplansCsv(const std::filesystem::path& events_file,
+                     const std::filesystem::path& paths_file,
+                     const std::vector<ReplanEvent>& replans, std::string& error) {
+    std::ofstream events(events_file);
+    std::ofstream paths(paths_file);
+    if (!events || !paths) {
+        error = "cannot open '" + (events ? paths_file : events_file).string() + "' for writing";
+        return false;
+    }
+    events << "replan,time,from_x,from_y,status,waypoints,path_cost_cells,expanded_nodes,"
+              "planning_time_ms,blocked_cells\n"
+           << std::fixed;
+    paths << "replan,waypoint_index,grid_x,grid_y\n";
+    for (std::size_t i = 0; i < replans.size(); ++i) {
+        const ReplanEvent& e = replans[i];
+        events << i << ',' << std::setprecision(kSecondsPrecision) << e.time << ',' << e.from.x
+               << ',' << e.from.y << ',' << toString(e.status) << ',';
+        if (e.status == PlanStatus::Success) {
+            events << e.path.size() << ',' << std::setprecision(kCellsPrecision) << e.cost.cells();
+        } else {
+            events << ',';
+        }
+        events << ',' << e.expanded_nodes << ',' << std::setprecision(kMillisecondsPrecision)
+               << e.planning_time_ms << ',' << e.blocked_cells << '\n';
+        for (std::size_t k = 0; k < e.path.size(); ++k) {
+            paths << i << ',' << k << ',' << e.path[k].x << ',' << e.path[k].y << '\n';
+        }
+    }
+    return finishWrite(events, events_file, error) && finishWrite(paths, paths_file, error);
+}
+
 bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error) {
     std::ofstream out(file);
     if (!out) {

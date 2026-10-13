@@ -82,6 +82,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="LiDAR range std assumed by the EKF, m (default 0.05)")
     parser.add_argument("--ekf-gate", type=float,
                         help="EKF innovation gate, standard deviations (default 3)")
+    parser.add_argument("--dynamic-obstacles", type=Path,
+                        help="moving obstacles file (radius_m,speed_mps,x0,y0,x1,y1,... per line)")
+    parser.add_argument("--sensing-range", type=float,
+                        help="dynamic obstacles are seen within this range, m (default 3)")
+    parser.add_argument("--replan-margin", type=float,
+                        help="clearance around a seen obstacle when replanning, m (default 0.25)")
+    parser.add_argument("--prediction-horizon", type=float,
+                        help="seconds of estimated obstacle motion to avoid (default 2)")
+    parser.add_argument("--replan-patience", type=float,
+                        help="wait this long for a blocked path before a detour, s (default 6)")
     parser.add_argument("--connectivity", type=int, choices=(4, 8),
                         help="grid moves: 4 = straight (default), 8 = also diagonal")
     parser.add_argument("--robot-radius", type=float,
@@ -123,7 +133,12 @@ def simulator_command(args: argparse.Namespace) -> list[str]:
                 ("--odom-noise-dist", args.odom_noise_dist),
                 ("--odom-noise-turn", args.odom_noise_turn),
                 ("--odom-noise-drift", args.odom_noise_drift), ("--odom-seed", args.odom_seed),
-                ("--ekf-range-sigma", args.ekf_range_sigma), ("--ekf-gate", args.ekf_gate))
+                ("--ekf-range-sigma", args.ekf_range_sigma), ("--ekf-gate", args.ekf_gate),
+                ("--dynamic-obstacles",
+                 None if args.dynamic_obstacles is None else str(args.dynamic_obstacles)),
+                ("--sensing-range", args.sensing_range), ("--replan-margin", args.replan_margin),
+                ("--prediction-horizon", args.prediction_horizon),
+                ("--replan-patience", args.replan_patience))
     for flag, value in optional:
         if value is not None:
             command += [flag, value if isinstance(value, str) else repr(value)]

@@ -25,6 +25,8 @@ between them.
                                                         │ results/inflated_map.csv (r > 0)
                                                         │ results/lidar_scans.csv (LiDAR on)
                                                         │ results/localization.csv (--ekf)
+                                                        │ results/dynamic_obstacles.csv, replans.csv,
+                                                        │   replanned_paths.csv (--dynamic-obstacles)
                                         ┌───────────────▼──────────────────────────┐
                                         │ python/visualize_map.py                  │
                                         │   → map_visualization.png                │
@@ -33,6 +35,7 @@ between them.
                                         │   → robot_position_vs_time.png           │
                                         │   → lidar_scan.png         (LiDAR on)    │
                                         │   → localization*.png      (--ekf)       │
+                                        │   → replanning.png  (dynamic obstacles)  │
                                         ├──────────────────────────────────────────┤
                                         │ python/animate_robot.py                  │
                                         │   → navigation.gif  (navigation.mp4)     │
@@ -66,14 +69,15 @@ uses.
 | `include/astar.hpp`, `src/astar.cpp` | Request validation, A* search for 4- or 8-connectivity (`AStarPlanner`, reusable, plus the one-shot `planAStar()`), exact octile costs (`GridCost`, `compareGridCost`, `octileDistance`), the move rule `isAllowedMove()` (no corner cutting), path reconstruction and validation, path length, and the reference searches used only for validation (BFS; exact Dijkstra for 8-connectivity). |
 | `benchmarks/bench_planner.cpp` | In-process micro-benchmark of fresh vs. reused planning, with a result checksum for comparing builds. |
 | `include/robot.hpp`, `src/robot.cpp` | `RobotState`, `MotionConfig` (+ validation), and `stepToward()`: one clamped kinematic step of the point robot. |
-| `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking (point or disc robot), timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
+| `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking (point or disc robot), timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. With an optional `DynamicScenario` it also runs the replanning loop: sensing and velocity estimates (`DynamicView`), blocked-path detection, replanning with one reused `AStarPlanner`, retreat, the look-ahead gate and the evasive step, and the exact contact test against moving obstacles. |
+| `include/dynamic_obstacles.hpp`, `src/dynamic_obstacles.cpp` | Moving obstacles: the back-and-forth route model (`obstaclePosition`, `obstacleBreakpoints`), exact closest approach of two linear motions and over a whole step (`minDistanceDuring`), line-of-sight visibility, and loading/validation of obstacle files. |
 | `include/diff_drive.hpp`, `src/diff_drive.cpp` | Differential-drive kinematics: exact unicycle integration (`integrateUnicycle`), angle wrapping and the saturated P heading controller (`headingControl`). The turn-then-drive follower that uses them is in `simulatePath()`. |
 | `include/lidar.hpp`, `src/lidar.cpp` | Simulated 2D LiDAR: exact ray casting by grid traversal (`castRay`), beam layout, seeded range noise, and one scan per trajectory sample (`scanTrajectory`). Called by `main.cpp` after the simulation; the LiDAR does not influence the motion. |
 | `include/ekf.hpp`, `src/ekf.cpp` | EKF localization: the odometry model and its noise (`trueIncrement`, `applyIncrement`, `odometryVariances`), the filter (`PoseEkf`: prediction, batch LiDAR update in information form with the exact range Jacobian `rangeJacobian` and an innovation gate), the run along a trajectory with simulated noisy odometry (`runLocalization`) and the error/NEES summary. Called by `main.cpp` after the LiDAR; the estimate does not influence the motion. |
 | `include/heading_control.hpp`, `src/heading_control.cpp` | Heading-control study: the heading plant with motor lag and disturbance (`HeadingPlant`, exact discretisation), P and PID controllers (`HeadingController`: derivative on the measurement, anti-windup), the closed-loop simulation and the metrics (`computeHeadingMetrics`). |
 | `src/heading_experiment.cpp` | `heading_experiment` executable: runs the four P vs. PID scenarios (and `--sweep`), writes CSV files and a summary table. |
 | `include/footprint.hpp`, `src/footprint.cpp` | Disc footprint: exact disc and swept-disc overlap tests, obstacle inflation, and `planWithFootprint()` (A* on the inflated map with footprint-specific statuses). |
-| `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv`, `simulation_metrics.csv`, and with the matching options `inflated_map.csv`, `lidar_scans.csv` and `localization.csv`. |
+| `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv`, `simulation_metrics.csv`, and with the matching options `inflated_map.csv`, `lidar_scans.csv`, `localization.csv`, `dynamic_obstacles.csv`, `replans.csv` and `replanned_paths.csv`. |
 | `src/main.cpp` | CLI parsing, orchestration, console summary, exit codes. |
 
 ### Key data structures
@@ -193,6 +197,6 @@ frames with full renders pixel by pixel.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
-| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control`, `test_lidar`, `test_ekf` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control`, `test_lidar`, `test_ekf`, `test_dynamic` | executables | unit tests (registered with CTest) |
 | `heading_experiment` | executable | P vs. PID heading-control study |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

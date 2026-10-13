@@ -33,6 +33,16 @@
 //   var_x,cov_xy,var_y,cov_x_theta,cov_y_theta,var_theta,beams_used,beams_rejected,nees
 // odom_* is dead reckoning (noisy odometry only), est_* the EKF estimate; the
 // covariance entries (m^2, m rad, rad^2) are printed in scientific notation.
+// With --dynamic-obstacles:
+// dynamic_obstacles.csv, one row per obstacle and trajectory sample:
+//   time,obstacle,x,y,radius,visible
+// (visible = 1 if the robot saw it at that sample: within sensing range, in line of sight)
+// replans.csv, one row per replanning attempt:
+//   replan,time,from_x,from_y,status,waypoints,path_cost_cells,expanded_nodes,
+//   planning_time_ms,blocked_cells
+// (waypoints and path_cost_cells are empty when the attempt found no path)
+// replanned_paths.csv, the paths of the successful attempts:
+//   replan,waypoint_index,grid_x,grid_y
 // inflated_map.csv (only for robot_radius_m > 0): the planning map, in the same
 // format as input maps (rows of comma-separated 0/1, row 0 first).
 // navigation_success = planning succeeded AND the robot reached the goal without
@@ -81,6 +91,18 @@ bool writeLidarCsv(const std::filesystem::path& file, const std::vector<LidarSca
 /// Writes localization.csv (see the format above).
 bool writeLocalizationCsv(const std::filesystem::path& file,
                           const std::vector<LocalizationSample>& samples, std::string& error);
+
+/// Writes dynamic_obstacles.csv: obstacle positions at every trajectory sample, and
+/// whether the robot saw them.
+bool writeDynamicObstaclesCsv(const std::filesystem::path& file, const GridMap& map,
+                              const std::vector<TrajectorySample>& trajectory,
+                              const std::vector<DynamicObstacle>& obstacles, double sensing_range,
+                              std::string& error);
+
+/// Writes replans.csv and replanned_paths.csv.
+bool writeReplansCsv(const std::filesystem::path& events_file,
+                     const std::filesystem::path& paths_file,
+                     const std::vector<ReplanEvent>& replans, std::string& error);
 
 /// Writes a map in the input map format (rows of comma-separated 0/1).
 bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error);

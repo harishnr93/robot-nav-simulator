@@ -60,6 +60,11 @@ comes from a reproducible benchmark.
   by the LiDAR ranges on the known map (exact range Jacobians, outlier gate), and the
   estimated vs. true trajectory with error plots and 3σ bounds. Checked for statistical
   consistency (NEES) by Monte Carlo.
+- Dynamic obstacles with replanning (`--dynamic-obstacles FILE`): moving obstacles,
+  detection of a blocked path within the robot's sensing range, and A* replanning with
+  the reused planner, plus waiting, backing off and a look-ahead gate. The robot
+  reaches the goal in 98 % of 500 random scenarios, against 71 % without reacting.
+  Collisions are exact, including contact between two samples.
 - P vs. PID heading-control study (`heading_experiment`): a heading with motor lag and a
   disturbance, both controllers (PID with derivative on the measurement and anti-windup)
   in four scenarios, with overshoot, settling time, steady-state and tracking error and
@@ -82,7 +87,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 94 C++ test cases, 31 end-to-end CLI checks and 55 Python tests, including A* vs. BFS
+- 107 C++ test cases, 34 end-to-end CLI checks and 59 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -218,6 +223,11 @@ and no timeout.
 | `--odom-seed N` | seed of the odometry noise | `0` |
 | `--ekf-range-sigma M` | LiDAR range noise assumed by the EKF, m | `0.05` |
 | `--ekf-gate N` | reject beams whose innovation exceeds N standard deviations | `3` |
+| `--dynamic-obstacles FILE` | moving obstacles (see [File formats](#file-formats)); the robot replans around them | none |
+| `--sensing-range M` | moving obstacles are seen within M (to their edge), in line of sight | `3` |
+| `--replan-margin M` | extra clearance around a seen obstacle when replanning | `0.25` |
+| `--prediction-horizon S` | avoid where a seen obstacle will be within S seconds (estimated velocity) | `2` |
+| `--replan-patience S` | wait up to S seconds for a blocked path to clear before a detour | `6` |
 | `--reference-bfs` | also run the reference search (BFS, or exact Dijkstra for 8-connectivity) and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
@@ -239,7 +249,7 @@ python3 python/visualize_map.py --map maps/obstacles.csv
 
 The trajectory figures are skipped when there is no trajectory (planning failed).
 Runs with the LiDAR add `lidar_scan.png`; runs with `--ekf` add `localization.png` and
-`localization_errors.png`.
+`localization_errors.png`; runs with `--dynamic-obstacles` add `replanning.png`.
 
 `visualize_map.py` refuses to plot results that do not belong to the given map
 (different size, or a path that crosses its obstacles).
@@ -279,8 +289,9 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 `--max-time`, `--robot-radius`, `--connectivity`, `--robot-model`, `--max-angular-speed`,
 `--heading-gain`, `--initial-heading`, `--lidar-beams`, `--lidar-fov`, `--lidar-range`,
 `--lidar-noise`, `--lidar-seed`, `--ekf`, `--odom-noise-dist`, `--odom-noise-turn`,
-`--odom-noise-drift`, `--odom-seed`, `--ekf-range-sigma`, `--ekf-gate`, `--resolution`,
-`--output`), the animation options `--animate`,
+`--odom-noise-drift`, `--odom-seed`, `--ekf-range-sigma`, `--ekf-gate`,
+`--dynamic-obstacles`, `--sensing-range`, `--replan-margin`, `--prediction-horizon`,
+`--replan-patience`, `--resolution`, `--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
 Its exit code is the simulator's (for example `4` when there is no path).
@@ -297,6 +308,7 @@ Its exit code is the simulator's (for example `4` when there is no path).
 
 The first four maps have one-cell (0.5 m) gaps and are meant for a point robot. Use
 `maps/obstacles_fine.csv` for a robot footprint: it has the same layout at 0.25 m cells.
+`maps/obstacles_dynamic.csv` holds three moving obstacles for `maps/obstacles.csv`.
 
 ### Simulated 2D LiDAR
 
@@ -359,6 +371,37 @@ noise; 3 is ideal. The 0.58 above is cautious on purpose, because the filter ass
 noise). Getting there exposed a subtle modelling error, described with the method in
 [docs/algorithms.md](docs/algorithms.md#13-ekf-localization---ekf). The EKF costs about
 0.1 µs per beam. The robot is still steered by its true pose, so the EKF only observes.
+
+### Dynamic obstacles and replanning
+
+```bash
+python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
+    --dynamic-obstacles maps/obstacles_dynamic.csv --save-gif
+```
+
+```text
+Navigation:     GOAL_REACHED
+Dynamic:        3 moving obstacle(s), sensing range 3.00 m; 3 replan(s) in 0.009 ms, 9.5 s waiting, closest gap 0.486 m
+```
+
+![Moving obstacles and replanning in the animation](docs/images/navigation_dynamic.gif)
+
+![Replans and clearance over time](docs/images/replanning.png)
+
+Three obstacles move back and forth: one crosses the top corridor, one dawdles across
+the corner, and one patrols the right-hand lane. The robot only sees them within 3 m
+and in line of sight. It estimates their velocities and treats the cells they are about
+to sweep as blocked. When its path is blocked it waits up to 6 s for the way to clear,
+then replans with A*. The same `AStarPlanner` object serves every replan, reusing its
+buffers. Before each step it checks that it will not meet an obstacle within the next
+2 s, so it crosses behind a moving obstacle rather than in front of it.
+
+On 500 random scenarios with three moving obstacles each, the robot reaches the goal in
+98.2 % (point) and 98.8 % (differential drive) of the runs, against 71 % for a robot that
+does not react. The point robot never collided; the differential drive collided in
+2 runs. Most of the remaining runs time out safely, waiting for a passage an obstacle
+keeps blocking. Each rule of the method came from a failure found in testing; see
+[docs/algorithms.md](docs/algorithms.md#14-dynamic-obstacles-and-replanning---dynamic-obstacles-file).
 
 ### P vs. PID heading control
 
@@ -515,6 +558,20 @@ the range.
 `odom_*` is dead reckoning and `est_*` the EKF estimate (m, rad); the covariance entries
 are in scientific notation; `nees` is `eᵀ P⁻¹ e` for the EKF error `e`.
 
+**Dynamic obstacle file** (`--dynamic-obstacles`): one obstacle per line,
+`radius_m,speed_mps,x0,y0,x1,y1[,x2,y2...]` with whole grid cells; the obstacle moves
+back and forth along the route through their centres. `#` lines are comments. With it
+the simulator writes:
+
+- `dynamic_obstacles.csv`: `time,obstacle,x,y,radius,visible`, one row per obstacle and
+  trajectory sample;
+- `replans.csv`: `replan,time,from_x,from_y,status,waypoints,path_cost_cells,expanded_nodes,planning_time_ms,blocked_cells`,
+  one row per replanning attempt;
+- `replanned_paths.csv`: `replan,waypoint_index,grid_x,grid_y`, the new paths.
+
+In `trajectory.csv`, `target_waypoint_index` then refers to the waypoint list as
+extended by the replans.
+
 **`inflated_map.csv`** (only with `--robot-radius` > 0): the map A* planned on, in the
 same format as input maps.
 
@@ -597,7 +654,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 41 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 45 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -610,12 +667,14 @@ and static-analysis results.
 robot-nav-simulator/
 ├── CMakeLists.txt          build, tests (CTest) and benchmark targets
 ├── include/, src/          C++17 core: grid_map, astar, footprint, robot, diff_drive, simulator,
-│                           heading_control, lidar, ekf, csv_writer, main (CLI), heading_experiment
+│                           heading_control, lidar, ekf, dynamic_obstacles, csv_writer, main (CLI),
+│                           heading_experiment
 ├── tests/                  C++ unit tests, Python tests, test map fixtures (tests/data/)
 ├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
 ├── python/                 generate_map, visualize_map, animate_robot, run_demo,
 │                           run_benchmark, analyze_results, plot_heading_control
-├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine)
+├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine) and
+│                           moving obstacles for the obstacles map (obstacles_dynamic)
 ├── scripts/                build.sh, test.sh, run.sh
 ├── docs/                   architecture, algorithms, testing, performance,
 │                           benchmark data and images
@@ -635,7 +694,9 @@ robot-nav-simulator/
   does not divide the cell size, the robot loses part of a timestep at every waypoint,
   so travel time is slightly longer than `path length / speed`.
 - 4-connected movement only; paths are optimal in grid steps, not in Euclidean distance.
-- Static maps only.
+- Moving obstacles are avoided reactively, with constant-velocity prediction: obstacles
+  that reverse, close in from two sides, or keep blocking the only passage can still
+  cause a collision or a timeout (about 2 % of random scenarios).
 - GIF export of the default ~200-frame animation takes about 9 s, most of it Pillow's GIF
   encoding. Lower `--fps` or `--dpi` for faster exports.
 
@@ -678,8 +739,8 @@ robot-nav-simulator/
   animation (`--lidar-beams`).
 - ✅ **EKF localization:** noisy odometry, an EKF corrected by the LiDAR, estimated vs.
   true trajectory with error plots (`--ekf`).
-- **Dynamic obstacles:** with replanning, where `AStarPlanner`'s reusable buffers already
-  avoid per-request set-up.
+- ✅ **Dynamic obstacles:** moving obstacles, blocked-path detection and replanning
+  with the reused `AStarPlanner` (`--dynamic-obstacles`).
 - **ROS 2 integration:** publishing the map, path and robot state for RViz2, keeping the
   standalone simulator.
 

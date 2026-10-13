@@ -34,6 +34,7 @@ values are compared with explicit tolerances.
 | `test_heading_control` | P vs. PID study: heading plant, controllers, metrics |
 | `test_lidar` | simulated LiDAR: exact ray casting, beam layout, noise, scans along a trajectory |
 | `test_ekf` | EKF localization: odometry model, Jacobians, Kalman update, gate, convergence, NEES consistency |
+| `test_dynamic` | moving obstacles and replanning: motion model, exact contact, loading, visibility, waiting, detours, retreats, invariants |
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
 | `cli_plan_maze_map` | plans and simulates on `maps/maze.csv`, expects `GOAL_REACHED` |
@@ -55,6 +56,9 @@ values are compared with explicit tolerances.
 | `cli_ekf_localization` | obstacles map, differential drive, 72 beams, `--ekf`: expects EKF position error RMS 0.004 m and dead reckoning 0.533 m |
 | `cli_ekf_requires_diff_drive` | `--ekf` with the point robot: expects a clear error |
 | `cli_rejects_bad_ekf_settings` | `--ekf-range-sigma 0`: expects "invalid EKF parameters" |
+| `cli_dynamic_replanning` | obstacles map with `maps/obstacles_dynamic.csv`: expects `GOAL_REACHED` and 3 replans |
+| `cli_rejects_bad_dynamic_obstacles` | a route through a wall (`tests/data/bad_dynamic_obstacles.csv`): expects the line and the reason |
+| `cli_rejects_bad_replanning_settings` | `--sensing-range 0`: expects "invalid replanning parameters" |
 | `heading_experiment_p_vs_pid` | runs the P vs. PID experiment: expects P to never settle under the disturbance and PID to settle |
 | `heading_experiment_rejects_bad_gain` | `--kp -1`: expects a non-zero exit code |
 | `cli_rejects_overshooting_heading_gain` | `--heading-gain 20` (gain × dt = 2): expects "invalid motion parameters: heading gain" |
@@ -65,7 +69,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (55 tests, about 28 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (59 tests, about 32 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -81,6 +85,7 @@ binary into temporary directories.
 | Blitting | blitted frames are pixel-identical to full renders of the same state (first, middle and last frame) |
 | LiDAR | scans load as (scans × beams), one per trajectory sample, with heading-relative beams; no-return beams carry the maximum range; scans of another run and malformed beam orders are rejected; ray segments start at the robot and have the measured lengths; the animation draws the latest scan, and its blitted frames equal full renders; `lidar_scan.png` is written only with LiDAR data; `run_demo.py` forwards the LiDAR options |
 | Localization | `localization.csv` loads with symmetric, positive-definite covariances and matches the trajectory (rejected otherwise); the EKF error stays below 5 cm and dead reckoning drifts more than 10 times as far; heading errors are wrapped; the 3σ ellipse of a known covariance has the right axes and angle; the figures exist only with `--ekf`, and a stale `localization.csv` is removed; the animation shows the latest dead-reckoning pose and estimate, and its blitted frames equal full renders; `run_demo.py` forwards `--ekf` and the odometry options |
+| Dynamic obstacles | the three output files load and match the trajectory (rejected otherwise); obstacle positions follow their routes; replanned paths run from their start cell to the goal; the robot kept a positive gap and waited at least once; the current plan switches at each successful replan; `replanning.png` exists only with obstacles, and stale dynamic files are removed; the animation draws the obstacles at their interpolated positions, faded when unseen, and its blitted frames equal full renders; `run_demo.py` forwards the options |
 | Heading control plots | the experiment's metrics show P's steady-state errors `−d/Kp` and `w/Kp` and PID's ≈ 0, and "never" settling for P under the disturbance; all five figures are written; run files have a uniform 10 ms time base, wrapped errors and commands within the limit; missing and malformed inputs are reported |
 | Differential drive | heading columns are loaded (45 turn samples for 3 turns, no translation while turning); point trajectories have no heading; heading interpolation takes the short way across ±180°; the animated heading line points along θ and the status reads TURNING / NAVIGATING; blitted frames with the heading line equal full renders; the position figure gains a θ(t) panel; `run_demo.py` passes string options unquoted |
 | Connectivity | an 8-connected plan is titled "8-connected A* path: 26 steps (8 diagonal)" and its drawn path contains the 8 diagonal moves; the 4-connected title is unchanged; an 8-connected benchmark marks every run optimal; `compare` writes its table and plot, measures the 29.3 % obstacle-free saving, and rejects benchmarks made on different maps; `run_demo.py` forwards `--connectivity` |
@@ -138,6 +143,33 @@ because the process noise was evaluated at the measured increments. See
 identical output files and console summaries on 400 random maps (about half with the
 LiDAR on, which also covers the ray caster's new hit-face output), and the Python
 figures and GIFs of three scenarios are byte-identical.
+
+## Dynamic-obstacle tests (`test_dynamic.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Ping-pong motion | positions along an L-shaped route, round the corner, at the end, back and periodic; corner and reversal times |
+| Exact closest approach | 300 random cases against 20 000-point sampling: never larger, and within 0.6 mm |
+| Contact between samples | an obstacle 0.5 m away at both ends of a step that passes straight through the robot is detected |
+| Loading | a valid file; missing pairs, non-numbers, out-of-map and fractional cells, routes through walls, bad radius and speed |
+| Visibility | range measured to the obstacle's edge; a wall hides an obstacle behind it |
+| No obstacles | the dynamic loop gives exactly the static trajectory (both robot models, 4- and 8-connected) |
+| Crossing obstacle | the robot waits and crosses behind an obstacle sweeping the whole corridor; a blind robot collides with it |
+| Persistent blockage | a slow obstacle on the straight route: the first replan comes after the patience, the detour avoids the blocked cells, and with no patience it detours sooner |
+| Retreat | head-on with a late sighting: the robot backs off and gets through |
+| No way around | an obstacle patrolling across a doorway's exit: plans fail while it is blocked, the robot waits, then passes |
+| Differential drive backs up | it reverses without turning (heading unchanged), and the EKF's odometry model still rebuilds the trajectory exactly |
+| Random invariants | 120 random scenarios: the robot stays in free cells, collision-free runs never come within contact (exact check over every step) and report that gap, no replan fails because of the goal, at least 108 reach the goal |
+| Validation | sensing range, margin and horizon limits; a scenario without a planning map |
+
+**Stress test and held-out results.** Each rule of the replanning method was added
+after analysing failures on 300 random scenarios. The success rates reported in the
+README were measured on 500 different scenarios (another seed). See
+[algorithms.md](algorithms.md#14-dynamic-obstacles-and-replanning---dynamic-obstacles-file).
+
+**Static equivalence.** Without `--dynamic-obstacles`, the new and previous binaries
+produce identical output files and console summaries on 400 random maps (mixing
+footprints, 8-connectivity, the differential drive, the LiDAR and the EKF).
 
 ## Heading-control tests (`test_heading_control.cpp`)
 
@@ -325,6 +357,19 @@ Additional unit tests:
   | EKF: grazing beams not skipped | 2 |
   | EKF: no initial error drawn | 1 |
   | EKF: heading error not wrapped in the NEES | 1 |
+  | Dynamic: closest approach not clamped to the step | 7 (dynamic tests) |
+  | Dynamic: contact test ignores reversals within a step | 1 |
+  | Dynamic: route not folded back (obstacle jumps to the start) | 4 |
+  | Dynamic: visibility ignores walls | 1 |
+  | Dynamic: no velocity estimate | 2 |
+  | Dynamic: robot's own cell not unblocked before replanning | 1 |
+  | Dynamic: no retreat | 3 |
+  | Dynamic: look-ahead gate off | 2 |
+  | Dynamic: patience ignored | 2 |
+  | Dynamic: a waiting robot not checked for contact | 1 |
+  | Dynamic: no backing up (differential drive) | 1 |
+  | Dynamic: goal counted as blocked | 1 |
+  | Dynamic: evasive step off | 1 |
 
 - **Benchmark-scale optimality check:** every one of the 480 benchmark runs
   ([performance.md](performance.md)) compares A* with the reference BFS through
@@ -337,7 +382,7 @@ Additional unit tests:
 
 ## Sanitizers and static analysis
 
-Run in Phase 6, and again after each extension (latest: EKF localization):
+Run in Phase 6, and again after each extension (latest: dynamic obstacles):
 
 ```bash
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
@@ -347,7 +392,7 @@ cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
 
 | Tool | Result |
 |---|---|
-| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 40 C++ and CLI CTest entries pass, no reports |
+| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 44 C++ and CLI CTest entries pass, no reports |
 | `cppcheck` 2.7 (`--enable=warning,performance,portability`) | no findings |
 | `clang-tidy` 14 (`bugprone-*`, `performance-*`, `clang-analyzer-*`) | 3 notes about string concatenation in CLI error messages (run only when reporting an error); left as is |
 | `ruff` (pyflakes, pycodestyle, bugbear, pyupgrade, simplify) | no findings |

@@ -17,6 +17,8 @@ Writes:
     OUTPUT_DIR/lidar_scan.png            LiDAR scan with the closest return (LiDAR on)
     OUTPUT_DIR/localization.png          true vs. dead-reckoning vs. EKF trajectory (--ekf)
     OUTPUT_DIR/localization_errors.png   estimation errors with the EKF's 3-sigma bounds
+    OUTPUT_DIR/replanning.png            moving obstacles, replans and clearance over time
+                                         (--dynamic-obstacles)
 
 Plots use grid coordinates (x = column, y = row, origin upper-left, y down),
 with a secondary axis in meters: world = (grid + 0.5) * resolution.
@@ -76,6 +78,12 @@ LOCALIZATION_COLUMNS = (
     "est_x", "est_y", "est_theta", "var_x", "cov_xy", "var_y", "cov_x_theta", "cov_y_theta",
     "var_theta", "beams_used", "beams_rejected", "nees")
 ELLIPSE_SIGMA = 3.0
+OBSTACLE_COLOR = "#9c6644"        # moving obstacles
+CURRENT_PLAN_COLOR = PATH_COLOR   # the plan the robot follows now (dashed)
+DYNAMIC_COLUMNS = ("time", "obstacle", "x", "y", "radius", "visible")
+REPLAN_COLUMNS = ("replan", "time", "from_x", "from_y", "status", "waypoints",
+                  "path_cost_cells", "expanded_nodes", "planning_time_ms", "blocked_cells")
+REPLANNED_PATH_COLUMNS = ("replan", "waypoint_index", "grid_x", "grid_y")
 SIMULATION_COLUMNS = (
     "status", "success", "navigation_success", "steps", "travel_time_s",
     "distance_traveled_m", "final_goal_error_m", "collision_count",
@@ -753,6 +761,154 @@ def plot_localization_errors(loc: Localization, output: Path):
     return fig
 
 
+@dataclass
+class DynamicObstacles:
+    """dynamic_obstacles.csv: positions (m) at every trajectory sample."""
+    times: np.ndarray     # (T,)
+    x: np.ndarray         # (T, K)
+    y: np.ndarray         # (T, K)
+    radius: np.ndarray    # (K,)
+    visible: np.ndarray   # (T, K) bool: seen by the robot at that sample
+
+
+@dataclass
+class Replans:
+    """replans.csv and replanned_paths.csv."""
+    times: np.ndarray                 # (N,)
+    from_cells: np.ndarray            # (N, 2) grid cells the new paths start from
+    success: np.ndarray               # (N,) bool
+    paths: list[np.ndarray | None]    # (M, 2) grid cells per attempt, None if no path
+
+    def current_path(self, initial: np.ndarray, t: float) -> np.ndarray:
+        """The path being followed at time t (the latest successful replan's path
+        from where it was planned; the initial path before any)."""
+        done = np.flatnonzero(self.success & (self.times <= t + 1e-9))
+        return initial if len(done) == 0 else self.paths[done[-1]]
+
+
+def load_dynamic(results_dir: Path) -> tuple[DynamicObstacles, Replans] | None:
+    """The dynamic-obstacle outputs, or None if the run had no moving obstacles."""
+    path = results_dir / "dynamic_obstacles.csv"
+    if not path.is_file():
+        return None
+    rows = _read_csv(path, DYNAMIC_COLUMNS)
+    try:
+        data = np.array([[float(r[c]) for c in DYNAMIC_COLUMNS] for r in rows],
+                        dtype=float).reshape(-1, len(DYNAMIC_COLUMNS))
+        events = _read_csv(results_dir / "replans.csv", REPLAN_COLUMNS)
+        path_rows = _read_csv(results_dir / "replanned_paths.csv", REPLANNED_PATH_COLUMNS)
+        cells = np.array([[int(r["replan"]), int(r["grid_x"]), int(r["grid_y"])]
+                          for r in path_rows], dtype=int).reshape(-1, 3)
+        times = np.array([float(e["time"]) for e in events])
+        from_cells = np.array([[int(e["from_x"]), int(e["from_y"])] for e in events],
+                              dtype=int).reshape(-1, 2)
+    except (ValueError, KeyError) as error:
+        raise ResultFileError(f"'{results_dir}': malformed dynamic-obstacle output: {error}") \
+            from error
+    count = int(data[:, 1].max()) + 1 if len(data) else 0
+    if count == 0 or len(data) % count or not np.array_equal(
+            data[:, 1], np.tile(np.arange(count), len(data) // count)):
+        raise ResultFileError(f"'{path}': every sample must list obstacles 0..{count - 1}")
+    shape = (len(data) // count, count)
+    obstacles = DynamicObstacles(data[::count, 0], data[:, 2].reshape(shape),
+                                 data[:, 3].reshape(shape), data[:count, 4],
+                                 data[:, 5].reshape(shape).astype(bool))
+    success = np.array([e["status"] == "SUCCESS" for e in events], dtype=bool)
+    paths = [cells[cells[:, 0] == i, 1:] if ok else None for i, ok in enumerate(success)]
+    return obstacles, Replans(times, from_cells, success, paths)
+
+
+def check_dynamic_matches_trajectory(obstacles: DynamicObstacles, trajectory: np.ndarray) -> None:
+    if len(obstacles.times) != len(trajectory) or not np.allclose(obstacles.times,
+                                                                   trajectory[:, TRAJ_TIME]):
+        raise ResultFileError("dynamic_obstacles.csv does not match trajectory.csv "
+                              "(one row per obstacle and trajectory sample); re-run the simulator")
+
+
+def obstacle_clearance(obstacles: DynamicObstacles, trajectory: np.ndarray,
+                       robot_radius: float) -> np.ndarray:
+    """Gap between the robot and the nearest obstacle edge at every sample, m."""
+    dx = obstacles.x - trajectory[:, [TRAJ_X]]
+    dy = obstacles.y - trajectory[:, [TRAJ_Y]]
+    return (np.hypot(dx, dy) - obstacles.radius - robot_radius).min(axis=1)
+
+
+def waiting_mask(trajectory: np.ndarray) -> np.ndarray:
+    """True for samples that ended a step in which the robot neither moved nor turned."""
+    still = np.zeros(len(trajectory), dtype=bool)
+    moved = np.hypot(np.diff(trajectory[:, TRAJ_X]), np.diff(trajectory[:, TRAJ_Y])) > 1e-12
+    turned = (np.abs(np.diff(trajectory[:, TRAJ_THETA])) > 1e-12 if has_heading(trajectory)
+              else np.zeros(len(trajectory) - 1, dtype=bool))
+    still[1:] = ~moved & ~turned
+    return still
+
+
+def plot_replanning(grid: np.ndarray, metrics: PlanningMetrics, waypoints: np.ndarray,
+                    trajectory: np.ndarray, obstacles: DynamicObstacles, replans: Replans,
+                    sim: SimulationMetrics, output: Path, inflated: np.ndarray | None = None):
+    """Map: obstacle routes, initial plan, replan points and the executed
+    trajectory. Timeline: clearance to the nearest obstacle, waiting and replans."""
+    fig = plt.figure(figsize=(13, 8.4), layout="constrained")
+    grid_spec = fig.add_gridspec(1, 2, width_ratios=(1.0, 1.05))
+    ax = fig.add_subplot(grid_spec[0])
+    ax_t = fig.add_subplot(grid_spec[1])
+    res = metrics.resolution
+    draw_grid(ax, grid, res)
+    extra = draw_inflation(ax, grid, inflated)
+    ax.plot(waypoints[:, 0], waypoints[:, 1], color=PATH_COLOR, linewidth=6, alpha=0.3,
+            solid_capstyle="round", label="Initial plan", zorder=2)
+    for k in range(obstacles.x.shape[1]):
+        ox, oy = world_to_grid(obstacles.x[:, k], res), world_to_grid(obstacles.y[:, k], res)
+        ax.plot(ox, oy, color=OBSTACLE_COLOR, linewidth=1.4, linestyle=":", zorder=2.2,
+                label="Moving obstacle routes" if k == 0 else None)
+        ax.add_patch(Circle((ox[0], oy[0]), obstacles.radius[k] / res, facecolor=OBSTACLE_COLOR,
+                            alpha=0.55, edgecolor="none", zorder=2.3,
+                            label="Moving obstacles at t = 0" if k == 0 else None))
+    traj_x = world_to_grid(trajectory[:, TRAJ_X], res)
+    traj_y = world_to_grid(trajectory[:, TRAJ_Y], res)
+    ax.plot(traj_x, traj_y, color=TRAJECTORY_COLOR, linewidth=2, label="Executed trajectory",
+            zorder=3)
+    ok = replans.success
+    if ok.any():
+        ax.plot(replans.from_cells[ok, 0], replans.from_cells[ok, 1], linestyle="none",
+                marker="D", markersize=7, color=CURRENT_PLAN_COLOR, markeredgecolor="white",
+                label="Replanned here", zorder=3.5)
+    if (~ok).any():
+        ax.plot(replans.from_cells[~ok, 0], replans.from_cells[~ok, 1], linestyle="none",
+                marker="x", markersize=8, color=GOAL_COLOR, label="No path (waited)", zorder=3.5)
+    draw_start_goal(ax, metrics.start, metrics.goal)
+    handles, _ = ax.get_legend_handles_labels()
+    fig.legend(handles=_legend_handles() + extra + handles, loc="outside lower center",
+               ncol=5, frameon=False, fontsize=9)
+
+    t = trajectory[:, TRAJ_TIME]
+    clearance = obstacle_clearance(obstacles, trajectory, metrics.robot_radius)
+    waiting = waiting_mask(trajectory)
+    ax_t.fill_between(t, 0, 1, where=waiting, transform=ax_t.get_xaxis_transform(),
+                      color=GRID_LINE_COLOR, alpha=0.6, linewidth=0, label="Waiting", step="pre")
+    ax_t.plot(t, clearance, color=TRAJECTORY_COLOR, linewidth=1.8,
+              label="Gap to the nearest obstacle edge")
+    ax_t.axhline(0.0, color=GOAL_COLOR, linewidth=1.2, label="Contact")
+    for i, time in enumerate(replans.times[ok]):
+        ax_t.axvline(time, color=CURRENT_PLAN_COLOR, linewidth=1.0, linestyle="--",
+                     label="Replan" if i == 0 else None)
+    ax_t.set_xlabel("simulation time (s)")
+    ax_t.set_ylabel("gap (m)")
+    ax_t.set_ylim(bottom=min(-0.1, float(clearance.min()) - 0.1))
+    ax_t.grid(color=GRID_LINE_COLOR, linewidth=0.5)
+    ax_t.spines[["top", "right"]].set_visible(False)
+    ax_t.legend(frameon=False, fontsize=9, loc="upper right")
+    failed = int((~ok).sum())
+    fig.suptitle(f"Dynamic obstacles: {sim.status}  |  {int(ok.sum())} replan(s)"
+                 + (f", {failed} attempt(s) without a path" if failed else "")
+                 + f", {waiting.sum() * sim.dt_s:.1f} s waiting, closest gap "
+                 f"{clearance.min():.3f} m (at the samples)")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=FIGURE_DPI)
+    print(f"Saved {output}")
+    return fig
+
+
 def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
                             waypoints: np.ndarray, results_dir: Path,
                             output_dir: Path, inflated: np.ndarray | None = None) -> None:
@@ -780,6 +936,11 @@ def plot_simulation_results(grid: np.ndarray, metrics: PlanningMetrics,
         check_localization_matches_trajectory(localization, trajectory)
         plot_localization(grid, metrics, localization, output_dir / "localization.png", inflated)
         plot_localization_errors(localization, output_dir / "localization_errors.png")
+    dynamic = load_dynamic(results_dir)
+    if dynamic is not None:
+        check_dynamic_matches_trajectory(dynamic[0], trajectory)
+        plot_replanning(grid, metrics, waypoints, trajectory, *dynamic, sim,
+                        output_dir / "replanning.png", inflated)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

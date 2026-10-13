@@ -32,6 +32,7 @@ add_library(amr_core STATIC
     src/heading_control.cpp
     src/lidar.cpp
     src/ekf.cpp
+    src/dynamic_obstacles.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -66,7 +67,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_dynamic)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -222,6 +223,27 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 2 2 --robot-model diff-drive --ekf --ekf-range-sigma 0)
     set_tests_properties(cli_rejects_bad_ekf_settings PROPERTIES
         PASS_REGULAR_EXPRESSION "invalid EKF parameters: EKF range sigma")
+
+    add_test(NAME cli_dynamic_replanning
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18
+                --dynamic-obstacles ${PROJECT_SOURCE_DIR}/maps/obstacles_dynamic.csv
+                --output ${CLI_OUT}/dynamic)
+    set_tests_properties(cli_dynamic_replanning PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Dynamic: +3 moving obstacle\\(s\\), sensing range 3.00 m. 3 replan\\(s\\)")
+
+    add_test(NAME cli_rejects_bad_dynamic_obstacles
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18
+                --dynamic-obstacles ${PROJECT_SOURCE_DIR}/tests/data/bad_dynamic_obstacles.csv)
+    set_tests_properties(cli_rejects_bad_dynamic_obstacles PROPERTIES
+        PASS_REGULAR_EXPRESSION "line 2: route segment 0-1 crosses a static obstacle")
+
+    add_test(NAME cli_rejects_bad_replanning_settings
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --sensing-range 0)
+    set_tests_properties(cli_rejects_bad_replanning_settings PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid replanning parameters: sensing range")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

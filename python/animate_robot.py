@@ -19,6 +19,9 @@ Reads (from --results-dir, written by build/robot_simulator):
     lidar_scans.csv     optional (--lidar-beams): the latest scan's rays each frame
     localization.csv    optional (--ekf): dead reckoning and the EKF estimate with its
                         3-sigma ellipse
+    dynamic_obstacles.csv, replans.csv, replanned_paths.csv
+                        optional (--dynamic-obstacles): the moving obstacles (faded
+                        while the robot cannot see them) and the plan being followed
 
 Writes (to --output-dir, default --results-dir):
     navigation.gif           with --save-gif (PillowWriter; the default output)
@@ -42,6 +45,7 @@ from typing import NamedTuple
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import animation
+from matplotlib.patches import Circle
 from matplotlib.collections import LineCollection
 from matplotlib.backend_bases import FigureCanvasBase
 from PIL import Image
@@ -141,7 +145,8 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
                     sim: vm.SimulationMetrics, fps: float, playback_speed: float,
                     dpi: int = ANIMATION_DPI, inflated: np.ndarray | None = None,
                     lidar: vm.LidarScans | None = None,
-                    localization: vm.Localization | None = None):
+                    localization: vm.Localization | None = None,
+                    dynamic: tuple[vm.DynamicObstacles, vm.Replans] | None = None):
     """Create the figure, the per-frame update function and a FuncAnimation."""
     res = metrics.resolution
     t_start = trajectory[0, vm.TRAJ_TIME]
@@ -175,6 +180,17 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
             label="LiDAR rays"))
         (lidar_hits,) = ax.plot([], [], linestyle="none", marker="o", markersize=3,
                                 color=vm.LIDAR_HIT_COLOR, zorder=2.6, label="LiDAR returns")
+    if dynamic is not None:
+        # Moving obstacles at their interpolated positions, and the current plan.
+        obstacles, replans = dynamic
+        obstacle_discs = [ax.add_patch(Circle((np.nan, np.nan), r / res,
+                                              facecolor=vm.OBSTACLE_COLOR, edgecolor="black",
+                                              linewidth=0.8, zorder=3.4,
+                                              label="Moving obstacle" if k == 0 else None))
+                          for k, r in enumerate(obstacles.radius)]
+        (current_plan,) = ax.plot([], [], color=vm.CURRENT_PLAN_COLOR, linewidth=2,
+                                  linestyle="--", label="Current plan", zorder=2.4)
+        waiting = vm.waiting_mask(trajectory)
     if localization is not None:
         # Latest localization sample: dead-reckoning trail and pose, EKF estimate
         # with its 3-sigma position ellipse.
@@ -229,7 +245,16 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
         trail.set_data(vm.world_to_grid(traveled[:, 0], res),
                        vm.world_to_grid(traveled[:, 1], res))
         time_text.set_text(f"t = {t - t_start:5.1f} s / {t_end - t_start:.1f} s")
-        if frame < len(moving_times) - 1:
+        if frame < len(moving_times) - 1 and dynamic is not None:
+            # Replanning changes the waypoint list: show the replans instead.
+            sample = max(int(np.searchsorted(trajectory[:, vm.TRAJ_TIME], t, side="right")), 1)
+            sample = min(sample, len(trajectory) - 1)
+            action = ("WAITING" if waiting[sample] else
+                      "TURNING" if with_heading and is_turning_at(trajectory, t) else "NAVIGATING")
+            done = int((replans.success & (replans.times <= t + 1e-9)).sum())
+            status_text.set_text(f"{action}  {done} replan(s)")
+            status_text.get_bbox_patch().set_edgecolor(vm.GRID_LINE_COLOR)
+        elif frame < len(moving_times) - 1:
             target = target_waypoint_at(trajectory, t)
             action = "TURNING" if with_heading and is_turning_at(trajectory, t) else "NAVIGATING"
             status_text.set_text(f"{action}  waypoint {target}/{last_waypoint}")
@@ -266,6 +291,19 @@ def build_animation(grid: np.ndarray, metrics: vm.PlanningMetrics,
             ekf_ellipse.set_height(shape.get_height())
             ekf_ellipse.set_angle(shape.get_angle())
             artists += [odom_trail, odom_marker, ekf_ellipse, ekf_marker]
+        if dynamic is not None:
+            k = max(int(np.searchsorted(obstacles.times, t, side="right")) - 1, 0)
+            k1 = min(k + 1, len(obstacles.times) - 1)
+            span = obstacles.times[k1] - obstacles.times[k]
+            f = (t - obstacles.times[k]) / span if span > 0 else 0.0
+            for j, disc in enumerate(obstacle_discs):
+                x_m = obstacles.x[k, j] + (obstacles.x[k1, j] - obstacles.x[k, j]) * f
+                y_m = obstacles.y[k, j] + (obstacles.y[k1, j] - obstacles.y[k, j]) * f
+                disc.set_center((vm.world_to_grid(x_m, res), vm.world_to_grid(y_m, res)))
+                disc.set_alpha(0.9 if obstacles.visible[k, j] else 0.35)
+            plan = replans.current_path(waypoints, t)
+            current_plan.set_data(plan[:, 0], plan[:, 1])
+            artists += [current_plan, *obstacle_discs]
         return (*artists, time_text, status_text)
 
     anim = animation.FuncAnimation(fig, update, frames=len(times),
@@ -427,12 +465,15 @@ def main(argv: list[str] | None = None) -> int:
         inflated = vm.load_inflated_map(args.results_dir, grid, metrics)
         lidar = vm.load_lidar(args.results_dir / "lidar_scans.csv")
         localization = vm.load_localization(args.results_dir / "localization.csv")
+        dynamic = vm.load_dynamic(args.results_dir)
         if len(trajectory) > 0:
             check_trajectory_matches(metrics, trajectory)
             if lidar is not None:
                 vm.check_lidar_matches_trajectory(lidar, trajectory)
             if localization is not None:
                 vm.check_localization_matches_trajectory(localization, trajectory)
+            if dynamic is not None:
+                vm.check_dynamic_matches_trajectory(dynamic[0], trajectory)
     except vm.ResultFileError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -450,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     playback = args.playback_speed or default_playback_speed(duration)
     robot_anim = build_animation(grid, metrics, waypoints, trajectory,
                                  sim, args.fps, playback, args.dpi, inflated, lidar,
-                                 localization)
+                                 localization, dynamic)
     print(f"Animating {duration:.1f} s of simulation at {playback:.2f}x: "
           f"{robot_anim.frame_count} frames at {args.fps:g} fps")
 

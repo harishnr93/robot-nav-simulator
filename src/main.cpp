@@ -50,6 +50,8 @@ struct CliOptions {
     amr::MotionConfig motion;
     amr::LidarConfig lidar;
     amr::EkfConfig ekf;
+    std::string dynamic_file;           ///< --dynamic-obstacles (empty: static world)
+    amr::ReplanningConfig replanning;
     std::filesystem::path output_dir = "results";
     bool reference_bfs = false;
     amr::Connectivity connectivity = amr::Connectivity::Four;
@@ -100,6 +102,18 @@ void printUsage(std::ostream& os) {
           "  --odom-seed N         Seed of the odometry noise (default 0)\n"
           "  --ekf-range-sigma M   LiDAR range std assumed by the EKF in m (default 0.05)\n"
           "  --ekf-gate N          Reject beams whose innovation exceeds N std (default 3)\n"
+          "  --dynamic-obstacles FILE  Moving obstacles (one per line: radius_m,speed_mps,\n"
+          "                        x0,y0,x1,y1,... cells; back and forth); the robot\n"
+          "                        replans when one blocks its path\n"
+          "  --sensing-range M     Dynamic obstacles are seen within M meters, in line\n"
+          "                        of sight (default 3)\n"
+          "  --replan-margin M     Extra clearance around a seen obstacle when\n"
+          "                        replanning, m (default 0.25)\n"
+          "  --prediction-horizon S  Block where a seen obstacle will be within S seconds\n"
+          "                        at its estimated velocity (default 2; 0 = where it is)\n"
+          "  --replan-patience S   Wait up to S seconds for a blocked path to clear before\n"
+          "                        replanning a detour (default 6; 0 = replan at once)\n"
+
           "  --robot-radius M      Robot footprint radius in m; obstacles are inflated\n"
           "                        by it for planning (default 0 = point robot)\n"
           "  --output DIR          Output directory (default results/)\n"
@@ -117,6 +131,8 @@ void printUsage(std::ostream& os) {
           "  DIR/inflated_map.csv        planning map after inflation (robot radius > 0)\n"
           "  DIR/lidar_scans.csv         LiDAR scans: time,beam,angle,range,hit (LiDAR on)\n"
           "  DIR/localization.csv        true, dead-reckoning and EKF poses, covariance (--ekf)\n"
+          "  DIR/dynamic_obstacles.csv   obstacle positions per sample (--dynamic-obstacles)\n"
+          "  DIR/replans.csv, DIR/replanned_paths.csv  replanning attempts and new paths\n"
           "\n"
           "Exit codes:\n"
           "  0 goal reached, 1 usage error, 2 map error, 3 invalid start/goal,\n"
@@ -250,6 +266,19 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
                 ok = false;
             }
             options.lidar.seed = static_cast<std::uint32_t>(seed);
+        } else if (arg == "--dynamic-obstacles") {
+            ok = requireValues(1);
+            if (ok) {
+                options.dynamic_file = argv[++i];
+            }
+        } else if (arg == "--sensing-range") {
+            ok = parseNumber(options.replanning.sensing_range);
+        } else if (arg == "--replan-margin") {
+            ok = parseNumber(options.replanning.margin);
+        } else if (arg == "--replan-patience") {
+            ok = parseNumber(options.replanning.patience);
+        } else if (arg == "--prediction-horizon") {
+            ok = parseNumber(options.replanning.prediction_horizon);
         } else if (arg == "--ekf") {
             options.ekf.enabled = true;
         } else if (arg == "--odom-noise-dist") {
@@ -314,12 +343,15 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
         const std::string motion_error = amr::validateMotionConfig(options.motion);
         const std::string lidar_error = amr::validateLidarConfig(options.lidar);
         const std::string ekf_error = amr::validateEkfConfig(options.ekf);
+        const std::string replan_error = amr::validateReplanningConfig(options.replanning);
         if (!motion_error.empty()) {
             error = "invalid motion parameters: " + motion_error;
         } else if (!lidar_error.empty()) {
             error = "invalid LiDAR parameters: " + lidar_error;
         } else if (!ekf_error.empty()) {
             error = "invalid EKF parameters: " + ekf_error;
+        } else if (!replan_error.empty()) {
+            error = "invalid replanning parameters: " + replan_error;
         } else if (options.ekf.enabled && options.motion.model != amr::RobotModel::DiffDrive) {
             error = "--ekf requires --robot-model diff-drive (the odometry measures turns "
                     "and distances driven)";
@@ -368,7 +400,8 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
                   const Inflation& inflation, const amr::PlanResult& plan,
                   const ReferenceCheck& reference, const amr::SimulationResult& sim,
                   const std::vector<amr::LidarScan>& scans,
-                  const std::vector<amr::LocalizationSample>& localization) {
+                  const std::vector<amr::LocalizationSample>& localization,
+                  const amr::DynamicScenario* dynamic) {
     const amr::WorldPoint start_w = map.gridToWorld(options.start);
     const amr::WorldPoint goal_w = map.gridToWorld(options.goal);
     std::cout << std::fixed << std::setprecision(2);
@@ -454,6 +487,28 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
                   << " % returns, closest " << std::setprecision(3) << closest << " m at t = "
                   << std::setprecision(1) << closest_time << " s\n";
     }
+    if (dynamic != nullptr && !sim.trajectory.empty()) {
+        std::size_t failed = 0;
+        double replan_ms = 0.0;
+        for (const amr::ReplanEvent& event : sim.replans) {
+            failed += event.status == amr::PlanStatus::Success ? 0 : 1;
+            replan_ms += event.planning_time_ms;
+        }
+        std::cout << std::setprecision(2) << "Dynamic:        " << dynamic->obstacles.size()
+                  << " moving obstacle(s), sensing range " << options.replanning.sensing_range
+                  << " m; " << sim.replans.size() - failed << " replan(s)";
+        if (failed > 0) {
+            std::cout << " + " << failed << " attempt(s) without a path";
+        }
+        std::cout << " in " << std::setprecision(3) << replan_ms << " ms, "
+                  << std::setprecision(1) << static_cast<double>(sim.wait_steps) * options.motion.dt
+                  << " s waiting, closest gap " << std::setprecision(3)
+                  << sim.min_dynamic_clearance << " m\n";
+        if (sim.collided_obstacle >= 0) {
+            std::cout << "                hit by moving obstacle " << sim.collided_obstacle
+                      << '\n';
+        }
+    }
     if (!localization.empty()) {
         const amr::LocalizationSummary summary = amr::summarizeLocalization(localization);
         const auto errors = [](const amr::PoseErrorStats& stats) {
@@ -502,7 +557,8 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
                   const Inflation& inflation, const amr::PlanResult& plan,
                   const ReferenceCheck& reference, const amr::SimulationResult& sim,
                   const std::vector<amr::LidarScan>& scans,
-                  const std::vector<amr::LocalizationSample>& localization, std::string& error) {
+                  const std::vector<amr::LocalizationSample>& localization,
+                  const amr::DynamicScenario* dynamic, std::string& error) {
     const std::filesystem::path& dir = options.output_dir;
     // Every file is rewritten on every run (header-only when there is no data),
     // so results from an earlier run can never be mistaken for the current one.
@@ -535,6 +591,23 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
     } else {
         std::error_code ignored;
         std::filesystem::remove(localization_file, ignored);
+    }
+    // The dynamic-obstacle files only exist with --dynamic-obstacles; stale ones are removed.
+    const std::filesystem::path dynamic_files[] = {dir / "dynamic_obstacles.csv",
+                                                   dir / "replans.csv",
+                                                   dir / "replanned_paths.csv"};
+    if (dynamic != nullptr) {
+        if (!amr::writeDynamicObstaclesCsv(dynamic_files[0], map, sim.trajectory,
+                                           dynamic->obstacles, options.replanning.sensing_range,
+                                           error) ||
+            !amr::writeReplansCsv(dynamic_files[1], dynamic_files[2], sim.replans, error)) {
+            return false;
+        }
+    } else {
+        for (const auto& file : dynamic_files) {
+            std::error_code ignored;
+            std::filesystem::remove(file, ignored);
+        }
     }
     return amr::writePathCsv(dir / "path.csv", map, plan.path, error) &&
            amr::writePlanningMetricsCsv(dir / "planning_metrics.csv", map, options.start,
@@ -579,9 +652,25 @@ int main(int argc, char** argv) {
     const ReferenceCheck reference = options.reference_bfs
                                          ? checkAgainstBfs(inflation.planning_map, options, plan)
                                          : ReferenceCheck{};
+    // Moving obstacles: the initial plan ignores them (the robot has not seen them
+    // yet); the simulator replans on the inflated map when one blocks the path.
+    std::optional<amr::DynamicScenario> dynamic;
+    if (!options.dynamic_file.empty()) {
+        amr::DynamicObstacleLoadResult obstacles =
+            amr::loadDynamicObstacles(options.dynamic_file, map);
+        if (!obstacles.ok) {
+            std::cerr << "Error: " << obstacles.error << '\n';
+            return kExitMapError;
+        }
+        dynamic.emplace();
+        dynamic->planning_map = &inflation.planning_map;
+        dynamic->obstacles = std::move(obstacles.obstacles);
+        dynamic->replanning = options.replanning;
+    }
+    const amr::DynamicScenario* scenario = dynamic ? &*dynamic : nullptr;
     amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed
     if (plan.success()) {
-        sim = amr::simulatePath(map, plan.path, options.motion, options.connectivity);
+        sim = amr::simulatePath(map, plan.path, options.motion, options.connectivity, scenario);
     }
     // The LiDAR observes the real map from every trajectory sample; it does not
     // influence the motion.
@@ -599,12 +688,13 @@ int main(int argc, char** argv) {
                   << "': " << ec.message() << '\n';
         return kExitOutputError;
     }
-    if (!writeResults(options, map, inflation, plan, reference, sim, scans, localization, error)) {
+    if (!writeResults(options, map, inflation, plan, reference, sim, scans, localization, scenario,
+                      error)) {
         std::cerr << "Error: " << error << '\n';
         return kExitOutputError;
     }
 
-    printSummary(options, map, inflation, plan, reference, sim, scans, localization);
+    printSummary(options, map, inflation, plan, reference, sim, scans, localization, scenario);
     if (!reference.agrees) {
         std::cerr << "Error: A* result disagrees with the reference BFS\n";
         return kExitReferenceMismatch;

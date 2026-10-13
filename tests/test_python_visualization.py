@@ -618,6 +618,87 @@ class LocalizationVisualizationTests(unittest.TestCase):
                                           err_msg=f"frame {frame}")
 
 
+DYNAMIC_OBSTACLES = SOURCE_DIR / "maps" / "obstacles_dynamic.csv"
+
+
+class DynamicObstacleVisualizationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18),
+                                       "--dynamic-obstacles", str(DYNAMIC_OBSTACLES)), 0)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_outputs_load_and_match_the_trajectory(self):
+        *_, trajectory, _ = load_results(self.dir, OBSTACLES_MAP)
+        obstacles, replans = vm.load_dynamic(self.dir)
+        self.assertEqual(obstacles.x.shape, (len(trajectory), 3))
+        vm.check_dynamic_matches_trajectory(obstacles, trajectory)
+        np.testing.assert_allclose(obstacles.radius, [0.3, 0.3, 0.3])
+        # Obstacles move back and forth along their routes: obstacle 0 on column 10.
+        np.testing.assert_allclose(obstacles.x[:, 0], 5.25)
+        self.assertAlmostEqual(obstacles.y[:, 0].min(), 0.25, places=6)
+        self.assertGreater(obstacles.visible.sum(), 0)
+        self.assertGreaterEqual(replans.success.sum(), 1)
+        for ok, start, path in zip(replans.success, replans.from_cells, replans.paths,
+                                   strict=True):
+            if ok:
+                np.testing.assert_array_equal(path[0], start)
+                np.testing.assert_array_equal(path[-1], (18, 18))
+        # The robot never touched an obstacle, and it did wait for some.
+        self.assertGreater(vm.obstacle_clearance(obstacles, trajectory, 0.0).min(), 0.0)
+        self.assertTrue(vm.waiting_mask(trajectory).any())
+        with self.assertRaises(vm.ResultFileError):
+            vm.check_dynamic_matches_trajectory(obstacles, trajectory[:-1])
+
+    def test_current_path(self):
+        _, _, waypoints, *_ = load_results(self.dir, OBSTACLES_MAP)
+        _, replans = vm.load_dynamic(self.dir)
+        np.testing.assert_array_equal(replans.current_path(waypoints, 0.0), waypoints)
+        first = int(np.flatnonzero(replans.success)[0])
+        np.testing.assert_array_equal(
+            replans.current_path(waypoints, replans.times[first]), replans.paths[first])
+
+    def test_figure_and_stale_outputs(self):
+        self.assertEqual(vm.main(["--map", str(OBSTACLES_MAP), "--results-dir", str(self.dir)]), 0)
+        self.assertTrue((self.dir / "replanning.png").is_file())
+        # Without --dynamic-obstacles the dynamic files are removed and there is no figure.
+        run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18))
+        for name in ("dynamic_obstacles.csv", "replans.csv", "replanned_paths.csv"):
+            self.assertFalse((self.dir / name).exists(), name)
+        self.assertIsNone(vm.load_dynamic(self.dir))
+
+    def test_animation_draws_obstacles_and_the_current_plan(self):
+        grid, metrics, waypoints, trajectory, sim = load_results(self.dir, OBSTACLES_MAP)
+        dynamic = vm.load_dynamic(self.dir)
+        obstacles, replans = dynamic
+        robot_anim = ar.build_animation(grid, metrics, waypoints, trajectory, sim,
+                                        fps=5, playback_speed=3.0, dynamic=dynamic)
+        frame = 20
+        t = ar.frame_times(trajectory[0, vm.TRAJ_TIME], trajectory[-1, vm.TRAJ_TIME], 5, 3.0)[frame]
+        artists = robot_anim.update(frame)
+        plan, discs = artists[2], artists[3:6]   # after robot and trail (point robot)
+        np.testing.assert_array_equal(plan.get_xdata(), replans.current_path(waypoints, t)[:, 0])
+        k = int(np.searchsorted(obstacles.times, t, side="right") - 1)
+        self.assertAlmostEqual(discs[0].get_center()[1],
+                               vm.world_to_grid(np.interp(t, obstacles.times, obstacles.y[:, 0]),
+                                                metrics.resolution))
+        self.assertEqual(discs[0].get_alpha(), 0.9 if obstacles.visible[k, 0] else 0.35)
+        canvas = robot_anim.figure.canvas
+        checked = {0, frame, robot_anim.frame_count - 1}
+        blitted = {f: np.array(canvas.buffer_rgba())
+                   for f in ar.render_frames_blitted(robot_anim) if f in checked}
+        for f in sorted(checked):
+            for artist in robot_anim.update(f):
+                artist.set_animated(False)
+            canvas.draw()
+            np.testing.assert_array_equal(blitted[f], np.array(canvas.buffer_rgba()),
+                                          err_msg=f"frame {f}")
+
+
 HEADING_EXPERIMENT = SIMULATOR.parent / "heading_experiment"
 
 
@@ -777,6 +858,12 @@ class RunDemoTests(unittest.TestCase):
         self.assertIn("--ekf", ekf_command)
         self.assertEqual(ekf_command[ekf_command.index("--odom-noise-drift") + 1], "0.01")
         self.assertEqual(ekf_command[ekf_command.index("--odom-seed") + 1], "4")
+        dynamic_command = run_demo.simulator_command(run_demo.parse_args(
+            ["--dynamic-obstacles", "maps/obstacles_dynamic.csv", "--replan-patience", "3"]))
+        self.assertEqual(dynamic_command[dynamic_command.index("--dynamic-obstacles") + 1],
+                         "maps/obstacles_dynamic.csv")
+        self.assertEqual(dynamic_command[dynamic_command.index("--replan-patience") + 1], "3.0")
+        self.assertNotIn("--sensing-range", dynamic_command)
 
     def test_animation_only_when_requested(self):
         self.assertIsNone(run_demo.animation_args(run_demo.parse_args([])))

@@ -104,7 +104,11 @@ std::string validateEkfConfig(const EkfConfig& config) {
 }
 
 OdometryIncrement trueIncrement(const RobotState& from, const RobotState& to) {
-    return {std::hypot(to.x - from.x, to.y - from.y), wrapAngle(to.theta - from.theta)};
+    // Negative distance when the robot backed up (a retreat from a moving obstacle).
+    const double distance = std::hypot(to.x - from.x, to.y - from.y);
+    const bool backwards = (to.x - from.x) * std::cos(to.theta) +
+                               (to.y - from.y) * std::sin(to.theta) < 0.0;
+    return {backwards ? -distance : distance, wrapAngle(to.theta - from.theta)};
 }
 
 Pose applyIncrement(const Pose& pose, const OdometryIncrement& increment) {

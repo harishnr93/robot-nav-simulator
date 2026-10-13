@@ -1,0 +1,10 @@
+# Moving obstacles for maps/obstacles.csv (suggested start 1 1, goal 18 18).
+# One obstacle per line: radius_m, speed_mps, route cells x0,y0, x1,y1, ...
+# Each moves back and forth along its route at constant speed.
+#
+# crosses the top corridor
+0.3, 0.3, 10,0, 10,5
+# patrols the right-hand lane
+0.3, 0.4, 18,9, 18,15
+# dawdles across the corner at (15..17, 4)
+0.3, 0.05, 15,4, 17,4

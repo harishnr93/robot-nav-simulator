@@ -103,7 +103,8 @@ struct OdometryIncrement {
     double rotation = 0.0;  ///< rad
 };
 
-/// The true increment between two consecutive trajectory states.
+/// The true increment between two consecutive trajectory states (negative
+/// distance when the robot drove backwards).
 OdometryIncrement trueIncrement(const RobotState& from, const RobotState& to);
 
 /// Pose after applying an increment (heading wrapped to (-pi, pi]).

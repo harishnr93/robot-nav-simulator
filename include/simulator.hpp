@@ -20,6 +20,26 @@
 // The check always uses the real map, never the inflated planning map, so it is an
 // independent verification of the planned path.
 //
+// Dynamic obstacles and replanning (optional DynamicScenario, dynamic_obstacles.hpp):
+//   * Each step the robot looks for obstacles within its sensing range and line of
+//     sight. An obstacle seen in two consecutive steps gets a velocity estimate (its
+//     displacement / dt). Planning-map cells whose centers are closer than obstacle
+//     radius + robot radius + margin to the obstacle's predicted sweep (from its
+//     current position to where it will be after the prediction horizon, at the
+//     estimated velocity) count as blocked.
+//   * If a blocked cell lies on the rest of the path, the robot replans to the goal
+//     with the same AStarPlanner object (its buffers are reused): from its current
+//     cell when it stands on a waypoint, from the waypoint it is driving to
+//     otherwise, or, if that one is blocked, from the waypoint it came from (it
+//     drives back first). If there is no path yet, it keeps following the old path
+//     while its next waypoint is free, backs off to the previous waypoint if the one
+//     ahead is blocked, waits on a waypoint whose successor is blocked, and tries
+//     again next step.
+//   * A safety stop: the robot also waits instead of taking a step that would bring
+//     it within contact distance of a seen obstacle moving at its estimated velocity.
+//   * Obstacles do not avoid the robot. Collisions with them are checked exactly
+//     against their true motion during every step (moving, turning or waiting).
+//
 // Robot models (MotionConfig::model):
 //   * Point: moves straight toward the next waypoint at constant speed.
 //   * DiffDrive: pose (x, y, theta), inputs (v, omega), unicycle kinematics
@@ -33,8 +53,10 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
+#include "dynamic_obstacles.hpp"
 #include "grid_map.hpp"
 #include "robot.hpp"
 #include "types.hpp"
@@ -74,6 +96,40 @@ struct TrajectorySample {
     double angular_velocity = 0.0;  ///< rad/s
 };
 
+/// Sensing and replanning parameters for dynamic obstacles.
+struct ReplanningConfig {
+    double sensing_range = 3.0;  ///< obstacles are seen within this distance (to their edge), m
+    double margin = 0.25;        ///< extra clearance around a seen obstacle when planning, m
+    double prediction_horizon = 2.0;  ///< seconds of estimated obstacle motion blocked, s
+    double patience = 6.0;       ///< how long the path may stay blocked before a detour, s
+};
+
+/// Optional dynamic-obstacle scenario for simulatePath().
+struct DynamicScenario {
+    const GridMap* planning_map = nullptr;  ///< map A* replans on (the inflated map)
+    std::vector<DynamicObstacle> obstacles;
+    ReplanningConfig replanning;
+};
+
+/// One replanning attempt.
+struct ReplanEvent {
+    double time = 0.0;             ///< s
+    GridCoord from;                ///< cell the new path starts from
+    PlanStatus status = PlanStatus::NoPath;
+    std::vector<GridCoord> path;   ///< new path (empty unless status is Success)
+    GridCost cost;                 ///< exact cost of the new path
+    std::size_t expanded_nodes = 0;
+    double planning_time_ms = 0.0;
+    std::size_t blocked_cells = 0; ///< planning cells blocked by seen obstacles
+};
+
+/// Upper bound on validated replanning parameters.
+constexpr double kMaxSensingRange = 1000.0;
+constexpr double kMaxPredictionHorizon = 100.0;
+
+/// Empty string if the replanning parameters are valid, otherwise the reason.
+std::string validateReplanningConfig(const ReplanningConfig& config);
+
 struct SimulationResult {
     NavigationStatus status = NavigationStatus::NotRun;
     /// Samples at t = 0, dt, 2 dt, ... Includes the initial and final positions.
@@ -87,6 +143,11 @@ struct SimulationResult {
     double turn_time = 0.0;               ///< time spent rotating in place, s
     double total_rotation = 0.0;          ///< sum of |omega| * dt, rad
     std::size_t turns = 0;                ///< number of separate turn-in-place maneuvers
+    // Dynamic obstacles only:
+    std::vector<ReplanEvent> replans;     ///< every replanning attempt, in time order
+    std::size_t wait_steps = 0;           ///< steps spent waiting for a blocked path
+    int collided_obstacle = -1;           ///< index of the obstacle hit, -1 if none
+    double min_dynamic_clearance = 0.0;   ///< closest gap to any obstacle edge over the run, m
 
     bool success() const { return status == NavigationStatus::GoalReached; }
     /// final timestamp - initial timestamp, s (0 if no trajectory).
@@ -104,9 +165,11 @@ constexpr double kDriveAlignment = 1e-6;
 /// Number of collision samples per cell length along a segment.
 constexpr int kCollisionSamplesPerCell = 20;
 
-/// Simulate the robot following `path` (grid waypoints, start first).
+/// Simulate the robot following `path` (grid waypoints, start first). With a
+/// dynamic scenario the robot also avoids moving obstacles by replanning.
 SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& path,
                               const MotionConfig& config,
-                              Connectivity connectivity = Connectivity::Four);
+                              Connectivity connectivity = Connectivity::Four,
+                              const DynamicScenario* dynamic = nullptr);
 
 }  // namespace amr

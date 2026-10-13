@@ -817,6 +817,118 @@ per timestep with 72 beams, 2.9 ms for the whole run.
 - The estimate does not feed back into the control. Closing that loop is part of the
   "realistic actuator" future improvement.
 
+## 14. Dynamic obstacles and replanning (`--dynamic-obstacles FILE`)
+
+**Why:** real environments contain people and other robots. A path planned on a static
+map gets blocked, and the robot must notice that, find another way or wait, and never
+run into anything.
+
+**Obstacle model.**
+
+- Each obstacle is a disc that moves at constant speed back and forth along a route
+  through cell centres (one line per obstacle in the file:
+  `radius_m, speed_mps, x0, y0, x1, y1, ...`).
+- Its position is a closed-form function of time (arc length `speed · t` folded back
+  and forth along the route).
+- The route must stay in free cells. Obstacles do not avoid the robot.
+
+**Exact contact test.** Within a timestep the robot centre moves in a straight line, as
+recorded in the trajectory and drawn by the animation. The obstacle centre is piecewise
+linear: it can turn a corner or reverse mid-step. The step is split at those times, so
+both move linearly in each piece, and the closest approach of two linear motions has a
+closed form. Contact means a distance below obstacle radius + robot radius. The test
+also catches an obstacle that passes through the robot between two samples (tested
+with an obstacle that is 0.5 m away at both step ends). Against 20 000-point sampling,
+the exact minimum is never larger and always within 0.6 mm (300 random cases).
+
+**What the robot knows.** The robot does not know the routes.
+
+- It sees an obstacle within `--sensing-range` (3 m, measured to the obstacle's edge)
+  when the line to its centre crosses no static obstacle (the ray caster of section 12).
+- From two consecutive sightings it estimates the obstacle's velocity.
+- It blocks every planning cell whose centre lies within obstacle radius + robot radius
+  + `--replan-margin` (0.25 m) of the obstacle's predicted sweep. The sweep runs from
+  the current position to where the obstacle will be after `--prediction-horizon` (2 s)
+  at the estimated velocity.
+
+**Decision rules, every step.**
+
+1. **Blocked path → wait, then detour.** If a blocked cell lies on the rest of the
+   path, the robot keeps following the free part and waits on the last free waypoint.
+   It replans a detour only if the path is still blocked after `--replan-patience`
+   (6 s). It replans at once if its own cell, or the cell it is entering, becomes
+   blocked.
+2. **Replanning** uses one `AStarPlanner` object for the whole run, so every replan
+   reuses its buffers (Phase 6). It plans from the current cell, or from the waypoint
+   being driven to. If that waypoint is blocked, the robot **retreats**: it plans from
+   the waypoint it came from and drives back to it first. The goal cell is never
+   counted as blocked, because it cannot be avoided, only timed.
+3. **Failed replan.** If there is no path yet, the robot keeps following the old path
+   while its next waypoint is free, backs off if the one ahead is blocked, and
+   otherwise waits and retries.
+4. **Look-ahead gate.** Before driving, the robot predicts its own motion along the
+   path for the horizon, and the seen obstacles at their estimated velocities. If that
+   comes within the margin of an obstacle and standing still is safer, it waits. This
+   is what lets it cross *behind* a moving obstacle instead of in front of it.
+5. **Differential drive.** In dynamic runs it drives *backwards* to a waypoint behind it
+   (retreats included) instead of turning around. If turning in place, which is
+   standing still, is predicted to end in contact, it takes an **evasive step** forward
+   or backward. It picks the option that delays the contact longest, then the one with
+   the larger gap.
+
+**How the rules were found.** I stress-tested each version on 300 random scenarios
+(three obstacles patrolling random lanes of the obstacles map) and analysed every
+failure. Each failure class led to one rule:
+
+| Failure seen | Cause | Rule added |
+|---|---|---|
+| Head-on collision after stopping mid-cell | waiting where the obstacle was heading | 2 (retreat) |
+| Planning straight into an obstacle's path | only its current position was blocked | velocity estimate + predicted sweep |
+| Robot shuttling beside a patrolling obstacle until the timeout | each reversal of the obstacle flipped the best detour | 1 (patience) and 4 (look-ahead gate) |
+| Frozen in an obstacle's lane after a failed replan | "no path" made it stop | 3 (keep going) |
+| Hit while turning around (differential drive) | a 180° turn takes about 3 s | 5 (back up; evasive step) |
+| Every plan failing while an obstacle swept the goal | goal cell counted as blocked | 2 (goal never blocked) |
+| Evasive step moving towards the obstacle | contact was unavoidable either way, and the tie went to the larger gap | 5 (later contact first) |
+
+Two tuning findings: patience alone did not help until the look-ahead gate existed
+(2 s was worse than none), and results plateau between 6 and 8 s of patience.
+
+**Results** on 500 *new* random scenarios (a different seed from the 300 used for
+tuning), 3 moving obstacles each, 600 s limit:
+
+| Robot | Reaches the goal | Collisions | Timeouts (safe waiting) |
+|---|---|---|---|
+| Point, blind (does not react) | 355 (71 %) | 145 | 0 |
+| Point, replanning | 491 (98.2 %) | 0 | 9 |
+| Differential drive, blind | 357 (71 %) | 143 | 0 |
+| Differential drive, replanning | 494 (98.8 %) | 2 | 4 |
+
+The remaining failures are hard cases for any purely reactive planner:
+- obstacles closing in from two sides in a corner;
+- an obstacle patrolling the lane next to the goal;
+- a short patrol across the only passage, which makes the robot wait until the
+  timeout.
+
+Avoiding these needs knowledge of where obstacles will be: space-time planning, or
+learned routes.
+
+**Example** (`maps/obstacles_dynamic.csv`, point robot): it waits 9.5 s in total for
+the corridor-crossing and corner obstacles, replans 3 times (0.009 ms of planning in
+total), reaches the goal in 60.7 s instead of 34 s, and its closest gap to an obstacle
+is 0.49 m.
+
+**Cost.** About 2.5 µs per step with three obstacles (visibility, blocking, gate), plus
+a few µs per replan on this map. Static runs are untouched: without
+`--dynamic-obstacles` every output is byte-identical to before (400 random maps).
+
+**Limitations.**
+
+- Constant-velocity prediction: the robot cannot anticipate an obstacle's reversal.
+- Reactive, not optimal: detours are shortest paths on the current blocking, not
+  fastest routes through space and time.
+- Obstacles never yield, and they ignore each other.
+- The differential drive's evasive step only moves along its heading.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
