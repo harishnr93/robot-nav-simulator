@@ -1,0 +1,2 @@
+resolution,robot_radius,start_x,start_y,goal_x,goal_y,status,cost,solutions,time_ms
+0.25,0.3,2,2,37,37,FOUND,2,8,3.40818

@@ -35,6 +35,8 @@ values are compared with explicit tolerances.
 | `test_lidar` | simulated LiDAR: exact ray casting, beam layout, noise, scans along a trajectory |
 | `test_ekf` | EKF localization: odometry model, Jacobians, Kalman update, gate, convergence, NEES consistency |
 | `test_dynamic` | moving obstacles and replanning: motion model, exact contact, loading, visibility, waiting, detours, retreats, invariants |
+| `test_ghost_cells` | minimum ghost cells: covers vs. inflation, exact solver vs. brute force (count, every optimal set, weighted), overlapping footprints, statuses |
+| `test_ghost_perception` | perception loop: beam and ghost model, occupancy update, ghost evidence, recovery strategies on a doorway |
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
 | `cli_plan_maze_map` | plans and simulates on `maps/maze.csv`, expects `GOAL_REACHED` |
@@ -59,6 +61,7 @@ values are compared with explicit tolerances.
 | `cli_dynamic_replanning` | obstacles map with `maps/obstacles_dynamic.csv`: expects `GOAL_REACHED` and 3 replans |
 | `cli_rejects_bad_dynamic_obstacles` | a route through a wall (`tests/data/bad_dynamic_obstacles.csv`): expects the line and the reason |
 | `cli_rejects_bad_replanning_settings` | `--sensing-range 0`: expects "invalid replanning parameters" |
+| `ghost_experiment_example` | the documented example map: expects a 2-cell explanation with 8 optimal alternatives |
 | `heading_experiment_p_vs_pid` | runs the P vs. PID experiment: expects P to never settle under the disturbance and PID to settle |
 | `heading_experiment_rejects_bad_gain` | `--kp -1`: expects a non-zero exit code |
 | `cli_rejects_overshooting_heading_gain` | `--heading-gain 20` (gain × dt = 2): expects "invalid motion parameters: heading gain" |
@@ -69,7 +72,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (59 tests, about 32 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (62 tests, about 34 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -85,6 +88,7 @@ binary into temporary directories.
 | Blitting | blitted frames are pixel-identical to full renders of the same state (first, middle and last frame) |
 | LiDAR | scans load as (scans × beams), one per trajectory sample, with heading-relative beams; no-return beams carry the maximum range; scans of another run and malformed beam orders are rejected; ray segments start at the robot and have the measured lengths; the animation draws the latest scan, and its blitted frames equal full renders; `lidar_scan.png` is written only with LiDAR data; `run_demo.py` forwards the LiDAR options |
 | Localization | `localization.csv` loads with symmetric, positive-definite covariances and matches the trajectory (rejected otherwise); the EKF error stays below 5 cm and dead reckoning drifts more than 10 times as far; heading errors are wrapped; the 3σ ellipse of a known covariance has the right axes and angle; the figures exist only with `--ekf`, and a stale `localization.csv` is removed; the animation shows the latest dead-reckoning pose and estimate, and its blitted frames equal full renders; `run_demo.py` forwards `--ekf` and the odometry options |
+| Ghost experiment plots | `plot_ghost_experiment.py` renders the three figures from the committed `docs/ghost/` data; outcome counts add up per strategy and match the documented headline; missing input is reported |
 | Dynamic obstacles | the three output files load and match the trajectory (rejected otherwise); obstacle positions follow their routes; replanned paths run from their start cell to the goal; the robot kept a positive gap and waited at least once; the current plan switches at each successful replan; `replanning.png` exists only with obstacles, and stale dynamic files are removed; the animation draws the obstacles at their interpolated positions, faded when unseen, and its blitted frames equal full renders; `run_demo.py` forwards the options |
 | Heading control plots | the experiment's metrics show P's steady-state errors `−d/Kp` and `w/Kp` and PID's ≈ 0, and "never" settling for P under the disturbance; all five figures are written; run files have a uniform 10 ms time base, wrapped errors and commands within the limit; missing and malformed inputs are reported |
 | Differential drive | heading columns are loaded (45 turn samples for 3 turns, no translation while turning); point trajectories have no heading; heading interpolation takes the short way across ±180°; the animated heading line points along θ and the status reads TURNING / NAVIGATING; blitted frames with the heading line equal full renders; the position figure gains a θ(t) panel; `run_demo.py` passes string options unquoted |
@@ -143,6 +147,27 @@ because the process noise was evaluated at the measured increments. See
 identical output files and console summaries on 400 random maps (about half with the
 LiDAR on, which also covers the ray caster's new hit-face output), and the Python
 figures and GIFs of three scenarios are byte-identical.
+
+## Ghost-cell tests (`test_ghost_cells.cpp`, `test_ghost_perception.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Covers vs. inflation | on 150 random maps (radius 0 to 0.75 m, two resolutions), a cell is blocked by `inflateObstacles` iff border-blocked or its cover is not inside the removed set, both as they are and after random removals |
+| Minimum count vs. brute force | 1500 random maps (point and disc robot, 4- and 8-connected, two resolutions): the exact minimum equals brute force up to 3 cells; the explanation opens a valid path, which is the one returned |
+| Every optimal explanation | on 306 maps, the listed optimal sets equal brute force's |
+| Weighted and unit optimum | small maps, exhaustive search over every subset (removals of any size): equal optimum with random and unit weights |
+| Overlapping footprints | a single-lane corridor where removing either of two adjacent obstacles frees nothing: the answer is the pair |
+| Statuses | path exists; impossible (map border, out of bounds); weights pick the cheap cell; a cost limit stops with a lower bound; the start itself as the ghost |
+| Beam trace and ghost source | passes and hit cell, range limit, map edge; an in-sector ghost hits at its probability (0.7 measured over 4000 beams), out of sector it is passed |
+| Sensor noise | miss rate and spurious early returns at their expected rates |
+| Occupancy update | log-odds steps, hit and pass counts, hit bearings, clamp, unknown as free |
+| Ghost evidence | passes outweigh hits as specified by the two-hypothesis ratio |
+| Doorway ghost | a ghost seen only from inside its sector: the most likely explanation recovers by re-sensing a few cells from another side, never clearing a real cell; clearing the map brings the ghost back (gives up); re-sensing everything spends over 5x the beams |
+| Doorway real obstacle | a real obstacle in the same place: no re-sensing strategy clears it (all give up); deleting without looking is unsafe |
+
+**Original experiment reproduced.** On the same 400 maps as the brute-force study that
+proposed the problem, the exact solver gives identical counts at every density (and
+average single-cell options), in 8.6 s instead of 1 min 44 s.
 
 ## Dynamic-obstacle tests (`test_dynamic.cpp`)
 
@@ -370,6 +395,18 @@ Additional unit tests:
   | Dynamic: no backing up (differential drive) | 1 |
   | Dynamic: goal counted as blocked | 1 |
   | Dynamic: evasive step off | 1 |
+  | Ghost: dominance reversed (subsets pruned) | 3 (ghost tests) |
+  | Ghost: bound overestimates (cost + H) | 3 |
+  | Ghost: diagonal side cells ignored | 3 |
+  | Ghost: map border ignored | 5 |
+  | Ghost: touching counts as blocking | 1 |
+  | Ghost: stops after the first optimal set | 1 |
+  | Ghost: weights ignored | 2 |
+  | Ghost evidence: passes ignored | 2 |
+  | Ghost re-sensing ignores bearings (nearest viewpoint) | 1 |
+  | Ghost: re-sensed cell not decided by evidence | 1 |
+  | Ghost source ignores direction | 2 |
+  | Ghost: passes not counted | 2 |
 
 - **Benchmark-scale optimality check:** every one of the 480 benchmark runs
   ([performance.md](performance.md)) compares A* with the reference BFS through
@@ -382,7 +419,7 @@ Additional unit tests:
 
 ## Sanitizers and static analysis
 
-Run in Phase 6, and again after each extension (latest: dynamic obstacles):
+Run in Phase 6, and again after each extension (latest: minimum ghost cells):
 
 ```bash
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
@@ -392,7 +429,7 @@ cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
 
 | Tool | Result |
 |---|---|
-| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 44 C++ and CLI CTest entries pass, no reports |
+| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 47 C++ and CLI CTest entries pass, no reports |
 | `cppcheck` 2.7 (`--enable=warning,performance,portability`) | no findings |
 | `clang-tidy` 14 (`bugprone-*`, `performance-*`, `clang-analyzer-*`) | 3 notes about string concatenation in CLI error messages (run only when reporting an error); left as is |
 | `ruff` (pyflakes, pycodestyle, bugbear, pyupgrade, simplify) | no findings |

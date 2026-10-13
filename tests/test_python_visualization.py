@@ -699,6 +699,37 @@ class DynamicObstacleVisualizationTests(unittest.TestCase):
                                           err_msg=f"frame {f}")
 
 
+GHOST_DATA = SOURCE_DIR / "docs" / "ghost"
+
+
+class GhostExperimentPlotTests(unittest.TestCase):
+    """plot_ghost_experiment.py on the committed experiment data."""
+
+    def test_figures(self):
+        import plot_ghost_experiment as pg
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.assertEqual(pg.main(["--input", str(GHOST_DATA), "--output-dir", str(out)]), 0)
+            for name in ("ghost_example.png", "ghost_recovery.png", "ghost_scaling.png"):
+                self.assertTrue((out / name).is_file(), name)
+        plt.close("all")
+
+    def test_recovery_summary(self):
+        import plot_ghost_experiment as pg
+        summary = pg.summarize_recovery(pg.read_rows(GHOST_DATA / "ghost_recovery_thorough.csv"))
+        for strategy in pg.STRATEGIES:
+            counts = summary[strategy]["counts"]
+            self.assertEqual(sum(counts.values()), summary[strategy]["total"])
+        # The documented headline: the most likely explanation recovered every case.
+        self.assertEqual(summary["most_likely"]["counts"]["RECOVERED"],
+                         summary["most_likely"]["total"])
+
+    def test_missing_input_is_reported(self):
+        import plot_ghost_experiment as pg
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(pg.main(["--input", tmp, "--output-dir", tmp]), 1)
+
+
 HEADING_EXPERIMENT = SIMULATOR.parent / "heading_experiment"
 
 

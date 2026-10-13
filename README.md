@@ -65,6 +65,11 @@ comes from a reproducible benchmark.
   the reused planner, plus waiting, backing off and a look-ahead gate. The robot
   reaches the goal in 98 % of 500 random scenarios, against 71 % without reacting.
   Collisions are exact, including contact between two samples.
+- "Why NO_PATH?" (`ghost_experiment`): an exact solver for the smallest or most likely
+  set of "ghost" cells (false obstacles) whose removal would let the disc robot reach
+  its goal, plus a perception loop that re-senses only those cells. It recovered all
+  300 ghost-caused failures with a median of 5 LiDAR beams, where clearing the map
+  recovered half of them with about 6800.
 - P vs. PID heading-control study (`heading_experiment`): a heading with motor lag and a
   disturbance, both controllers (PID with derivative on the measurement and anti-windup)
   in four scenarios, with overshoot, settling time, steady-state and tracking error and
@@ -87,7 +92,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 107 C++ test cases, 34 end-to-end CLI checks and 59 Python tests, including A* vs. BFS
+- 121 C++ test cases, 35 end-to-end CLI checks and 62 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -403,6 +408,55 @@ does not react. The point robot never collided; the differential drive collided 
 keeps blocking. Each rule of the method came from a failure found in testing; see
 [docs/algorithms.md](docs/algorithms.md#14-dynamic-obstacles-and-replanning---dynamic-obstacles-file).
 
+### Why NO_PATH? Minimum ghost cells
+
+```bash
+./build/ghost_experiment example --seed 23 --density 0.08 --output docs/ghost   # one map
+./build/ghost_experiment recovery --trials 300 --output docs/ghost             # perception loop
+./build/ghost_experiment recovery --trials 300 --cover-radius 4 --label sparse --output docs/ghost
+./build/ghost_experiment scaling --trials 100 --output docs/ghost              # solver study
+python3 python/plot_ghost_experiment.py                                         # -> docs/images/ghost_*.png
+```
+
+When the disc-robot planner says `NO_PATH`, it doesn't say why. The robot's footprint
+inflates every obstacle into a rounded square, and these squares overlap, so removing
+one obstacle may free nothing. `findGhostCells` (`include/ghost_cells.hpp`) finds,
+exactly, the smallest set of occupied cells whose removal would open a path. It can
+also find the most likely set, when each cell has a confidence, and it lists every
+optimal alternative:
+
+![Two ghost cells explain this NO_PATH; eight different pairs would](docs/images/ghost_example.png)
+
+This is minimum constraint removal, NP-hard in general; the lattice version with
+identical footprints appears unstudied and its complexity is open.
+
+- **Correctness:** the solver equals brute force on thousands of random maps, and it
+  reproduces a 400-map brute-force study exactly in 8.6 s instead of 1 min 44 s.
+- **Speed:** it solves typical cases in milliseconds. The cost grows steeply with the
+  size of the explanation (up to about a minute for 9–13 cells):
+
+![Solver time vs. explanation size and map size](docs/images/ghost_scaling.png)
+
+**Closing the perception loop.** A simulated LiDAR maps a world containing *ghost
+sources*: reflections that return false hits only to beams from certain directions.
+They are persistent, so clearing the map and scanning again brings them back. When the
+belief map has `NO_PATH`, the robot:
+
+1. explains it with the most likely ghost set;
+2. drives to look at only those cells from a different direction;
+3. decides each cell with a two-hypothesis test (a beam can pass through a ghost, but
+   never through a wall);
+4. replans.
+
+![Recovery strategies compared](docs/images/ghost_recovery.png)
+
+On 300 ghost-caused failures it recovered every one, with a median of 5 beams, and it
+never wrongly cleared a real obstacle. Clearing the map (the ROS-style recovery)
+recovered half the cases, using thousands of beams. Deleting the suspects without
+looking was fast, but under sparse mapping it opened paths through 19 real obstacles.
+Method, results and what went wrong along the way:
+[docs/algorithms.md](docs/algorithms.md#15-why-no_path-minimum-ghost-cells-and-targeted-re-sensing-ghost_experiment).
+
 ### P vs. PID heading control
 
 ```bash
@@ -654,7 +708,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 45 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 48 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -667,12 +721,14 @@ and static-analysis results.
 robot-nav-simulator/
 ├── CMakeLists.txt          build, tests (CTest) and benchmark targets
 ├── include/, src/          C++17 core: grid_map, astar, footprint, robot, diff_drive, simulator,
-│                           heading_control, lidar, ekf, dynamic_obstacles, csv_writer, main (CLI),
-│                           heading_experiment
+│                           heading_control, lidar, ekf, dynamic_obstacles, ghost_cells,
+│                           ghost_perception, csv_writer, main (CLI), heading_experiment,
+│                           ghost_experiment
 ├── tests/                  C++ unit tests, Python tests, test map fixtures (tests/data/)
 ├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
 ├── python/                 generate_map, visualize_map, animate_robot, run_demo,
-│                           run_benchmark, analyze_results, plot_heading_control
+│                           run_benchmark, analyze_results, plot_heading_control,
+│                           plot_ghost_experiment
 ├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine) and
 │                           moving obstacles for the obstacles map (obstacles_dynamic)
 ├── scripts/                build.sh, test.sh, run.sh
@@ -743,6 +799,9 @@ robot-nav-simulator/
   with the reused `AStarPlanner` (`--dynamic-obstacles`).
 - **ROS 2 integration:** publishing the map, path and robot state for RViz2, keeping the
   standalone simulator.
+- ✅ **Why NO_PATH?** the minimum ghost-cell explanation of a planning failure, and
+  re-sensing only those cells (`ghost_experiment`). Open: the complexity of the lattice
+  problem, and using the explanation live in `robot_simulator`.
 
 ## License
 

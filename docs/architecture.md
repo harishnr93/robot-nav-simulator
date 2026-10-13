@@ -76,6 +76,9 @@ uses.
 | `include/ekf.hpp`, `src/ekf.cpp` | EKF localization: the odometry model and its noise (`trueIncrement`, `applyIncrement`, `odometryVariances`), the filter (`PoseEkf`: prediction, batch LiDAR update in information form with the exact range Jacobian `rangeJacobian` and an innovation gate), the run along a trajectory with simulated noisy odometry (`runLocalization`) and the error/NEES summary. Called by `main.cpp` after the LiDAR; the estimate does not influence the motion. |
 | `include/heading_control.hpp`, `src/heading_control.cpp` | Heading-control study: the heading plant with motor lag and disturbance (`HeadingPlant`, exact discretisation), P and PID controllers (`HeadingController`: derivative on the measurement, anti-windup), the closed-loop simulation and the metrics (`computeHeadingMetrics`). |
 | `src/heading_experiment.cpp` | `heading_experiment` executable: runs the four P vs. PID scenarios (and `--sweep`), writes CSV files and a summary table. |
+| `include/ghost_cells.hpp`, `src/ghost_cells.cpp` | "Why NO_PATH?": cell covers matching `inflateObstacles` (`computeCellCovers`), the exact minimum-weight ghost-set search (`findGhostCells`: labels with subset dominance, bottleneck bound, all optimal sets), the brute-force reference (`referenceGhostCount`) and `ghostWeight`. Independent of the simulator. |
+| `include/ghost_perception.hpp`, `src/ghost_perception.cpp` | The perception loop: a world with view-dependent ghost sources, beam tracing (`traceBeam`), a log-odds occupancy belief with hit/pass counts and hit bearings, the two-hypothesis ghost evidence, active re-sensing and the recovery strategies (`recover`). |
+| `src/ghost_experiment.cpp` | `ghost_experiment` executable: `recovery` (strategies compared on random worlds), `scaling` (solver study with brute-force checks) and `example` (one map for the figure). |
 | `include/footprint.hpp`, `src/footprint.cpp` | Disc footprint: exact disc and swept-disc overlap tests, obstacle inflation, and `planWithFootprint()` (A* on the inflated map with footprint-specific statuses). |
 | `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv`, `simulation_metrics.csv`, and with the matching options `inflated_map.csv`, `lidar_scans.csv`, `localization.csv`, `dynamic_obstacles.csv`, `replans.csv` and `replanned_paths.csv`. |
 | `src/main.cpp` | CLI parsing, orchestration, console summary, exit codes. |
@@ -197,6 +200,7 @@ frames with full renders pixel by pixel.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
-| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control`, `test_lidar`, `test_ekf`, `test_dynamic` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control`, `test_lidar`, `test_ekf`, `test_dynamic`, `test_ghost_cells`, `test_ghost_perception` | executables | unit tests (registered with CTest) |
 | `heading_experiment` | executable | P vs. PID heading-control study |
+| `ghost_experiment` | executable | "Why NO_PATH?" experiments (writes `docs/ghost/`, plotted by `python/plot_ghost_experiment.py`) |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

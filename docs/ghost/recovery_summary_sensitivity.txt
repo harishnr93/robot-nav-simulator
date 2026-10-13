@@ -1,0 +1,30 @@
+== --sector 240
+Scenario: density 0.04, 3 ghost sources (240 deg sectors), mapping viewpoints every 2 m, 10 rounds max
+
+strategy      recovered  unsafe   gave up  real cleared  median beams  median rounds  median drive m
+most_likely   100        0        0        0             5             1              7.26722
+log_odds      30         0        70       0             20            4              10.9573
+fewest_cells  9          0        91       0             20            4              11.5569
+clear_all     18         0        82       1             16200         5              0
+blind_delete  100        0        0        0             0             1              0
+resense_all   22         0        78       0             1320          4              628.201
+== --ghosts 6
+Scenario: density 0.04, 6 ghost sources (104 deg sectors), mapping viewpoints every 2 m, 10 rounds max
+
+strategy      recovered  unsafe   gave up  real cleared  median beams  median rounds  median drive m
+most_likely   100        0        0        0             5             1              6.00521
+log_odds      83         0        17       0             10            2              8.59744
+fewest_cells  15         0        85       0             10            2              6.75463
+clear_all     48         0        52       0             6840          2              0
+blind_delete  100        0        0        0             0             1              0
+resense_all   75         0        25       0             675           2              388.91
+== --density 0.06
+Scenario: density 0.06, 3 ghost sources (104 deg sectors), mapping viewpoints every 2 m, 10 rounds max
+
+strategy      recovered  unsafe   gave up  real cleared  median beams  median rounds  median drive m
+most_likely   100        0        0        0             5             1              6.89656
+log_odds      82         0        18       0             10            2              11.1496
+fewest_cells  19         0        81       0             10            2              9.75
+clear_all     34         0        66       4             9720          3              0
+blind_delete  100        0        0        0             0             1              0
+resense_all   77         0        23       0             1275          3              659.636

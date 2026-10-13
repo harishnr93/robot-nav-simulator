@@ -33,6 +33,8 @@ add_library(amr_core STATIC
     src/lidar.cpp
     src/ekf.cpp
     src/dynamic_obstacles.cpp
+    src/ghost_cells.cpp
+    src/ghost_perception.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -51,6 +53,11 @@ add_executable(heading_experiment src/heading_experiment.cpp)
 target_link_libraries(heading_experiment PRIVATE amr_core)
 target_compile_options(heading_experiment PRIVATE ${AMR_WARNING_FLAGS})
 
+# "Why NO_PATH?" experiments (run with: ./build/ghost_experiment recovery|scaling)
+add_executable(ghost_experiment src/ghost_experiment.cpp)
+target_link_libraries(ghost_experiment PRIVATE amr_core)
+target_compile_options(ghost_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
 # ---------------------------------------------------------------------------
 # Micro-benchmark (run with: ./build/bench_planner [--quick])
 # ---------------------------------------------------------------------------
@@ -67,7 +74,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_dynamic)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_dynamic test_ghost_cells test_ghost_perception)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -244,6 +251,11 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 2 2 --sensing-range 0)
     set_tests_properties(cli_rejects_bad_replanning_settings PROPERTIES
         PASS_REGULAR_EXPRESSION "invalid replanning parameters: sensing range")
+
+    add_test(NAME ghost_experiment_example
+        COMMAND ghost_experiment example --seed 23 --density 0.08 --output ${CLI_OUT}/ghost)
+    set_tests_properties(ghost_experiment_example PROPERTIES
+        PASS_REGULAR_EXPRESSION "status FOUND, 2 cell\\(s\\), 8 optimal explanation\\(s\\)")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

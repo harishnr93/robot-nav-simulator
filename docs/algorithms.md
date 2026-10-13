@@ -929,6 +929,181 @@ a few µs per replan on this map. Static runs are untouched: without
 - Obstacles never yield, and they ignore each other.
 - The differential drive's evasive step only moves along its heading.
 
+## 15. Why NO_PATH? Minimum ghost cells and targeted re-sensing (`ghost_experiment`)
+
+**Problem.** When the disc-robot planner returns `NO_PATH`, find the smallest set of
+occupied cells that, if they were sensor ghosts (false obstacles), would make the goal
+reachable. Then re-sense only those cells. This root-causes a planning failure to its
+minimal set of culprits, and turns "the map says no" into "look again at these cells".
+
+**Why it is hard.** For a point robot it is a shortest path in which entering an
+occupied cell costs 1. For a disc robot each occupied cell blocks an identical
+rounded square of neighbouring cells, and these footprints overlap. Removing one cell
+can free nothing, because its neighbours still block the same cells (tested: a
+single-lane corridor where two adjacent obstacles must both go). This is *minimum
+constraint removal* (MCR; Hauser 2014), which is NP-hard in general. The lattice
+version, with identical footprints exactly as obstacle inflation produces them,
+appears not to have been studied directly; its complexity is open.
+
+**Formulation.** Each cell `c` has a *cover* `C(c)`: the occupied cells that block it
+on the inflated map (the same rule as `inflateObstacles`, distance below the radius
+minus 1e-9). Map-border blocks can never be removed. Removing a set `R` frees exactly
+the cells whose cover lies in `R`, so the goal is reachable after the removal iff some
+path's covers all lie in `R`. The minimum explanation is therefore the path minimizing
+the weight of the union of its covers:
+
+```text
+minimize  w(C(p0) ∪ C(p1) ∪ ... ∪ C(pn))   over grid paths start = p0 ... pn = goal
+```
+
+For an 8-connected diagonal move, the two side cells' covers join the union (no
+corner cutting). With `w = 1` the result is the fewest cells; with per-cell costs, the
+most likely explanation.
+
+**Exact algorithm** (`findGhostCells`). A best-first search over labels
+`(cell, S)`, where `S` is the union of covers so far.
+
+- **Ordering:** labels are ordered by `f = max(w(S), H(cell))`. `H` is the
+  bottleneck (minimax) cover weight from the cell to the goal, computed once by a
+  Dijkstra-like pass. Every path from the cell must cross a cover at least that heavy,
+  and the union contains it, so `f` never overestimates. It is consistent, so the
+  first goal label popped is optimal.
+- **Dominance:** a label is dropped if another label at the same cell has a subset
+  `S' ⊆ S`. A 64-bit signature rejects most subset tests in one instruction.
+- **Ties:** broken goal-directed (nearest to the goal first), which cut the labels by
+  2–5× on dense maps.
+- **All optimal explanations:** after the first optimum the search continues across
+  the plateau `f = optimum`, listing every inclusion-minimal optimal set.
+- **Limits:** a cost bound and a label limit stop runaway searches, reporting the best
+  proven lower bound.
+
+**Verification.**
+
+- **Covers:** they reproduce `inflateObstacles` cell for cell on 150 maps, both as
+  they are and after random removals.
+- **Minimum count:** it equals brute force (`planWithFootprint` on every subset, up to
+  3 cells) on 1500 random maps. These cover the point and disc robots, 4- and
+  8-connectivity, and two resolutions.
+- **All optimal sets:** the listed sets equal brute force's on 306 maps.
+- **Weighted and unit optima:** both equal an exhaustive search over *every* subset
+  (removals of any size) on small maps.
+- **Mutation testing:** all 7 deliberate solver bugs are caught (section "Mutation
+  checks" in [testing.md](testing.md)).
+
+The original brute-force experiment (40×40 cells at 0.25 m, 0.3 m robot, 100 seeds
+per density, the same seeds) is reproduced exactly at all four densities.
+
+- **Same counts:** at 6 % density, 31 failures, of which 23 need 1 cell and 8 need 2,
+  with 4.0 single-cell options on average.
+- **Faster:** 8.6 s in total, listing every optimal explanation, against 1 min 44 s
+  for the brute force.
+- **More information:** where the brute force could only report "3 or more" (8 maps
+  at 8 %, 59 at 10 %), the exact search also gives the size.
+
+**Scaling (empirical).** 100 seeds per setting, NO_PATH maps only:
+
+| Map | Density | Radius | Explanation (median / max cells) | Solver ms (median / max) |
+|---|---|---|---|---|
+| 40×40 | 4 % | 0.3 m | 1 / 1 | 1.6 / 4.0 |
+| 40×40 | 6 % | 0.3 m | 1 / 2 | 1.4 / 4.9 |
+| 40×40 | 8 % | 0.3 m | 1 / 4 | 1.3 / 8.6 |
+| 40×40 | 10 % | 0.3 m | 3 / 6 | 1.8 / 2163 |
+| 40×40 | 12 % | 0.3 m | 5 / 8 | 3.6 / 355 |
+| 40×40 | 15 % | 0.3 m | 8 / 13 (2 hit the 2 M-label limit) | 46 / 61 753 |
+| 40×40 | 6 % | 0.6 m | 6 / 10 | 3.4 / 87 |
+| 120×120 | 6 % | 0.3 m | 1 / 2 | 105 / 234 |
+
+Where brute force can still check (explanations of 1–2 cells), it takes 7.7 ms per
+map against 1.4 ms. It grows as (occupied cells)^k, while the exact search stays in
+milliseconds up to 5–6 cells. Beyond that the cost rises steeply with the size of the
+explanation, as an NP-hard problem leads one to expect; the slowest case took about
+62 s. Larger maps cost more mainly through the wide plateau of equally cheap labels.
+`docs/images/ghost_scaling.png` plots all of this.
+
+### Closing the perception loop
+
+**World and sensor.** The true map plus *ghost sources*: free cells that return a
+false hit to beams arriving within an angular sector (a reflection, a glass pane).
+
+- **Hits and passes:** an in-sector beam hits a ghost with probability q = 0.8, and an
+  out-of-sector beam passes through. Ghosts are persistent and view-dependent:
+  scanning again from the same places brings them back.
+- **Beams:** LiDAR beams are traced cell by cell. A real obstacle misses 2 % of beams,
+  and 1 % of beams return a spurious short range.
+- **Map:** a log-odds occupancy grid (+0.85 for a hit, −0.4 for a pass). Unknown space
+  counts as free.
+
+**Ghost evidence.** Plain log-odds treat a pass through a cell as weak evidence. But a
+beam can only pass through a ghost, never through a solid obstacle, so for the
+question "real or ghost?" one pass outweighs many hits. Two hypotheses give the
+removal cost of a believed-occupied cell:
+
+```text
+log P(real)/P(ghost) = prior (3) + hits · log((1 − miss)/q) + passes · log(ε)
+                     ≈ 3 + 0.2 · hits − 3.9 · passes          (ε = 0.02: seeing through a real cell)
+```
+
+**Recovery strategies.** These are compared from the same belief and the same noise:
+
+| Strategy | What it does |
+|---|---|
+| **Most likely** (evidence weights) | explain with the minimum-weight ghost set, re-sense those cells, decide them by the same evidence, replan |
+| Most likely (log-odds weights) | the same with the plain occupancy log-odds as costs, and log-odds deciding |
+| Fewest cells | minimum number of cells, re-sense, replan |
+| Re-sense every obstacle | look again at every believed-occupied cell |
+| Clear map, re-scan | reset the map and re-scan from every viewpoint (ROS costmap-clearing recovery) |
+| Delete explanation unseen | remove the most likely explanation without looking |
+
+**Active re-sensing.** The robot may drive to any cell it believes reachable. For each
+suspect cell it picks the viewpoint, in range and in line of sight, whose bearing
+differs most from the bearings that produced the hits there, preferring short drives.
+It then aims 5 beams at the cell.
+
+**Results.** 300 NO_PATH cases with 3 ghost sources next to the true route, 10 rounds
+at most:
+
+| Strategy | Thorough mapping: recovered | median beams | Sparse mapping: recovered / unsafe | real cells wrongly cleared |
+|---|---|---|---|---|
+| **Most likely** (evidence) | **300 (100 %)** | **5** | 259 / 40 | **0** |
+| Most likely (log-odds) | 251 | 10 | 189 / 35 | 0 |
+| Fewest cells | 62 | 5 | 54 / 13 | 0 |
+| Re-sense every obstacle | 222 | 645 | 187 / 13 | 0 |
+| Clear map, re-scan | 149 | 6840 | 115 / 34 | 36 |
+| Delete explanation unseen | 300 | 0 | 243 / 57 | 19 |
+
+- **Thorough mapping:** viewpoints every 2 m. The most likely explanation recovered
+  every case, usually by re-sensing one cell with 5 beams after a 6 m drive.
+- **Sensitivity:** in variations (240° ghost sectors, 6 ghosts, 6 % density;
+  `docs/ghost/`) it again recovered 100/100 each time. Log-odds weighting dropped to
+  30–83 % and clearing the map to 18–48 %.
+- **Sparse mapping:** viewpoints every 4 m. Unseen obstacles count as free, so every
+  strategy can produce unsafe paths through obstacles never observed; that is a
+  mapping limitation, not a recovery one. Re-sensing never cleared a real obstacle.
+  Deleting without looking cleared 19, and clearing the map 36.
+- **Fewest cells does badly:** with equal costs it keeps choosing well-observed real
+  cells. Confidence is what makes the explanation useful.
+
+**What failed first, and why.** Each of these was found by tracing failed runs:
+
+| Observation | Cause | Fix |
+|---|---|---|
+| Re-sensing the right cell never cleared it | only viewpoints the robot had visited, all inside the ghost's sector | active re-sensing from any reachable cell, at the most different bearing (hit bearings are stored per cell) |
+| The same confirmed real cell chosen round after round | log-odds clamped at ±6: 60 hits looked as uncertain as 8 | clamp raised to ±30 |
+| A ghost seen through 10 times stayed "occupied" | plain log-odds count a pass as only half a hit | the two-hypothesis evidence, for both the costs and the decision after re-sensing |
+| Most strategies "unsafe" | unknown space treated as free after sparse mapping | thorough-mapping scenario for the main result; sparse kept as the stress case |
+
+**Limitations.**
+
+- **Simulated sensor:** the ghost model (sector, hit probability) is an idealized
+  view-dependent artifact. Ghosts that look solid from every reachable direction
+  cannot be told apart by any sensor, and the robot then gives up, which is correct.
+- **Simplified driving:** the drive distance is a straight-line estimate, and the
+  robot's re-sensing moves are not simulated with the motion model.
+- **Independence:** cells are assumed independent (an explanation's probability is
+  the product).
+- **Complexity:** the solver is exact and exponential in the worst case. The
+  polynomial-time question for the lattice version stays open (not attempted).
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at

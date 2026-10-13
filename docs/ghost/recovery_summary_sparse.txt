@@ -1,0 +1,18 @@
+14229 reachable-or-not worlds generated; of the reachable ones, the mapped belief had a path in 13072 (1926 of them unsafe: missed obstacles) and NO_PATH in 300.
+
+Scenario: density 0.04, 3 ghost sources (104 deg sectors), mapping viewpoints every 4 m, 10 rounds max
+
+strategy      recovered  unsafe   gave up  real cleared  median beams  median rounds  median drive m
+most_likely   259        40       1        0             5             1              6.95072
+log_odds      189        35       76       0             5             1              9.75
+fewest_cells  54         13       233      0             5             1              11.25
+clear_all     115        34       151      36            2880          2              0
+blind_delete  243        57       0        19            0             1              0
+resense_all   187        13       100      0             350           1              256.046
+  gave up: clear_all round_limit 151
+  gave up: fewest_cells round_limit 233
+  gave up: log_odds round_limit 76
+  gave up: most_likely round_limit 1
+  gave up: resense_all round_limit 100
+
+Wrote /tmp/claude-1000/-home-ubuntu-22-harish-ws/3bab435b-3c0b-436f-a088-8850617f3cb5/scratchpad/rec4/ghost_recovery.csv
