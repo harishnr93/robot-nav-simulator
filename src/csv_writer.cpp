@@ -12,6 +12,7 @@ namespace {
 constexpr int kMetersPrecision = 4;
 constexpr int kMillisecondsPrecision = 6;
 constexpr int kSecondsPrecision = 6;
+constexpr int kCellsPrecision = 6;
 
 bool finishWrite(std::ofstream& out, const std::filesystem::path& file, std::string& error) {
     out.flush();
@@ -43,8 +44,9 @@ bool writePathCsv(const std::filesystem::path& file, const GridMap& map,
 
 bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& map,
                              GridCoord start, GridCoord goal, const PlanResult& result,
-                             std::optional<int> reference_bfs_cost, double robot_radius,
-                             double inflation_time_ms, std::string& error) {
+                             const ReferenceCost& reference, double robot_radius,
+                             double inflation_time_ms, Connectivity connectivity,
+                             std::string& error) {
     std::ofstream out(file);
     if (!out) {
         error = "cannot open '" + file.string() + "' for writing";
@@ -52,7 +54,8 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
     }
     out << "status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,"
            "planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,"
-           "reference_bfs_cost,robot_radius_m,inflation_time_ms\n";
+           "reference_bfs_cost,robot_radius_m,inflation_time_ms,connectivity,diagonal_steps,"
+           "path_cost_cells\n";
     out << toString(result.status) << ',' << (result.success() ? 1 : 0) << ','
         << map.width() << ',' << map.height() << ','
         << std::fixed << std::setprecision(kMetersPrecision) << map.resolution() << ','
@@ -66,11 +69,23 @@ bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& m
         out << ',';
     }
     out << ',';
-    if (reference_bfs_cost) {
-        out << *reference_bfs_cost;
+    if (reference.computed && !reference.cost) {
+        out << kReferenceNoPath;
+    } else if (reference.computed && connectivity == Connectivity::Four) {
+        out << reference.cost->straight;
+    } else if (reference.computed) {
+        out << std::setprecision(kCellsPrecision) << reference.cost->cells();
     }
     out << ',' << std::setprecision(kMetersPrecision) << robot_radius << ','
-        << std::setprecision(kMillisecondsPrecision) << inflation_time_ms << '\n';
+        << std::setprecision(kMillisecondsPrecision) << inflation_time_ms << ','
+        << static_cast<int>(connectivity) << ',';
+    if (result.success()) {
+        out << result.diagonal_moves << ',' << std::setprecision(kCellsPrecision)
+            << result.cost().cells();
+    } else {
+        out << ',';
+    }
+    out << '\n';
     return finishWrite(out, file, error);
 }
 

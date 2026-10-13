@@ -10,7 +10,9 @@
 //         world_y = (grid_y + 0.5) * resolution
 #pragma once
 
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <ostream>
 #include <vector>
 
@@ -39,6 +41,27 @@ struct WorldPoint {
     double x = 0.0;
     double y = 0.0;
 };
+
+/// Grid moves allowed for planning: 4 = up/down/left/right (cost 1 each);
+/// 8 = additionally the four diagonals (cost sqrt(2) each, no corner cutting).
+enum class Connectivity {
+    Four = 4,
+    Eight = 8,
+};
+
+/// Exact path cost in cell units: straight * 1 + diagonal * sqrt(2).
+/// Kept as two integers so costs can be compared exactly (see compareGridCost).
+struct GridCost {
+    std::int64_t straight = 0;
+    std::int64_t diagonal = 0;
+
+    double cells() const { return static_cast<double>(straight) +
+                                  static_cast<double>(diagonal) * std::sqrt(2.0); }
+};
+
+inline bool operator==(const GridCost& a, const GridCost& b) {
+    return a.straight == b.straight && a.diagonal == b.diagonal;
+}
 
 /// Outcome of a planning request. Only Success carries a path.
 enum class PlanStatus {
@@ -71,14 +94,19 @@ struct PlanResult {
     PlanStatus status = PlanStatus::NoPath;
     /// Ordered cells from start to goal (both included). Empty unless Success.
     std::vector<GridCoord> path;
-    /// Path cost in grid steps (uniform cost 1 per move). 0 unless Success.
+    /// Number of moves (grid steps) on the path. 0 unless Success. With
+    /// 4-connectivity every move costs 1, so this is also the path cost.
     int path_cost = 0;
+    /// How many of those moves are diagonal (8-connectivity only).
+    int diagonal_moves = 0;
     /// Number of nodes removed from the open set and expanded (goal included).
     std::size_t expanded_nodes = 0;
     /// Wall-clock planning time measured with std::chrono::steady_clock.
     double planning_time_ms = 0.0;
 
     bool success() const { return status == PlanStatus::Success; }
+    /// Exact path cost: (path_cost - diagonal_moves) * 1 + diagonal_moves * sqrt(2).
+    GridCost cost() const { return {path_cost - diagonal_moves, diagonal_moves}; }
 };
 
 }  // namespace amr

@@ -82,6 +82,8 @@ class PlanningMetrics:
     path_length_steps: int | None
     path_length_m: float | None
     robot_radius: float = 0.0       # m; 0 = point robot (older results have no column)
+    connectivity: int = 4           # 4 or 8 (older results have no column)
+    diagonal_steps: int = 0
 
 
 def load_map(path: Path) -> np.ndarray:
@@ -138,6 +140,8 @@ def load_metrics(path: Path) -> PlanningMetrics:
             path_length_steps=int(row["path_length_steps"]) if success else None,
             path_length_m=float(row["path_length_m"]) if success else None,
             robot_radius=float(row.get("robot_radius_m") or 0.0),
+            connectivity=int(row.get("connectivity") or 4),
+            diagonal_steps=int(row.get("diagonal_steps") or 0),
         )
     except ValueError as error:
         raise ResultFileError(f"'{path}' has a malformed value: {error}") from error
@@ -349,7 +353,10 @@ def plot_planned_path(grid: np.ndarray, metrics: PlanningMetrics,
     if metrics.success and len(waypoints) > 0:
         ax.plot(waypoints[:, 0], waypoints[:, 1], color=PATH_COLOR, linewidth=2.5,
                 marker="o", markersize=3.5, label="Planned A* path", zorder=3)
-        title = (f"A* path: {metrics.path_length_steps} steps, "
+        moves = (f"{metrics.path_length_steps} steps"
+                 + (f" ({metrics.diagonal_steps} diagonal)" if metrics.connectivity == 8 else ""))
+        kind = "8-connected A*" if metrics.connectivity == 8 else "A*"
+        title = (f"{kind} path: {moves}, "
                  f"{metrics.path_length_m:.2f} m, {metrics.expanded_nodes} nodes "
                  f"expanded, {metrics.planning_time_ms:.3f} ms")
     else:

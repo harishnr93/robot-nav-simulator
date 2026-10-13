@@ -1,0 +1,7 @@
+grid_size,maps,solved_by_both,path_length_median_m_4,path_length_median_m_8,path_reduction_median_pct,path_reduction_min_pct,path_reduction_max_pct,planning_time_median_ms_4,planning_time_median_ms_8,expanded_nodes_median_4,expanded_nodes_median_8
+10,80,63,9.0,6.95,22.78,3.25,29.29,0.0038,0.0089,19.0,18.0
+20,80,65,19.0,14.607,23.12,6.17,29.29,0.0084,0.025,51.0,69.0
+40,80,67,39.0,30.213,22.53,7.32,29.29,0.0178,0.0962,143.0,316.0
+60,80,68,59.0,44.941,23.83,9.61,29.29,0.0344,0.2196,218.0,700.0
+80,80,62,79.0,59.962,24.1,10.62,29.29,0.0625,0.3823,381.0,1164.0
+100,80,63,99.0,74.69,24.56,9.54,29.29,0.0758,0.5979,497.0,1807.0

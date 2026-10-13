@@ -12,6 +12,11 @@ run        Analyze one simulator run (results/ by default). The metrics are
                             no collision, no timeout
            Writes run_metrics.csv and robot_position_vs_time.png.
 
+compare    Compare two benchmark_runs.csv files made on the same maps with
+           different --connectivity (4 vs 8). Runs are matched by (N, density,
+           seed). Writes connectivity_comparison.csv / .md and
+           path_length_reduction_vs_grid_size.png.
+
 benchmark  Summarize benchmark_runs.csv (from run_benchmark.py). Failed runs are
            kept in every count and rate. Writes:
              benchmark_summary.csv / benchmark_summary.md   per (N, density)
@@ -440,6 +445,114 @@ def command_benchmark(args: argparse.Namespace) -> int:
     return 0 if checked.all() else 1
 
 
+def _runs_by_map(path: Path) -> dict[tuple[int, float, int], dict[str, str]]:
+    rows = _read_rows(path, BENCHMARK_COLUMNS)
+    return {(int(r["grid_size"]), float(r["density"]), int(r["seed"])): r for r in rows}
+
+
+def compare_connectivity(four: Path, eight: Path) -> list[dict[str, object]]:
+    """Per grid size: 4- vs 8-connected path length, planning time, expanded nodes."""
+    runs4, runs8 = _runs_by_map(four), _runs_by_map(eight)
+    if runs4.keys() != runs8.keys():
+        raise AnalysisError("the two benchmarks do not contain the same maps")
+    mismatched = [k for k in runs4 if runs4[k]["planning_success"] != runs8[k]["planning_success"]]
+    if mismatched:
+        raise AnalysisError(f"planning success differs on {len(mismatched)} maps; "
+                            "8-connectivity must reach exactly the cells 4-connectivity reaches")
+    summary = []
+    for size in sorted({k[0] for k in runs4}):
+        keys = [k for k in runs4 if k[0] == size]
+        both = [k for k in keys if runs4[k]["planning_success"] == "1"]
+        length4 = np.array([float(runs4[k]["path_length_m"]) for k in both])
+        length8 = np.array([float(runs8[k]["path_length_m"]) for k in both])
+        reduction = 100.0 * (1.0 - length8 / length4) if len(both) else np.array([])
+        time4 = np.array([float(runs4[k]["planning_time_ms"]) for k in both])
+        time8 = np.array([float(runs8[k]["planning_time_ms"]) for k in both])
+        nodes4 = np.array([int(runs4[k]["expanded_nodes"]) for k in both])
+        nodes8 = np.array([int(runs8[k]["expanded_nodes"]) for k in both])
+        def med(values, digits):
+            return round(float(np.median(values)), digits) if len(values) else ""
+        summary.append({
+            "grid_size": size,
+            "maps": len(keys),
+            "solved_by_both": len(both),
+            "path_length_median_m_4": med(length4, 3),
+            "path_length_median_m_8": med(length8, 3),
+            "path_reduction_median_pct": med(reduction, 2),
+            "path_reduction_min_pct": round(float(reduction.min()), 2) if len(both) else "",
+            "path_reduction_max_pct": round(float(reduction.max()), 2) if len(both) else "",
+            "planning_time_median_ms_4": med(time4, 4),
+            "planning_time_median_ms_8": med(time8, 4),
+            "expanded_nodes_median_4": med(nodes4, 0),
+            "expanded_nodes_median_8": med(nodes8, 0),
+        })
+    return summary
+
+
+def plot_path_reduction(four: Path, eight: Path, output: Path) -> None:
+    runs4, runs8 = _runs_by_map(four), _runs_by_map(eight)
+    sizes = sorted({k[0] for k in runs4})
+    densities = sorted({k[1] for k in runs4})
+    offsets = _offsets(len(densities), 0.9)
+    fig, ax = plt.subplots(figsize=(8, 5.2), layout="constrained")
+    for i, density in enumerate(densities):
+        med, lo, hi = [], [], []
+        for size in sizes:
+            keys = [k for k in runs4 if k[0] == size and k[1] == density
+                    and runs4[k]["planning_success"] == "1"]
+            values = np.array([100.0 * (1.0 - float(runs8[k]["path_length_m"]) /
+                                        float(runs4[k]["path_length_m"])) for k in keys])
+            if len(values) == 0:
+                med.append(np.nan), lo.append(np.nan), hi.append(np.nan)
+                continue
+            med.append(np.median(values))
+            lo.append(np.percentile(values, 25))
+            hi.append(np.percentile(values, 75))
+        med, lo, hi = (np.array(v, float) for v in (med, lo, hi))
+        color = SEQUENTIAL_BLUES[min(i, len(SEQUENTIAL_BLUES) - 1)]
+        ax.errorbar(np.array(sizes) + offsets[i], med, yerr=_error_bars(med, lo, hi),
+                    color=color, ecolor=color, elinewidth=1.2, capsize=3,
+                    marker=MARKERS[i % len(MARKERS)], markersize=7, linewidth=2,
+                    label=f"{density:.0%} obstacles")
+    ideal = 100.0 * (1.0 - np.sqrt(2.0) / 2.0)
+    ax.axhline(ideal, color=REFERENCE_LINE_COLOR, linestyle="--", linewidth=1.5,
+               label=f"obstacle-free diagonal: 1 − √2/2 = {ideal:.1f} %")
+    ax.set_xticks(sizes)
+    ax.set_ylim(bottom=0)
+    _style(ax, "grid size N (map of N × N cells)", "path length reduction, 8 vs 4 (%)")
+    ax.legend(frameon=False, loc="lower right")
+    ax.set_title("Path length saved by 8-connectivity (same maps; median, "
+                 "bars: 25th–75th percentile)", fontsize=11)
+    _save(fig, output)
+
+
+def command_compare(args: argparse.Namespace) -> int:
+    try:
+        summary = compare_connectivity(args.four, args.eight)
+    except AnalysisError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    out = args.output_dir
+    write_rows(out / "connectivity_comparison.csv", summary)
+    header = ("| N | maps | solved (both) | median path 4-conn (m) | median path 8-conn (m) | "
+              "median reduction | range | median ms 4 | median ms 8 | "
+              "median expanded 4 | median expanded 8 |")
+    lines = [header, "|" + "---|" * 11]
+    for r in summary:
+        lines.append(
+            f"| {r['grid_size']} | {r['maps']} | {r['solved_by_both']} | "
+            f"{r['path_length_median_m_4']} | {r['path_length_median_m_8']} | "
+            f"{r['path_reduction_median_pct']} % | {r['path_reduction_min_pct']}–"
+            f"{r['path_reduction_max_pct']} % | {r['planning_time_median_ms_4']} | "
+            f"{r['planning_time_median_ms_8']} | {r['expanded_nodes_median_4']:.0f} | "
+            f"{r['expanded_nodes_median_8']:.0f} |")
+    (out / "connectivity_comparison.md").write_text("\n".join(lines) + "\n")
+    print(f"Saved {out / 'connectivity_comparison.csv'} and "
+          f"{out / 'connectivity_comparison.md'}")
+    plot_path_reduction(args.four, args.eight, out / "path_length_reduction_vs_grid_size.png")
+    return 0
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze simulator results.")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -448,6 +561,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                      help="directory with the simulator CSV files (default results/)")
     run.add_argument("--output-dir", type=Path, default=None,
                      help="where to write outputs (default: --results-dir)")
+    compare = sub.add_parser("compare", help="compare 4- and 8-connected benchmarks")
+    compare.add_argument("--four", type=Path, required=True,
+                         help="benchmark_runs.csv made with --connectivity 4")
+    compare.add_argument("--eight", type=Path, required=True,
+                         help="benchmark_runs.csv made with --connectivity 8 (same maps)")
+    compare.add_argument("--output-dir", type=Path, required=True,
+                         help="where to write the comparison table and plot")
     bench = sub.add_parser("benchmark", help="summarize benchmark_runs.csv")
     bench.add_argument("--input", type=Path,
                        default=Path("results/benchmark/benchmark_runs.csv"),
@@ -463,7 +583,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     plt.switch_backend("Agg")
-    return command_run(args) if args.mode == "run" else command_benchmark(args)
+    commands = {"run": command_run, "benchmark": command_benchmark, "compare": command_compare}
+    return commands[args.mode](args)
 
 
 if __name__ == "__main__":

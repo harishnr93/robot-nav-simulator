@@ -168,7 +168,7 @@ export. Each change was required to give **exactly the same results**, and this 
 
 | Area | Before | After | Why it helps |
 |---|---|---|---|
-| Per-cell search memory | `int` cost + `size_t` parent + `vector<bool>` closed, all initialized for every cell on every request (~12 bytes/cell) | one state byte per cell (visited, closed, 2-bit parent direction) + a cost array that is only written for cells the search reaches | ~12× less memory to initialize and fault in per request |
+| Per-cell search memory | `int` cost + `size_t` parent + `vector<bool>` closed, all initialized for every cell on every request (~12 bytes/cell) | one state byte per cell (visited, closed, parent direction) + a cost array that is only written for cells the search reaches | ~12× less memory to initialize and fault in per request |
 | Open set | `std::priority_queue` of `(f, h, y, x)` structs | two binary heaps of packed 64-bit keys `(h << 32 \| index)`, one per f value | f only takes the values F and F + 2 (see [algorithms.md](algorithms.md)), and one integer comparison replaces a 4-field tuple comparison |
 | Neighbor handling | coordinate structs, bounds and occupancy checks through `GridMap` methods | row-major index arithmetic on the raw occupancy array | fewer conversions in the hot loop |
 | Repeated planning | new buffers per request | `AStarPlanner` reuses its buffers and resets only the cells the previous search touched | no O(N²) set-up per request when planning repeatedly |
@@ -236,6 +236,73 @@ all runs of each grid size:
 - **Animation:** the new GIF is byte-identical to the previous exporter's output, and
   the decoded MP4 frames are identical (same SHA-256). A test compares blitted frames
   with full renders pixel by pixel. A version that draws in the wrong z-order fails it.
+
+## 4- vs 8-connectivity
+
+The same 480 maps (same generator, seeds, start/goal corners and settings as above)
+were planned twice with the current code: `--connectivity 4` and `--connectivity 8`.
+Both runs used `--reference-bfs`, so each 8-connected plan was checked against the
+exact Dijkstra reference. Data: [`benchmark/connectivity/`](benchmark/connectivity/).
+
+```bash
+python3 python/run_benchmark.py --connectivity 4 --output-dir results/bench4
+python3 python/run_benchmark.py --connectivity 8 --output-dir results/bench8
+python3 python/analyze_results.py compare --four results/bench4/benchmark_runs.csv \
+    --eight results/bench8/benchmark_runs.csv --output-dir results/compare
+```
+
+**Correctness.**
+
+- Both modes solved exactly the same 388 maps. As predicted, the no-corner-cutting rule
+  leaves reachability unchanged.
+- A* matched the exact reference in 480 of 480 runs in both modes.
+- Both modes had 0 collisions.
+
+![Path length saved by 8-connectivity](images/benchmark/path_length_reduction_vs_grid_size.png)
+
+**Path length.** By obstacle density, over the maps solved by both modes:
+
+| Obstacles | Solved | Median path saving | Middle 50 % | Share of diagonal moves (median) |
+|---|---|---|---|---|
+| 0 % | 120 | 29.29 % | 29.29–29.29 % | 1.00 |
+| 10 % | 114 | 24.10 % | 23.12–24.78 % | 0.70 |
+| 20 % | 90 | 18.92 % | 17.47–19.65 % | 0.48 |
+| 30 % | 64 | 11.93 % | 10.59–13.62 % | 0.27 |
+
+- On obstacle-free maps the saving is exactly the theoretical `1 − √2/2 = 29.29 %` for a
+  corner-to-corner trip.
+- With more obstacles, the corner rule forbids more diagonals: at 30 % only a quarter of
+  the moves are diagonal, so the saving shrinks.
+- Over all 388 maps the median saving is 23.4 % (range 3.3–29.3 %). 8-connectivity was
+  never longer.
+
+**Planning cost.** Medians per grid size, one cold call per process:
+
+| N | maps | solved (both) | median path 4-conn (m) | median path 8-conn (m) | median reduction | range | median ms 4 | median ms 8 | median expanded 4 | median expanded 8 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10 | 80 | 63 | 9.0 | 6.95 | 22.78 % | 3.25–29.29 % | 0.0038 | 0.0089 | 19 | 18 |
+| 20 | 80 | 65 | 19.0 | 14.607 | 23.12 % | 6.17–29.29 % | 0.0084 | 0.025 | 51 | 69 |
+| 40 | 80 | 67 | 39.0 | 30.213 | 22.53 % | 7.32–29.29 % | 0.0178 | 0.0962 | 143 | 316 |
+| 60 | 80 | 68 | 59.0 | 44.941 | 23.83 % | 9.61–29.29 % | 0.0344 | 0.2196 | 218 | 700 |
+| 80 | 80 | 62 | 79.0 | 59.962 | 24.1 % | 10.62–29.29 % | 0.0625 | 0.3823 | 381 | 1164 |
+| 100 | 80 | 63 | 99.0 | 74.69 | 24.56 % | 9.54–29.29 % | 0.0758 | 0.5979 | 497 | 1807 |
+
+- **0 % obstacles:** 8-connectivity expands *fewer* nodes than 4-connectivity (0.51× the
+  median), because its path has N instead of 2N − 1 cells. It is still about 2.3× slower,
+  because every expansion costs more:
+  - 8 neighbors instead of 4;
+  - the corner checks;
+  - exact cost comparisons;
+  - a general priority queue instead of the specialised two-heap open set of the
+    4-connected mode.
+- **With obstacles:** it expands 1.9–2.6× more nodes, so it is 4.7–5.7× slower (median
+  per density).
+- **Absolute times:** 8-connected planning on these maps stays below 3 ms (slowest
+  single plan: 2.66 ms, at N = 100).
+
+**When to use which.** Use `--connectivity 8` when path quality matters: 12–29 % shorter
+and more natural routes, for a median of 0.6 ms of planning on a 100 × 100 map. Use the
+default 4-connectivity when raw planning speed matters most.
 
 ## Full summary (all runs)
 

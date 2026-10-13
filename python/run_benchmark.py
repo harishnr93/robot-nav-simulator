@@ -62,6 +62,7 @@ RUN_COLUMNS = (
     "path_length_steps", "path_length_m", "reference_bfs_cost", "optimal",
     "navigation_status", "navigation_success", "travel_time_s",
     "distance_traveled_m", "final_goal_error_m", "collision_count", "exit_code",
+    "connectivity", "diagonal_steps", "path_cost_cells",
 )
 
 
@@ -86,7 +87,7 @@ def read_single_row(path: Path) -> dict[str, str]:
 
 
 def run_once(simulator: Path, size: int, density: float, seed: int,
-             work_dir: Path) -> dict[str, object]:
+             work_dir: Path, connectivity: int = 4) -> dict[str, object]:
     grid = make_map(size, density, seed)
     map_file = work_dir / "map.csv"
     generate_map.write_map(grid, map_file)
@@ -94,6 +95,7 @@ def run_once(simulator: Path, size: int, density: float, seed: int,
     command = [str(simulator), "--map", str(map_file),
                "--start", "0", "0", "--goal", str(size - 1), str(size - 1),
                "--max-time", repr(BENCHMARK_MAX_TIME_S),
+               "--connectivity", str(connectivity),
                "--reference-bfs", "--output", str(out_dir)]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode not in EXPECTED_EXIT_CODES:
@@ -107,7 +109,10 @@ def run_once(simulator: Path, size: int, density: float, seed: int,
     reference = plan["reference_bfs_cost"]
     optimal = ""
     if planning_success and reference not in ("", "-1"):
-        optimal = int(int(plan["path_length_steps"]) == int(reference))
+        if connectivity == 4:
+            optimal = int(int(plan["path_length_steps"]) == int(reference))
+        else:  # costs in cell units; the simulator already compared them exactly
+            optimal = int(abs(float(plan["path_cost_cells"]) - float(reference)) < 1e-6)
     elif not planning_success and reference == "-1":
         optimal = 1  # both agree that there is no path
     return {
@@ -128,6 +133,9 @@ def run_once(simulator: Path, size: int, density: float, seed: int,
         "final_goal_error_m": sim["final_goal_error_m"],
         "collision_count": sim["collision_count"],
         "exit_code": completed.returncode,
+        "connectivity": connectivity,
+        "diagonal_steps": plan.get("diagonal_steps", ""),
+        "path_cost_cells": plan.get("path_cost_cells", ""),
     }
 
 
@@ -193,6 +201,7 @@ def collect_metadata(args: argparse.Namespace, elapsed_s: float, run_count: int)
             "dt_s": 0.1,
             "goal_tolerance_m": 0.05,
             "max_time_s": BENCHMARK_MAX_TIME_S,
+            "connectivity": args.connectivity,
             "map_seed": "numpy default_rng([seed, N, round(100 * density)])",
         },
         "elapsed_wall_time_s": round(elapsed_s, 1),
@@ -212,6 +221,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="output directory (default results/benchmark/)")
     parser.add_argument("--simulator", type=Path, default=DEFAULT_SIMULATOR,
                         help="robot_simulator executable (default build/robot_simulator)")
+    parser.add_argument("--connectivity", type=int, choices=(4, 8), default=4,
+                        help="grid moves for planning: 4 (default) or 8")
     parser.add_argument("--no-analyze", action="store_true",
                         help="only collect data; do not run analyze_results.py")
     args = parser.parse_args(argv)
@@ -242,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="amr_benchmark_") as tmp:
             for index, (size, density, seed) in enumerate(configurations, start=1):
-                rows.append(run_once(args.simulator, size, density, seed, Path(tmp)))
+                rows.append(run_once(args.simulator, size, density, seed, Path(tmp),
+                                     args.connectivity))
                 if index % 40 == 0 or index == len(configurations):
                     print(f"  {index}/{len(configurations)} runs", flush=True)
     except BenchmarkError as error:

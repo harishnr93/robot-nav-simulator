@@ -10,6 +10,7 @@ Can also be run directly from the repository root after building:
 
 from __future__ import annotations
 
+import csv
 import os
 import subprocess
 import sys
@@ -297,6 +298,69 @@ class FootprintVisualizationTests(unittest.TestCase):
             self.assertTrue((self.results / name).is_file(), name)
 
 
+@unittest.skipUnless(SIMULATOR.is_file(), f"simulator not built at {SIMULATOR}")
+class ConnectivityTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        plt.close("all")
+        self.tmp.cleanup()
+
+    def test_octile_plan_is_labelled_and_drawn(self):
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18),
+                                       "--connectivity", "8"), 0)
+        grid, metrics, waypoints, *_ = load_results(self.dir, OBSTACLES_MAP)
+        self.assertEqual(metrics.connectivity, 8)
+        self.assertEqual(metrics.diagonal_steps, 8)
+        fig = vm.plot_planned_path(grid, metrics, waypoints, self.dir / "p.png")
+        self.assertIn("8-connected A* path: 26 steps (8 diagonal)", fig._suptitle.get_text())
+        # Diagonal moves really appear in the drawn path.
+        steps = np.abs(np.diff(waypoints, axis=0))
+        self.assertEqual(int(np.sum((steps[:, 0] == 1) & (steps[:, 1] == 1))), 8)
+
+    def test_four_connected_title_is_unchanged(self):
+        self.assertEqual(run_simulator(self.dir, OBSTACLES_MAP, (1, 1), (18, 18)), 0)
+        grid, metrics, waypoints, *_ = load_results(self.dir, OBSTACLES_MAP)
+        fig = vm.plot_planned_path(grid, metrics, waypoints, self.dir / "p.png")
+        self.assertTrue(fig._suptitle.get_text().startswith("A* path: 34 steps, 17.00 m"))
+
+    def test_octile_benchmark_and_comparison(self):
+        common = ["--sizes", "6", "12", "--densities", "0", "0.3", "--seeds", "3",
+                  "--simulator", str(SIMULATOR), "--no-analyze"]
+        self.assertEqual(run_benchmark.main(common + ["--connectivity", "4",
+                                                      "--output-dir", str(self.dir / "b4")]), 0)
+        self.assertEqual(run_benchmark.main(common + ["--connectivity", "8",
+                                                      "--output-dir", str(self.dir / "b8")]), 0)
+        with (self.dir / "b8" / "benchmark_runs.csv").open() as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(all(r["connectivity"] == "8" for r in rows))
+        self.assertTrue(all(r["optimal"] == "1" for r in rows))   # exact Dijkstra agrees
+        status = analyze_results.main(["compare", "--four", str(self.dir / "b4" / "benchmark_runs.csv"),
+                                       "--eight", str(self.dir / "b8" / "benchmark_runs.csv"),
+                                       "--output-dir", str(self.dir / "cmp")])
+        self.assertEqual(status, 0)
+        for name in ("connectivity_comparison.csv", "connectivity_comparison.md",
+                     "path_length_reduction_vs_grid_size.png"):
+            self.assertTrue((self.dir / "cmp" / name).is_file(), name)
+        # Obstacle-free corner to corner: 8-connectivity saves exactly 1 - sqrt(2)/2.
+        summary = analyze_results.compare_connectivity(self.dir / "b4" / "benchmark_runs.csv",
+                                                       self.dir / "b8" / "benchmark_runs.csv")
+        self.assertAlmostEqual(max(r["path_reduction_max_pct"] for r in summary),
+                               100 * (1 - np.sqrt(2) / 2), places=1)
+
+    def test_comparison_rejects_different_maps(self):
+        common = ["--densities", "0.2", "--seeds", "2", "--simulator", str(SIMULATOR),
+                  "--no-analyze"]
+        run_benchmark.main(common + ["--sizes", "6", "--output-dir", str(self.dir / "a")])
+        run_benchmark.main(common + ["--sizes", "8", "--connectivity", "8",
+                                     "--output-dir", str(self.dir / "b")])
+        with self.assertRaises(analyze_results.AnalysisError):
+            analyze_results.compare_connectivity(self.dir / "a" / "benchmark_runs.csv",
+                                                 self.dir / "b" / "benchmark_runs.csv")
+
+
 class AnalysisTests(unittest.TestCase):
     def test_wilson_interval(self):
         low, high = analyze_results.wilson_interval(120, 120)
@@ -390,6 +454,9 @@ class RunDemoTests(unittest.TestCase):
         radius_args = run_demo.parse_args(["--robot-radius", "0.3"])
         radius_command = run_demo.simulator_command(radius_args)
         self.assertEqual(radius_command[radius_command.index("--robot-radius") + 1], "0.3")
+        self.assertNotIn("--connectivity", command)
+        octile_command = run_demo.simulator_command(run_demo.parse_args(["--connectivity", "8"]))
+        self.assertEqual(octile_command[octile_command.index("--connectivity") + 1], "8")
 
     def test_animation_only_when_requested(self):
         self.assertIsNone(run_demo.animation_args(run_demo.parse_args([])))

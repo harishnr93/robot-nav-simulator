@@ -75,18 +75,20 @@ double segmentSquareDistance(WorldPoint a, WorldPoint b, double x0, double y0, d
     return d;
 }
 
-}  // namespace
-
-bool sweptDiscOverlapsObstacle(const GridMap& map, WorldPoint a, WorldPoint b, double radius) {
+/// True if some point of segment a->b is within `limit` of an occupied cell or of
+/// the map exterior: distance < limit, or <= limit when `inclusive`. `radius` bounds
+/// the cells that need to be examined (cells farther away cannot be within limit).
+bool segmentWithin(const GridMap& map, WorldPoint a, WorldPoint b, double radius,
+                   double limit, bool inclusive) {
     const double res = map.resolution();
-    const double limit = radius - kFootprintTolerance;
+    const auto closer = [limit, inclusive](double d) { return inclusive ? d <= limit : d < limit; };
 
     // Map border: the region outside the map counts as an obstacle. The distance to
     // a border is linear along the segment, so checking both endpoints suffices.
     const double map_w = map.width() * res;
     const double map_h = map.height() * res;
     for (const WorldPoint& p : {a, b}) {
-        if (p.x < limit || p.y < limit || map_w - p.x < limit || map_h - p.y < limit) {
+        if (closer(p.x) || closer(p.y) || closer(map_w - p.x) || closer(map_h - p.y)) {
             return true;
         }
     }
@@ -100,8 +102,8 @@ bool sweptDiscOverlapsObstacle(const GridMap& map, WorldPoint a, WorldPoint b, d
     for (int y = y_min; y <= y_max; ++y) {
         for (int x = x_min; x <= x_max; ++x) {
             if (map.isOccupied({x, y}) &&
-                segmentSquareDistance(a, b, x * res, y * res, (x + 1) * res, (y + 1) * res) <
-                    limit) {
+                closer(segmentSquareDistance(a, b, x * res, y * res, (x + 1) * res,
+                                             (y + 1) * res))) {
                 return true;
             }
         }
@@ -109,13 +111,23 @@ bool sweptDiscOverlapsObstacle(const GridMap& map, WorldPoint a, WorldPoint b, d
     return false;
 }
 
+}  // namespace
+
+bool sweptDiscOverlapsObstacle(const GridMap& map, WorldPoint a, WorldPoint b, double radius) {
+    return segmentWithin(map, a, b, radius, radius - kFootprintTolerance, false);
+}
+
+bool segmentTouchesObstacle(const GridMap& map, WorldPoint a, WorldPoint b) {
+    return segmentWithin(map, a, b, kFootprintTolerance, kFootprintTolerance, true);
+}
+
 bool discOverlapsObstacle(const GridMap& map, WorldPoint p, double radius) {
     return sweptDiscOverlapsObstacle(map, p, p, radius);
 }
 
 PlanResult planWithFootprint(const GridMap& map, const GridMap& inflated, GridCoord start,
-                             GridCoord goal) {
-    PlanResult result = planAStar(inflated, start, goal);
+                             GridCoord goal, Connectivity connectivity) {
+    PlanResult result = planAStar(inflated, start, goal, connectivity);
     if (result.status == PlanStatus::StartOccupied && map.isFree(start)) {
         result.status = PlanStatus::StartTooCloseToObstacle;
     } else if (result.status == PlanStatus::GoalOccupied && map.isFree(goal)) {

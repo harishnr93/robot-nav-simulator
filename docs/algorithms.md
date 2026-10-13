@@ -67,9 +67,9 @@ expanded, the path is shortest.
 |---|---|
 | Open set | two `std::priority_queue` min-heaps, one per f value (see below) |
 | Decrease-key | not supported by `std::priority_queue`; cells are pushed again when a cheaper `g` is found, and stale entries are skipped when popped (`closed` check) |
-| Per-cell state | one byte: *visited*, *closed*, and the direction to the parent (2 bits) |
+| Per-cell state | one byte: *visited*, *closed*, and the direction to the parent (3 bits: 4 or 8 directions) |
 | Costs `g` | `int` array, written only for cells the search reaches (never bulk-initialized) |
-| Path reconstruction | follow the 2-bit parent directions back from the goal |
+| Path reconstruction | follow the stored parent directions back from the goal |
 | Repeated planning | an `AStarPlanner` keeps its buffers and resets only the cells the previous search touched; `planAStar()` is the one-shot wrapper |
 | Expanded-node count | number of cells popped *and* expanded, including the goal |
 | Timing | `std::chrono::steady_clock` around validation, buffer set-up and search (no file I/O) |
@@ -286,6 +286,108 @@ path, only possibly a missed one.
 `O(cells × (2r / res + 1)²)`. It runs once per CLI call, before planning, and is timed
 separately (`inflation_time_ms`): 0.05–0.14 ms for `maps/obstacles_fine.csv` (r = 0.12–0.4 m).
 
+## 9. 8-connected A* (`--connectivity 8`)
+
+**Why:** with only straight moves, the robot zig-zags along a "staircase" whenever the
+goal is not straight ahead, and its paths are up to 41 % longer than the straight line
+between cells. Allowing the four diagonal moves gives shorter and more natural paths.
+
+**Model.**
+
+| Move | Cost (cells) | Allowed when |
+|---|---|---|
+| up / down / left / right | 1 | the target cell is free |
+| diagonal | √2 | the target cell **and both orthogonal cells it passes** are free |
+
+The second rule is **no corner cutting**: a diagonal move between two cells that touch
+only at a corner would scrape the obstacles there, so it is forbidden if either of
+the two cells beside the move is occupied. One consequence: a diagonal can always be
+replaced by two straight moves through a free cell, so 8-connectivity reaches exactly
+the same cells as 4-connectivity. Planning succeeds or fails on the same maps; only
+the paths get shorter.
+
+**Heuristic: octile distance.** With `dx = |x_goal − x|` and `dy = |y_goal − y|`:
+
+```text
+h = (max(dx, dy) − min(dx, dy)) · 1 + min(dx, dy) · √2
+```
+
+Take `min(dx, dy)` diagonal steps, then the rest straight. On an obstacle-free
+8-connected grid this is the exact shortest path length, so it never overestimates
+(admissible). It is also a distance metric whose value for any single move equals
+that move's cost, so `h(u) ≤ cost(u, v) + h(v)` (consistent). Hence, as in section 3,
+the first time A* expands the goal, its cost is optimal.
+
+**Exact costs, no floating point.** Every path cost and every heuristic value has the
+form `a + b·√2`, with integers `a` (straight moves) and `b` (diagonal moves). The planner
+stores costs as such integer pairs (`GridCost`) and compares them exactly
+(`compareGridCost`):
+
+```text
+sign(a1 + b1·√2 − a2 − b2·√2) = sign(Δa + Δb·√2)
+  both Δ ≥ 0 → positive, both ≤ 0 → negative (zero only if both are 0, since √2 is irrational),
+  mixed signs → compare Δa² with 2·Δb²     (integers only)
+```
+
+This matters for correctness:
+
+- Floating-point sums of √2 accumulate rounding error, so two equal-cost paths could
+  compare as unequal (or the reverse). That would break the deterministic tie-breaking
+  and make an exact optimality check impossible.
+- With exact pairs, the tie-break is again `(f, h, y, x)`.
+- `--reference-bfs` in 8-connected mode checks A* against an independent, deliberately
+  simple Dijkstra search for **exactly** the same cost.
+- The integer squares stay within 64 bits for any map up to the 10 000-cell size limit.
+
+**Implementation.** `AStarPlanner` keeps the specialised two-heap open set for
+4-connectivity (section 3, unchanged and byte-identical in its results). For
+8-connectivity, `f` can take many values, so the open set is a single
+`std::priority_queue` of exact `(f, h, index)` entries. The per-cell state byte stores
+the parent direction in 3 bits (8 directions), and a second cost array holds the
+diagonal part of `g`. Both arrays are reused between plans.
+
+**Footprint safety with diagonals.** With a robot footprint, A* plans on the inflated map
+(section 8), and the corner rule is applied there too: the two orthogonal cells must be
+inflated-free. Then the whole disc stays clear during a diagonal move. The argument
+extends the one in section 8:
+
+- Shift coordinates so the move goes from the center of cell `(0, 0)` to the center of
+  `(1, 1)` (unit cells). The segment lies inside the 2 × 2 block `[0, 2]²`, and all four
+  cells of that block are inflated-free: the two endpoints, plus the two orthogonal cells
+  required by the corner rule. So every obstacle square `Q` lies outside the block.
+- Say `Q` is to the right of the block (`x ≥ 2`); the other sides are symmetric. For a
+  point `P = (s, s)` on the segment, the x-distance to `Q` is at least the x-distance
+  from the right-hand centers (`x = 1.5`).
+- For the y-distance, `Q`'s y-interval `[l, l+1]` either contains one of the centers'
+  y-values `0.5` or `1.5`, which gives distance 0 there, or lies entirely above or below
+  them. In that case the y-distance is smallest at the nearer of the two.
+- So some cell center of the block is no farther from `Q` than `P` is. All four centers
+  are at least `r` from every obstacle, hence so is `P`.
+- Map borders are linear along the move, so checking the endpoints suffices for them.
+
+For a point robot (`r = 0`), the same argument shows a diagonal move never even touches
+an obstacle. The test suite checks this on 300 random maps (621 diagonal moves) with the
+exact swept-disc test, and with the touch test for point robots.
+
+**Simulator.** In 8-connected mode the simulator also accepts diagonal waypoint steps.
+For a point robot it adds a **touch check**: a step may not touch an occupied cell, which
+is exactly what a corner-cutting diagonal does. A corner-cutting path is therefore
+reported as `COLLISION`, with the robot stopped just before the corner. A disc robot is
+covered by the swept-disc test. 4-connected simulations are unchanged.
+
+**Travel time.** A diagonal leg is `√2 · resolution` long. That is 0.707 m with the
+default 0.5 m cells, and does not divide evenly into 0.05 m steps. Since leftover step
+distance is not carried over (section 6), each diagonal leg takes 15 steps (1.5 s)
+instead of the ideal 0.707 / 0.5 = 1.414 s. On the obstacles map, 18 straight legs × 1 s
+plus 8 diagonal legs × 1.5 s give 30.0 s for the 14.66 m path (ideal: 29.3 s).
+
+**Measured effect** (480 maps, [performance.md](performance.md#4--vs-8-connectivity)):
+
+- Paths are 23 % shorter overall, by median: from 29.3 % (the obstacle-free optimum
+  `1 − √2/2`) at 0 % obstacles down to 12 % at 30 % obstacles.
+- Planning is 2–8× slower (median per grid size), because the search has more neighbors,
+  more expansions with obstacles, and a general priority queue.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
@@ -293,5 +395,6 @@ separately (`inflation_time_ms`): 0.05–0.14 ms for `maps/obstacles_fine.csv` (
   use (section 8).
 - The robot has no orientation, acceleration limits or dynamics: it changes direction
   instantly at waypoints (a differential-drive model is a planned extension).
-- Only 4-connected moves. Paths are optimal in grid steps but are not the shortest
-  Euclidean route (8-connected A* with an octile heuristic is a planned extension).
+- Paths are optimal on the grid graph (4- or 8-connected), not in continuous space: they
+  turn only at cell centers and in 45° steps. Any-angle planning (e.g. Theta*) or path
+  smoothing could shorten them further.

@@ -47,13 +47,14 @@ struct CliOptions {
     amr::MotionConfig motion;
     std::filesystem::path output_dir = "results";
     bool reference_bfs = false;
+    amr::Connectivity connectivity = amr::Connectivity::Four;
     bool show_help = false;
 };
 
 /// Result of the optional optimality check against the reference BFS.
 struct ReferenceCheck {
-    std::optional<int> cost;  ///< nullopt: not computed; kReferenceNoPath: no path
-    bool agrees = true;       ///< BFS and A* agree on reachability and cost
+    amr::ReferenceCost result;  ///< what the reference search found (if it ran)
+    bool agrees = true;         ///< reference and A* agree on reachability and cost
 };
 
 void printUsage(std::ostream& os) {
@@ -76,7 +77,10 @@ void printUsage(std::ostream& os) {
           "  --robot-radius M      Robot footprint radius in m; obstacles are inflated\n"
           "                        by it for planning (default 0 = point robot)\n"
           "  --output DIR          Output directory (default results/)\n"
-          "  --reference-bfs       Also run the reference BFS and check A* optimality\n"
+          "  --connectivity 4|8    Grid moves: 4 = straight only (default), 8 = also\n"
+          "                        diagonal (cost sqrt(2), no cutting obstacle corners)\n"
+          "  --reference-bfs       Also run the reference search (BFS for 4-connected,\n"
+          "                        exact Dijkstra for 8-connected) and check A* optimality\n"
           "  -h, --help            Show this help and exit\n"
           "\n"
           "Outputs:\n"
@@ -180,6 +184,18 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             ok = parseNumber(options.motion.max_time);
         } else if (arg == "--robot-radius") {
             ok = parseNumber(options.motion.robot_radius);
+        } else if (arg == "--connectivity") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string text = argv[++i];
+                int value = 0;
+                if (parseInt(text, value) && (value == 4 || value == 8)) {
+                    options.connectivity = static_cast<amr::Connectivity>(value);
+                } else {
+                    error = "--connectivity must be 4 or 8, got '" + text + "'";
+                    ok = false;
+                }
+            }
         } else if (arg == "--reference-bfs") {
             options.reference_bfs = true;
         } else if (arg == "--output") {
@@ -221,9 +237,11 @@ ReferenceCheck checkAgainstBfs(const amr::GridMap& map, const CliOptions& option
         amr::PlanStatus::Success) {
         return check;  // invalid start/goal: nothing to compare
     }
-    const std::optional<int> bfs = amr::bfsShortestPathCost(map, options.start, options.goal);
-    check.cost = bfs ? *bfs : amr::kReferenceNoPath;
-    check.agrees = plan.success() ? (bfs && *bfs == plan.path_cost) : !bfs;
+    const std::optional<amr::GridCost> reference =
+        amr::referenceShortestPathCost(map, options.start, options.goal, options.connectivity);
+    check.result = {true, reference};
+    // Exact comparison: equal costs have equal (straight, diagonal) counts.
+    check.agrees = plan.success() ? (reference && *reference == plan.cost()) : !reference;
     return check;
 }
 
@@ -270,17 +288,24 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
               << " ms\n";
     if (plan.success()) {
         std::cout << std::setprecision(2) << "Path:           " << plan.path.size()
-                  << " waypoints, " << plan.path_cost << " steps, "
-                  << amr::pathLengthMeters(map, plan.path) << " m\n";
+                  << " waypoints, " << plan.path_cost << " steps";
+        if (options.connectivity == amr::Connectivity::Eight) {
+            std::cout << " (" << plan.diagonal_moves << " diagonal)";
+        }
+        std::cout << ", " << amr::pathLengthMeters(map, plan.path) << " m\n";
     } else {
         std::cout << "Path:           none\n";
     }
-    if (reference.cost) {
-        std::cout << "Reference BFS:  ";
-        if (*reference.cost == amr::kReferenceNoPath) {
+    if (reference.result.computed) {
+        const bool four = options.connectivity == amr::Connectivity::Four;
+        std::cout << (four ? "Reference BFS:  " : "Reference:      exact Dijkstra, ");
+        if (!reference.result.cost) {
             std::cout << "no path";
+        } else if (four) {
+            std::cout << reference.result.cost->straight << " steps";
         } else {
-            std::cout << *reference.cost << " steps";
+            std::cout << std::setprecision(6) << reference.result.cost->cells() << " cells"
+                      << std::setprecision(2);
         }
         std::cout << (reference.agrees ? " (matches A*)" : " (MISMATCH with A*)") << '\n';
     }
@@ -333,9 +358,9 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
     }
     return amr::writePathCsv(dir / "path.csv", map, plan.path, error) &&
            amr::writePlanningMetricsCsv(dir / "planning_metrics.csv", map, options.start,
-                                        options.goal, plan, reference.cost,
+                                        options.goal, plan, reference.result,
                                         options.motion.robot_radius, inflation.time_ms,
-                                        error) &&
+                                        options.connectivity, error) &&
            amr::writeTrajectoryCsv(dir / "trajectory.csv", sim.trajectory, error) &&
            amr::writeSimulationMetricsCsv(dir / "simulation_metrics.csv", plan.success(),
                                           options.motion, sim, error);
@@ -367,14 +392,15 @@ int main(int argc, char** argv) {
     // timed separately and is not part of the planning time.
     const Inflation inflation = inflate(map, options.motion.robot_radius);
     const amr::PlanResult plan =
-        amr::planWithFootprint(map, inflation.planning_map, options.start, options.goal);
+        amr::planWithFootprint(map, inflation.planning_map, options.start, options.goal,
+                               options.connectivity);
     // The BFS check runs after planning, on the same planning map.
     const ReferenceCheck reference = options.reference_bfs
                                          ? checkAgainstBfs(inflation.planning_map, options, plan)
                                          : ReferenceCheck{};
     amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed
     if (plan.success()) {
-        sim = amr::simulatePath(map, plan.path, options.motion);
+        sim = amr::simulatePath(map, plan.path, options.motion, options.connectivity);
     }
 
     std::error_code ec;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "astar.hpp"
 #include "footprint.hpp"
@@ -15,8 +16,10 @@ double distanceBetween(WorldPoint a, WorldPoint b) {
 }
 
 /// Structural path check. Occupancy is deliberately NOT checked here: entering an
-/// occupied cell is detected by the motion-time collision checker instead.
-bool isStructurallyValidPath(const GridMap& map, const std::vector<GridCoord>& path) {
+/// occupied cell (or touching one while cutting a corner) is detected by the
+/// motion-time collision checker instead.
+bool isStructurallyValidPath(const GridMap& map, const std::vector<GridCoord>& path,
+                             Connectivity connectivity) {
     if (path.empty()) {
         return false;
     }
@@ -24,7 +27,14 @@ bool isStructurallyValidPath(const GridMap& map, const std::vector<GridCoord>& p
         if (!map.inBounds(path[i])) {
             return false;
         }
-        if (i > 0 && manhattanDistance(path[i - 1], path[i]) != 1) {
+        if (i == 0) {
+            continue;
+        }
+        const int dx = std::abs(path[i].x - path[i - 1].x);
+        const int dy = std::abs(path[i].y - path[i - 1].y);
+        const bool straight = dx + dy == 1;
+        const bool diagonal = dx == 1 && dy == 1;
+        if (!straight && !(diagonal && connectivity == Connectivity::Eight)) {
             return false;
         }
     }
@@ -66,13 +76,13 @@ bool isSegmentCollisionFree(const GridMap& map, WorldPoint a, WorldPoint b) {
 }
 
 SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& path,
-                              const MotionConfig& config) {
+                              const MotionConfig& config, Connectivity connectivity) {
     SimulationResult result;
     if (!validateMotionConfig(config).empty()) {
         result.status = NavigationStatus::InvalidConfig;
         return result;
     }
-    if (!isStructurallyValidPath(map, path)) {
+    if (!isStructurallyValidPath(map, path, connectivity)) {
         result.status = NavigationStatus::InvalidPath;
         return result;
     }
@@ -106,11 +116,15 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
     result.trajectory.reserve(std::min(expected_steps, max_steps) + 1);
 
     record(0.0);
-    // Point robot: the Phase 3 point check. Disc robot: exact swept-disc check.
+    // Point robot: the Phase 3 point check; with 8-connectivity the step must also
+    // not touch an occupied cell (a diagonal move through the shared corner of an
+    // obstacle touches it). Disc robot: exact swept-disc check.
     const auto step_is_free = [&](WorldPoint from, WorldPoint to) {
-        return config.robot_radius > 0.0
-                   ? !sweptDiscOverlapsObstacle(map, from, to, config.robot_radius)
-                   : isSegmentCollisionFree(map, from, to);
+        if (config.robot_radius > 0.0) {
+            return !sweptDiscOverlapsObstacle(map, from, to, config.robot_radius);
+        }
+        return isSegmentCollisionFree(map, from, to) &&
+               (connectivity == Connectivity::Four || !segmentTouchesObstacle(map, from, to));
     };
 
     if (!step_is_free(position, position)) {

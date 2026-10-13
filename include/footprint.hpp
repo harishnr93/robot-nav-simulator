@@ -37,11 +37,16 @@ bool discOverlapsObstacle(const GridMap& map, WorldPoint p, double radius);
 /// attained at a segment endpoint or a square corner. Precondition: radius > 0.
 bool sweptDiscOverlapsObstacle(const GridMap& map, WorldPoint a, WorldPoint b, double radius);
 
+/// True if segment a->b touches (distance <= kFootprintTolerance) an occupied cell
+/// or leaves the map. Used for point robots on 8-connected paths: a diagonal move
+/// through the shared corner of an obstacle cell touches it.
+bool segmentTouchesObstacle(const GridMap& map, WorldPoint a, WorldPoint b);
+
 /// A* on the inflated map. Statuses refer to the real map where that is more
 /// informative: a start/goal that is free in `map` but blocked in `inflated` is
 /// reported as StartTooCloseToObstacle / GoalTooCloseToObstacle.
 PlanResult planWithFootprint(const GridMap& map, const GridMap& inflated, GridCoord start,
-                             GridCoord goal);
+                             GridCoord goal, Connectivity connectivity = Connectivity::Four);
 
 /// Map in which every cell whose center is closer than radius to an occupied cell
 /// or to the map border is occupied. radius == 0 returns an identical copy.

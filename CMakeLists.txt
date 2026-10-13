@@ -55,7 +55,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -117,6 +117,32 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 2 2 --robot-radius -0.1)
     set_tests_properties(cli_rejects_negative_radius PROPERTIES
         PASS_REGULAR_EXPRESSION "invalid motion parameters: robot radius")
+
+    add_test(NAME cli_octile_obstacles_map
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --connectivity 8 --reference-bfs
+                --output ${CLI_OUT}/octile)
+    set_tests_properties(cli_octile_obstacles_map PROPERTIES
+        PASS_REGULAR_EXPRESSION "26 steps \\(8 diagonal\\), 14.66 m.*29.313708 cells \\(matches A\\*\\).*GOAL_REACHED")
+
+    add_test(NAME cli_octile_maze_has_no_diagonals
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/maze.csv
+                --start 1 1 --goal 19 19 --connectivity 8 --output ${CLI_OUT}/octile_maze)
+    set_tests_properties(cli_octile_maze_has_no_diagonals PROPERTIES
+        PASS_REGULAR_EXPRESSION "60 steps \\(0 diagonal\\)")
+
+    add_test(NAME cli_octile_with_footprint
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles_fine.csv
+                --resolution 0.25 --start 20 2 --goal 20 37 --robot-radius 0.2
+                --connectivity 8 --reference-bfs --output ${CLI_OUT}/octile_footprint)
+    set_tests_properties(cli_octile_with_footprint PROPERTIES
+        PASS_REGULAR_EXPRESSION "matches A\\*.*Navigation: +GOAL_REACHED")
+
+    add_test(NAME cli_rejects_bad_connectivity
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --connectivity 6)
+    set_tests_properties(cli_rejects_bad_connectivity PROPERTIES
+        PASS_REGULAR_EXPRESSION "--connectivity must be 4 or 8")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

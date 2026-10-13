@@ -2,7 +2,8 @@
 //
 // The simulator:
 //   1. checks the motion configuration and the path structure (non-empty,
-//      consecutive waypoints are 4-connected neighbors);
+//      consecutive waypoints are neighbors: straight, or also diagonal for
+//      8-connectivity);
 //   2. places the robot at the center of the first waypoint (t = 0);
 //   3. each timestep, moves toward the current target waypoint (robot.hpp) and
 //      collision-checks the movement segment against the occupancy grid;
@@ -11,7 +12,8 @@
 //
 // Collision model:
 //   * robot_radius == 0 (point robot): a segment is collision-free if every sampled
-//     point on it lies in a free, in-bounds cell.
+//     point on it lies in a free, in-bounds cell; for 8-connectivity it must also
+//     not touch any occupied cell (catches a diagonal cutting an obstacle corner).
 //   * robot_radius > 0 (disc robot): a step is collision-free if the disc swept
 //     along it never overlaps an occupied cell or the map exterior (exact test,
 //     see footprint.hpp). Touching is allowed.
@@ -81,6 +83,7 @@ constexpr int kCollisionSamplesPerCell = 20;
 
 /// Simulate the robot following `path` (grid waypoints, start first).
 SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& path,
-                              const MotionConfig& config);
+                              const MotionConfig& config,
+                              Connectivity connectivity = Connectivity::Four);
 
 }  // namespace amr

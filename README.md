@@ -35,6 +35,10 @@ comes from a reproducible benchmark.
   Manhattan heuristic, `std::priority_queue` with lazy deletion, **deterministic
   tie-breaking**. Optimized for speed (1 byte of state per cell, a two-bucket open set,
   reusable buffers) while giving bit-identical results to the straightforward version.
+- Optional 8-connected planning (`--connectivity 8`): diagonal moves with cost √2,
+  octile-distance heuristic, no cutting across obstacle corners. Costs are kept exact as
+  integer pairs (`a + b·√2`), so optimality is verified exactly against a reference
+  Dijkstra search. On the benchmark maps the paths are 12–29 % shorter.
 - Explicit planner status: `SUCCESS`, `NO_PATH`, `START_OUT_OF_BOUNDS`,
   `GOAL_OUT_OF_BOUNDS`, `START_OCCUPIED`, `GOAL_OCCUPIED`, `START_TOO_CLOSE_TO_OBSTACLE`,
   `GOAL_TOO_CLOSE_TO_OBSTACLE`. A failed plan never returns a fabricated path.
@@ -63,7 +67,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 44 C++ test cases, 16 end-to-end CLI checks and 32 Python tests, including A* vs. BFS
+- 55 C++ test cases, 20 end-to-end CLI checks and 36 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -182,7 +186,8 @@ and no timeout.
 | `--goal-tolerance M` | allowed final distance to the goal center, m | `0.05` |
 | `--max-time S` | simulation time limit, s | `600` |
 | `--robot-radius M` | robot footprint radius, m; obstacles are inflated by it | `0` (point robot) |
-| `--reference-bfs` | also run the reference BFS and check that A* is optimal | off |
+| `--connectivity 4\|8` | grid moves: 4 = straight only, 8 = also diagonal | `4` |
+| `--reference-bfs` | also run the reference search (BFS, or exact Dijkstra for 8-connectivity) and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
 
@@ -238,7 +243,7 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 ```
 
 `run_demo.py` accepts the simulator's options (`--speed`, `--dt`, `--goal-tolerance`,
-`--max-time`, `--robot-radius`, `--resolution`, `--output`), the animation options `--animate`,
+`--max-time`, `--robot-radius`, `--connectivity`, `--resolution`, `--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
 Its exit code is the simulator's (for example `4` when there is no path).
@@ -255,6 +260,31 @@ Its exit code is the simulator's (for example `4` when there is no path).
 
 The first four maps have one-cell (0.5 m) gaps and are meant for a point robot. Use
 `maps/obstacles_fine.csv` for a robot footprint: it has the same layout at 0.25 m cells.
+
+### 8-connected planning
+
+```bash
+./build/robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18 \
+    --connectivity 8 --reference-bfs
+```
+
+```text
+Path:           27 waypoints, 26 steps (8 diagonal), 14.66 m
+Reference:      exact Dijkstra, 29.313708 cells (matches A*)
+Navigation:     GOAL_REACHED
+```
+
+| 4-connected (default): 17.00 m | 8-connected: 14.66 m |
+|---|---|
+| ![4-connected path](docs/images/trajectory_obstacles.png) | ![8-connected path](docs/images/octile_trajectory_obstacles.png) |
+
+A diagonal move is only allowed when both cells beside it are free, so paths never cut
+across an obstacle corner. In narrow corridors such as `maps/maze.csv`, this leaves no
+diagonals at all. `--connectivity 8` combines with `--robot-radius`, and the footprint
+guarantee also holds for diagonal moves. Over 480 benchmark maps, 8-connected paths are
+29.3 % shorter on empty maps and 12 % shorter at 30 % obstacles. Planning is 2–8× slower,
+but still a median of 0.6 ms on a 100 × 100 map
+([details](docs/performance.md#4--vs-8-connectivity)).
 
 ### Robot footprint
 
@@ -302,9 +332,13 @@ line is row `y = 0`. Blank lines and lines starting with `#` are ignored.
 goal. Header only when planning fails.
 
 **`planning_metrics.csv`**: one row with
-`status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,reference_bfs_cost,robot_radius_m,inflation_time_ms`.
-The two path-length fields are empty when planning fails. `reference_bfs_cost` is empty
-unless `--reference-bfs` was given, and `-1` when the reference BFS found no path.
+`status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,reference_bfs_cost,robot_radius_m,inflation_time_ms,connectivity,diagonal_steps,path_cost_cells`.
+`path_length_steps` counts moves; `path_cost_cells` is the path cost in cell units
+(straight moves + diagonal moves × √2). The path fields are empty when planning fails.
+`reference_bfs_cost` is empty unless `--reference-bfs` was given, and `-1` when the
+reference search found no path. Otherwise it is an integer step count (BFS) for
+4-connectivity, and a cost in cell units with 6 decimals (exact Dijkstra) for
+8-connectivity.
 
 **`inflated_map.csv`** (only with `--robot-radius` > 0): the map A* planned on, in the
 same format as input maps.
@@ -377,10 +411,14 @@ python3 python/run_benchmark.py                        # 480 runs, about 10 s ->
 python3 python/analyze_results.py run --results-dir results   # metrics of one run
 ```
 
+To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with each
+`--connectivity` value and then `analyze_results.py compare` (see
+[performance.md](docs/performance.md#4--vs-8-connectivity)).
+
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 21 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 26 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -443,7 +481,8 @@ robot-nav-simulator/
 ### Future improvements
 
 - ✅ **Robot footprint:** disc robot with obstacle inflation (`--robot-radius`).
-- **8-connected A*:** diagonal moves with an octile heuristic and no corner-cutting.
+- ✅ **8-connected A*:** diagonal moves with an octile heuristic and no corner-cutting
+  (`--connectivity 8`).
 - **Differential-drive robot:** `x, y, θ` with linear and angular velocity, plus a
   waypoint-following controller (P vs. PID comparison).
 - **Simulated 2D LiDAR:** ray casting.

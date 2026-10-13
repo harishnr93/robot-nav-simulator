@@ -5,10 +5,15 @@
 // planning_metrics.csv (one header row, one data row):
 //   status,success,map_width,map_height,resolution,start_x,start_y,goal_x,goal_y,
 //   planning_time_ms,expanded_nodes,waypoint_count,path_length_steps,path_length_m,
-//   reference_bfs_cost,robot_radius_m,inflation_time_ms
-// path_length_steps and path_length_m are left empty when planning failed.
-// reference_bfs_cost is empty unless the BFS check was requested, and
-// kReferenceNoPath (-1) when the reference BFS found no path.
+//   reference_bfs_cost,robot_radius_m,inflation_time_ms,connectivity,diagonal_steps,
+//   path_cost_cells
+// path_length_steps, path_length_m, diagonal_steps and path_cost_cells are left
+// empty when planning failed. path_cost_cells is the exact path cost in cell units
+// (straight moves + diagonal moves * sqrt(2)), printed with 6 decimals.
+// reference_bfs_cost is empty unless the reference check was requested, and
+// kReferenceNoPath (-1) when the reference search found no path. Otherwise it is the
+// reference cost: an integer number of steps (BFS) for 4-connectivity, and the cost
+// in cell units with 6 decimals (exact Dijkstra) for 8-connectivity.
 // trajectory.csv columns:
 //   time,x,y,target_waypoint_index
 // simulation_metrics.csv (one header row, one data row):
@@ -32,8 +37,14 @@
 
 namespace amr {
 
-/// reference_bfs_cost value meaning "the reference BFS found no path".
+/// reference_bfs_cost value meaning "the reference search found no path".
 constexpr int kReferenceNoPath = -1;
+
+/// Outcome of the optional reference shortest-path check.
+struct ReferenceCost {
+    bool computed = false;         ///< false: the check was not run
+    std::optional<GridCost> cost;  ///< std::nullopt: the reference found no path
+};
 
 /// Writes path.csv. An empty path produces a header-only file.
 /// Returns false and sets error on I/O failure.
@@ -41,12 +52,12 @@ bool writePathCsv(const std::filesystem::path& file, const GridMap& map,
                   const std::vector<GridCoord>& path, std::string& error);
 
 /// Writes planning_metrics.csv. Returns false and sets error on I/O failure.
-/// reference_bfs_cost: std::nullopt if not computed, kReferenceNoPath, or a cost.
 /// robot_radius / inflation_time_ms describe the obstacle inflation used for planning.
 bool writePlanningMetricsCsv(const std::filesystem::path& file, const GridMap& map,
                              GridCoord start, GridCoord goal, const PlanResult& result,
-                             std::optional<int> reference_bfs_cost, double robot_radius,
-                             double inflation_time_ms, std::string& error);
+                             const ReferenceCost& reference, double robot_radius,
+                             double inflation_time_ms, Connectivity connectivity,
+                             std::string& error);
 
 /// Writes a map in the input map format (rows of comma-separated 0/1).
 bool writeGridMapCsv(const std::filesystem::path& file, const GridMap& map, std::string& error);

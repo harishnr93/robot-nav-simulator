@@ -58,7 +58,7 @@ uses.
 |---|---|
 | `include/types.hpp` | Value types shared by all modules: `GridCoord`, `WorldPoint`, `PlanStatus`, `PlanResult`. Documents the coordinate convention. |
 | `include/grid_map.hpp`, `src/grid_map.cpp` | `GridMap` occupancy grid (row-major `std::vector<uint8_t>`), bounds/occupancy queries, grid→world conversion, CSV parsing and validation. |
-| `include/astar.hpp`, `src/astar.cpp` | Request validation, A* search (`AStarPlanner`, reusable, plus the one-shot `planAStar()`), path reconstruction, path validity check, path length, and a reference BFS used only for validation. |
+| `include/astar.hpp`, `src/astar.cpp` | Request validation, A* search for 4- or 8-connectivity (`AStarPlanner`, reusable, plus the one-shot `planAStar()`), exact octile costs (`GridCost`, `compareGridCost`, `octileDistance`), the move rule `isAllowedMove()` (no corner cutting), path reconstruction and validation, path length, and the reference searches used only for validation (BFS; exact Dijkstra for 8-connectivity). |
 | `benchmarks/bench_planner.cpp` | In-process micro-benchmark of fresh vs. reused planning, with a result checksum for comparing builds. |
 | `include/robot.hpp`, `src/robot.cpp` | `RobotState`, `MotionConfig` (+ validation), and `stepToward()`: one clamped kinematic step of the point robot. |
 | `include/simulator.hpp`, `src/simulator.cpp` | `simulatePath()`: time-stepped waypoint following, segment collision checking (point or disc robot), timeout, trajectory recording; `NavigationStatus`, `SimulationResult`. |
@@ -71,10 +71,14 @@ uses.
 - **`GridMap`**: `width × height` cells stored row-major (`index = y * width + x`).
   Out-of-bounds queries count as occupied, which makes neighbor checks in the planner a
   single `isFree()` call.
-- **`AStarPlanner`**: one state byte per cell (visited, closed, 2-bit parent direction),
-  a cost array written only for reached cells, two `std::priority_queue` min-heaps for
-  the open set, and the list of touched cells used to reset the state between plans
-  (details in [algorithms.md](algorithms.md)).
+- **`AStarPlanner`**: one state byte per cell (visited, closed, 3-bit parent direction),
+  a cost array written only for reached cells (plus a second one for the diagonal part
+  of the cost with 8-connectivity), the open set (two `std::priority_queue` min-heaps
+  for 4-connectivity, one exact-cost `std::priority_queue` for 8-connectivity), and the
+  list of touched cells used to reset the state between plans (details in
+  [algorithms.md](algorithms.md)).
+- **`GridCost`**: an exact path cost `straight + diagonal · √2` as two integers;
+  `PlanResult::cost()` returns it, and `compareGridCost()` compares two costs exactly.
 - **`PlanResult`**: status, path (start…goal inclusive), path cost in steps, expanded
   node count, and planning time.
 - **`MotionConfig`**: speed (m/s), timestep `dt` (s), goal tolerance (m), time limit
@@ -116,7 +120,7 @@ mistaken for the current one. The simulator only runs when planning succeeded.
 | `python/animate_robot.py` | Builds a `FuncAnimation` from `trajectory.csv` and exports GIF (Pillow) and optionally MP4 (FFmpeg) with blitted rendering. Draws a static "No valid path" figure instead when there is no trajectory. |
 | `python/run_demo.py` | One-command demo: runs `build/robot_simulator`, then the static figures and the animation. |
 | `python/run_benchmark.py` | Benchmark sweep: seeded random maps (reusing `generate_map.generate_random`), one `robot_simulator --reference-bfs` process per run, raw results plus machine/build metadata. |
-| `python/analyze_results.py` | `run`: recomputes path length, travel time and success of one run from the raw CSV files and cross-checks them with the simulator. `benchmark`: per-configuration statistics (median, mean, min, max, p95, counts) and the performance plots. |
+| `python/analyze_results.py` | `run`: recomputes path length, travel time and success of one run from the raw CSV files and cross-checks them with the simulator. `benchmark`: per-configuration statistics (median, mean, min, max, p95, counts) and the performance plots. `compare`: matches a 4-connected and an 8-connected benchmark map by map and reports path length, planning time and expanded nodes. |
 
 The reference BFS stays in C++ (`bfsShortestPathCost`). The benchmark reaches it through
 `--reference-bfs`, so Python never re-implements a planner. The BFS runs after
@@ -173,5 +177,5 @@ frames with full renders pixel by pixel.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
-| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile` | executables | unit tests (registered with CTest) |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

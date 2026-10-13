@@ -29,6 +29,7 @@ values are compared with explicit tolerances.
 | `test_astar` | planner unit tests (TC01–TC11, planner reuse) |
 | `test_robot` | motion and simulation unit tests (TC12, TC14, motion side of TC03–TC05) |
 | `test_footprint` | robot footprint: disc geometry, inflation, footprint planning and disc collisions |
+| `test_octile` | 8-connected A*: exact costs, corner rule, optimality against exact Dijkstra, diagonal motion |
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
 | `cli_plan_maze_map` | plans and simulates on `maps/maze.csv`, expects `GOAL_REACHED` |
@@ -38,6 +39,10 @@ values are compared with explicit tolerances.
 | `cli_footprint_too_wide_for_gaps` | `maps/obstacles.csv` with `--robot-radius 0.3`: expects `NO_PATH`: on every route some passage has no 0.5 m cell center that is 0.3 m from both walls |
 | `cli_footprint_start_too_close` | start next to an obstacle with `--robot-radius 0.3`: expects `START_TOO_CLOSE_TO_OBSTACLE` |
 | `cli_rejects_negative_radius` | `--robot-radius -0.1`: expects "invalid motion parameters: robot radius" |
+| `cli_octile_obstacles_map` | `maps/obstacles.csv` with `--connectivity 8 --reference-bfs`: expects 26 steps (8 diagonal), 14.66 m, the exact Dijkstra cost 29.313708 cells matching A*, then `GOAL_REACHED` |
+| `cli_octile_maze_has_no_diagonals` | `maps/maze.csv` with `--connectivity 8`: expects 60 steps with 0 diagonals (every turn is at a wall, so the corner rule forbids all diagonals) |
+| `cli_octile_with_footprint` | fine map, `--robot-radius 0.2 --connectivity 8 --reference-bfs`: expects a match with the reference, then `GOAL_REACHED` |
+| `cli_rejects_bad_connectivity` | `--connectivity 6`: expects "--connectivity must be 4 or 8" |
 | `cli_navigation_timeout` | corridor map with `--max-time 2`, expects `TIMEOUT` |
 | `cli_rejects_invalid_motion_parameters` | `--speed -1`, expects "invalid motion parameters" |
 | `cli_reports_unreachable_goal` | `tests/data/unreachable_goal.csv`, expects `NO_PATH` and navigation `NOT_RUN` |
@@ -45,7 +50,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (32 tests, about 10 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (36 tests, about 12 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -59,11 +64,35 @@ binary into temporary directories.
 | Result validation | non-increasing timestamps and missing columns are rejected |
 | Animation integration | the robot in each frame is at the trajectory position for that frame's time, and in an independent check from the motion model, `x(t) = 0.75 + 0.5 t` on the first leg at a time *between* samples; the time label matches; the status reads `NAVIGATING …` and then `GOAL_REACHED` / `TIMEOUT` |
 | Blitting | blitted frames are pixel-identical to full renders of the same state (first, middle and last frame) |
+| Connectivity | an 8-connected plan is titled "8-connected A* path: 26 steps (8 diagonal)" and its drawn path contains the 8 diagonal moves; the 4-connected title is unchanged; an 8-connected benchmark marks every run optimal; `compare` writes its table and plot, measures the 29.3 % obstacle-free saving, and rejects benchmarks made on different maps; `run_demo.py` forwards `--connectivity` |
 | Footprint | the inflated map is read from the simulator (372 inflated cells, obstacles preserved) and a mismatched one is rejected; the animated robot is a disc with the true radius, centred on the trajectory; blitted disc frames equal full renders; static figures and GIF are produced with a footprint; `run_demo.py` forwards `--robot-radius` |
 | Export | the GIF is valid and looping with several frames; a failed plan produces `navigation_failed.png`, no GIF, and removes a stale GIF; MP4 without FFmpeg reports an error and still writes the GIF; a trajectory from another run is rejected |
 | Analysis | the 95 % Wilson interval is correct (120/120, 10/20); summaries keep failed runs in counts, rates and planning-time statistics while path lengths use successful plans only; single-run metrics are recomputed from the raw CSV files (17.0 m, 34.0 s on the obstacles map) and a tampered `simulation_metrics.csv` is detected |
 | Benchmark | benchmark maps are identical for the same seed and differ between seeds, with start and goal cleared; a 12-run benchmark runs end to end and writes every summary file and plot |
 | `run_demo.py` | the simulator is called with an argument list (a map name containing spaces and `;` stays one argument); unset options are not passed, so the C++ defaults apply; animation runs only when requested; a missing executable gives exit code 127 |
+
+## 8-connected planning tests (`test_octile.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Exact cost comparison | `3 > 2√2`, `7 < 5√2`, the near-tie `99 > 70√2` (99² − 2·70² = 1), values near 10⁸, and agreement with `long double` arithmetic on 20 000 random pairs |
+| Octile distance | `(0,0)→(5,2)` = 3 straight + 2 diagonal; symmetric; zero; pure diagonal; pure straight |
+| Empty map | `(0,0)→(9,4)` costs exactly the octile distance (5 + 4√2); the path is valid; A* expands only the path cells |
+| No corner cutting | both orthogonal cells blocked: `NO_PATH`; one blocked: two straight moves instead of the diagonal; both free: the diagonal |
+| Path validation | diagonals accepted with 8- and rejected with 4-connectivity; corner cuts, jumps and moves into obstacles rejected; `gridPathCost` counts moves |
+| Tie-breaking | `(0,0)→(2,1)` has two optimal routes; the documented `(f, h, y, x)` order picks "diagonal first"; repeated plans are identical |
+| A* vs. exact Dijkstra | 500 random maps (1–45 cells per side, 0–45 % obstacles): A* cost exactly equals the reference; `NO_PATH` exactly when the reference fails; same success as 4-connectivity on every map; never longer than the 4-connected path |
+| Planner reuse | one `AStarPlanner` alternating 4- and 8-connectivity on 200 maps equals fresh plans |
+| Diagonal motion | 5 diagonal legs on an empty map reach the goal (15 steps per 0.707 m leg); the same path is `INVALID_PATH` for a 4-connected simulation |
+| Corner cutting in the simulator | a hand-made path squeezing between two obstacle cells is a `COLLISION`; the robot stops within one step before the shared corner (7 steps, 0.35 m of 0.354 m) |
+| Footprint + diagonals | 300 random maps, resolutions 0.25/0.5/1 m, radii 0–1.5 cells: every move of every 8-connected plan passes the exact swept-disc test (or the touch test for point robots), and the simulation reaches the goal with 0 collisions (216 plans, 621 diagonal moves) |
+
+**4-connected equivalence.** 4-connected planning is still the default. Run with the
+same inputs, the new and previous binaries produce identical `path.csv`,
+`trajectory.csv`, `simulation_metrics.csv` and pre-existing `planning_metrics.csv`
+columns (except timing) on 400 random maps, including runs with `--reference-bfs` and
+with a footprint. The Python PNGs and GIF for the obstacles demo are byte-identical, and
+the micro-benchmark result checksum is unchanged.
 
 ## Robot footprint tests (`test_footprint.cpp`)
 
@@ -163,6 +192,11 @@ Additional unit tests:
   | Simulator ignores the robot radius | 1 |
   | Touching the obstacle counts as a collision | 5 |
   | Map border ignored by the footprint | 3 |
+  | 8-connected planner ignores the corner rule | 3 (octile tests) |
+  | Manhattan instead of octile heuristic (overestimates) | 3 |
+  | Diagonal moves cost 1 | 4 |
+  | Inexact cost comparison (√2 approximated) | 3 |
+  | Simulator's corner-touch check removed | 1 |
 
 - **Benchmark-scale optimality check:** every one of the 480 benchmark runs
   ([performance.md](performance.md)) compares A* with the reference BFS through
