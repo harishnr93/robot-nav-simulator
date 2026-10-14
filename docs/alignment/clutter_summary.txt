@@ -1,0 +1,9 @@
+Clutter: 100 random rooms (6 rotated boxes), 12 alignments each, cells 0.1 m, robot radius 0.3 m (3 borderline worlds skipped)
+
+method         worlds whose answer flips   wrong answers       passable when blocked
+any_overlap    29 / 100                    392 / 1200          0
+center_inside  22 / 100                    187 / 1200          0
+majority       22 / 100                    172 / 1200          0
+lidar_grid     23 / 100                    284 / 1200          0
+lidar_points   5 / 100                     61 / 1200           0
+exact_lattice  2 / 100                     15 / 1200           0

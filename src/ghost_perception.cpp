@@ -24,7 +24,7 @@ constexpr double kTravelWeight = 0.01;
 /// (on the belief map) whose bearing differs most from the bearings already used
 /// (or that produced its hits), preferring short drives from `robot`. Returns the
 /// beams fired (0 if no viewpoint sees the cell); moves `robot` to the viewpoint.
-int resense(OccupancyBelief& belief, const GhostWorld& world,
+int resense(OccupancyBelief& belief, const SensorWorld& world,
             const std::vector<WorldPoint>& viewpoints, GridCoord cell,
             std::vector<double>& used_bearings, const SensorModel& sensor, int beams,
             WorldPoint& robot, double& travel, std::mt19937& rng) {
@@ -73,8 +73,8 @@ int resense(OccupancyBelief& belief, const GhostWorld& world,
     const double spread = belief.resolution / std::max(distance, belief.resolution);
     for (int b = 0; b < beams; ++b) {
         const double angle = bearing + jitter(rng) * spread;
-        integrateBeam(belief, traceBeam(world, v, angle, distance + 0.75 * belief.resolution,
-                                        sensor, rng));
+        integrateBeam(belief,
+                      world.trace(v, angle, distance + 0.75 * belief.resolution, sensor, rng));
     }
     return beams;
 }
@@ -143,6 +143,7 @@ BeamTrace traceBeam(const GhostWorld& world, WorldPoint origin, double angle, do
                     const SensorModel& sensor, std::mt19937& rng) {
     BeamTrace trace;
     trace.angle = angle;
+    trace.origin = origin;
     const GridMap& map = world.truth;
     std::uniform_real_distribution<double> unit(0.0, 1.0);
     const double spurious_at =
@@ -151,10 +152,18 @@ BeamTrace traceBeam(const GhostWorld& world, WorldPoint origin, double angle, do
     const double c = std::cos(angle);
     const double s = std::sin(angle);
     int previous = static_cast<int>(map.index(map.worldToGrid(origin)));
-    for (double t = step; t <= range; t += step) {
+    // Where the beam is when it stops (a hit or no return).
+    const auto stop = [&](double t, int hit) {
+        trace.free_length = t;
+        trace.hit = hit;
+        trace.hit_point = {origin.x + t * c, origin.y + t * s};
+        return trace;
+    };
+    double t = step;
+    for (; t <= range; t += step) {
         const GridCoord cell = map.worldToGrid({origin.x + t * c, origin.y + t * s});
         if (!map.inBounds(cell)) {
-            return trace;  // left the map: no return
+            return stop(t, -1);  // left the map: no return
         }
         const int index = static_cast<int>(map.index(cell));
         if (index == previous) {
@@ -162,25 +171,35 @@ BeamTrace traceBeam(const GhostWorld& world, WorldPoint origin, double angle, do
         }
         previous = index;
         if (map.isOccupied(cell)) {
-            if (unit(rng) >= sensor.miss_probability) {
-                trace.hit = index;
-            }
-            return trace;  // a miss returns nothing (no information past here)
+            // A miss returns nothing (no information past here).
+            return stop(t, unit(rng) >= sensor.miss_probability ? index : -1);
         }
         for (const GhostSource& ghost : world.ghosts) {
             if (ghost.cell == cell && std::fabs(wrapAngle(angle - ghost.direction)) <= ghost.half_width &&
                 unit(rng) < ghost.hit_probability) {
-                trace.hit = index;
-                return trace;
+                return stop(t, index);
             }
         }
         if (t >= spurious_at) {
-            trace.hit = index;
-            return trace;
+            return stop(t, index);
         }
         trace.passed.push_back(index);
     }
-    return trace;
+    return stop(range, -1);
+}
+
+BeamTrace GhostWorld::trace(WorldPoint origin, double angle, double range,
+                            const SensorModel& sensor, std::mt19937& rng) const {
+    return traceBeam(*this, origin, angle, range, sensor, rng);
+}
+
+bool GhostWorld::pathIsSafe(const std::vector<GridCoord>& path, double radius,
+                            Connectivity connectivity) const {
+    return pathIsFreeIn(truth, radius, path, connectivity);
+}
+
+bool GhostWorld::isReal(std::size_t index) const {
+    return truth.data()[index] != GridMap::kFree;
 }
 
 void integrateBeam(OccupancyBelief& belief, const BeamTrace& trace) {
@@ -200,11 +219,11 @@ void integrateBeam(OccupancyBelief& belief, const BeamTrace& trace) {
     }
 }
 
-int scanInto(OccupancyBelief& belief, const GhostWorld& world, WorldPoint origin,
+int scanInto(OccupancyBelief& belief, const SensorWorld& world, WorldPoint origin,
              const SensorModel& sensor, std::mt19937& rng) {
     for (int b = 0; b < sensor.beams; ++b) {
         const double angle = -kPi + 2.0 * kPi * b / sensor.beams;
-        integrateBeam(belief, traceBeam(world, origin, angle, sensor.max_range, sensor, rng));
+        integrateBeam(belief, world.trace(origin, angle, sensor.max_range, sensor, rng));
     }
     return sensor.beams;
 }
@@ -230,7 +249,7 @@ std::string toString(RecoveryOutcome outcome) {
     return "UNKNOWN";
 }
 
-RecoveryResult recover(RecoveryStrategy strategy, OccupancyBelief belief, const GhostWorld& world,
+RecoveryResult recover(RecoveryStrategy strategy, OccupancyBelief belief, const SensorWorld& world,
                        const std::vector<WorldPoint>& viewpoints, GridCoord start, GridCoord goal,
                        const SensorModel& sensor, const RecoveryConfig& config,
                        std::mt19937& rng) {
@@ -242,8 +261,7 @@ RecoveryResult recover(RecoveryStrategy strategy, OccupancyBelief belief, const 
     const auto finish = [&](RecoveryOutcome outcome) {
         result.outcome = outcome;
         for (std::size_t i = 0; i < belief.log_odds.size(); ++i) {
-            if (believed_at_start[i] && belief.log_odds[i] <= 0.0 &&
-                world.truth.data()[i] != GridMap::kFree) {
+            if (believed_at_start[i] && belief.log_odds[i] <= 0.0 && world.isReal(i)) {
                 ++result.real_cells_cleared;
             }
         }
@@ -257,8 +275,7 @@ RecoveryResult recover(RecoveryStrategy strategy, OccupancyBelief belief, const 
             seen, inflateObstacles(seen, config.robot_radius), start, goal, config.connectivity);
         if (plan.success()) {
             result.path = plan.path;
-            return finish(pathIsFreeIn(world.truth, config.robot_radius, plan.path,
-                                       config.connectivity)
+            return finish(world.pathIsSafe(plan.path, config.robot_radius, config.connectivity)
                               ? RecoveryOutcome::Recovered
                               : RecoveryOutcome::Unsafe);
         }

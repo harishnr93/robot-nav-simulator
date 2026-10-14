@@ -93,17 +93,45 @@ struct OccupancyBelief {
     GridMap map() const;                          ///< occupied iff log-odds > 0
 };
 
-/// The simulated world: true map and ghost sources.
-struct GhostWorld {
-    GridMap truth;
-    std::vector<GhostSource> ghosts;
-};
-
 /// Result of one beam: the cells it passed and the cell it hit (-1: no return).
 struct BeamTrace {
     std::vector<int> passed;
     int hit = -1;
-    double angle = 0.0;  ///< beam heading, rad
+    double angle = 0.0;        ///< beam heading, rad
+    WorldPoint origin;         ///< where the beam started
+    double free_length = 0.0;  ///< distance travelled through free space, m
+    WorldPoint hit_point;      ///< where it returned (valid when hit >= 0)
+};
+
+/// What the recovery loop needs from a simulated world. Cells are those of the
+/// belief grid; positions are in its frame.
+class SensorWorld {
+public:
+    virtual ~SensorWorld() = default;
+    /// Trace one beam (see traceBeam()).
+    virtual BeamTrace trace(WorldPoint origin, double angle, double range,
+                            const SensorModel& sensor, std::mt19937& rng) const = 0;
+    /// True if the disc robot moving along the cell path never overlaps a real obstacle.
+    virtual bool pathIsSafe(const std::vector<GridCoord>& path, double radius,
+                            Connectivity connectivity) const = 0;
+    /// True if belief cell `index` holds a real obstacle (for the "wrongly cleared" count).
+    virtual bool isReal(std::size_t index) const = 0;
+};
+
+/// A grid world: true map (same grid as the belief) and ghost sources.
+struct GhostWorld : SensorWorld {
+    GridMap truth;
+    std::vector<GhostSource> ghosts;
+
+    GhostWorld() = default;
+    explicit GhostWorld(GridMap map, std::vector<GhostSource> sources = {})
+        : truth(std::move(map)), ghosts(std::move(sources)) {}
+
+    BeamTrace trace(WorldPoint origin, double angle, double range, const SensorModel& sensor,
+                    std::mt19937& rng) const override;
+    bool pathIsSafe(const std::vector<GridCoord>& path, double radius,
+                    Connectivity connectivity) const override;
+    bool isReal(std::size_t index) const override;
 };
 
 /// Trace one beam from `origin` with heading `angle` for up to `range` meters.
@@ -114,7 +142,7 @@ BeamTrace traceBeam(const GhostWorld& world, WorldPoint origin, double angle, do
 void integrateBeam(OccupancyBelief& belief, const BeamTrace& trace);
 
 /// A full 360-degree scan from `origin` into the belief; returns the beams fired.
-int scanInto(OccupancyBelief& belief, const GhostWorld& world, WorldPoint origin,
+int scanInto(OccupancyBelief& belief, const SensorWorld& world, WorldPoint origin,
              const SensorModel& sensor, std::mt19937& rng);
 
 enum class RecoveryStrategy { MostLikely, LogOdds, FewestCells, ClearAll, BlindDelete, ResenseAll };
@@ -163,7 +191,7 @@ struct RecoveryResult {
 /// Run one recovery strategy from a belief with NO_PATH. `viewpoints` are the
 /// positions the robot has scanned from (ClearAll re-scans from them); re-sensing
 /// may also use any cell the robot believes reachable from the start.
-RecoveryResult recover(RecoveryStrategy strategy, OccupancyBelief belief, const GhostWorld& world,
+RecoveryResult recover(RecoveryStrategy strategy, OccupancyBelief belief, const SensorWorld& world,
                        const std::vector<WorldPoint>& viewpoints, GridCoord start, GridCoord goal,
                        const SensorModel& sensor, const RecoveryConfig& config,
                        std::mt19937& rng);

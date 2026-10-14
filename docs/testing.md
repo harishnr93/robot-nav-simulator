@@ -37,6 +37,7 @@ values are compared with explicit tolerances.
 | `test_dynamic` | moving obstacles and replanning: motion model, exact contact, loading, visibility, waiting, detours, retreats, invariants |
 | `test_ghost_cells` | minimum ghost cells: covers vs. inflation, exact solver vs. brute force (count, every optimal set, weighted), overlapping footprints, statuses |
 | `test_ghost_perception` | perception loop: beam and ghost model, occupancy update, ghost evidence, recovery strategies on a doorway |
+| `test_alignment` | grid alignment: geometry, rasterization rules, placement, exact LiDAR, point evidence, the alignment-robust planner, ground truth, artifact vs. ghost recovery |
 | `cli_help` | `--help` exits with 0 |
 | `cli_plan_obstacles_map` | plans and simulates on `maps/obstacles.csv`, expects `GOAL_REACHED` |
 | `cli_plan_maze_map` | plans and simulates on `maps/maze.csv`, expects `GOAL_REACHED` |
@@ -62,6 +63,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_bad_dynamic_obstacles` | a route through a wall (`tests/data/bad_dynamic_obstacles.csv`): expects the line and the reason |
 | `cli_rejects_bad_replanning_settings` | `--sensing-range 0`: expects "invalid replanning parameters" |
 | `ghost_experiment_example` | the documented example map: expects a 2-cell explanation with 8 optimal alternatives |
+| `alignment_experiment_example` | the documented example: the same 0.75 m door is passable at one sub-cell offset and NO_PATH at another |
 | `heading_experiment_p_vs_pid` | runs the P vs. PID experiment: expects P to never settle under the disturbance and PID to settle |
 | `heading_experiment_rejects_bad_gain` | `--kp -1`: expects a non-zero exit code |
 | `cli_rejects_overshooting_heading_gain` | `--heading-gain 20` (gain × dt = 2): expects "invalid motion parameters: heading gain" |
@@ -72,7 +74,7 @@ values are compared with explicit tolerances.
 | `cli_rejects_malformed_map` | `tests/data/nonrectangular.csv`, expects a rectangularity error |
 | `cli_rejects_missing_map` | nonexistent map, expects "does not exist" |
 | `cli_rejects_bad_arguments` | non-integer coordinate, expects a nonzero exit code |
-| `python_visualization` | `tests/test_python_visualization.py` (62 tests, about 34 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
+| `python_visualization` | `tests/test_python_visualization.py` (65 tests, about 35 s); only registered when CMake finds a Python with NumPy, Matplotlib and Pillow |
 
 ## Python visualization tests
 
@@ -88,6 +90,7 @@ binary into temporary directories.
 | Blitting | blitted frames are pixel-identical to full renders of the same state (first, middle and last frame) |
 | LiDAR | scans load as (scans × beams), one per trajectory sample, with heading-relative beams; no-return beams carry the maximum range; scans of another run and malformed beam orders are rejected; ray segments start at the robot and have the measured lengths; the animation draws the latest scan, and its blitted frames equal full renders; `lidar_scan.png` is written only with LiDAR data; `run_demo.py` forwards the LiDAR options |
 | Localization | `localization.csv` loads with symmetric, positive-definite covariances and matches the trajectory (rejected otherwise); the EKF error stays below 5 cm and dead reckoning drifts more than 10 times as far; heading errors are wrapped; the 3σ ellipse of a known covariance has the right axes and angle; the figures exist only with `--ekf`, and a stale `localization.csv` is removed; the animation shows the latest dead-reckoning pose and estimate, and its blitted frames equal full renders; `run_demo.py` forwards `--ekf` and the odometry options |
+| Alignment experiment plots | `plot_alignment_experiment.py` renders the three figures from the committed `docs/alignment/` data; the documented doorway result holds in the data (the point planner always passes from 0.67 m, any overlap passes 0.85 m for under 60 % of alignments); missing input is reported |
 | Ghost experiment plots | `plot_ghost_experiment.py` renders the three figures from the committed `docs/ghost/` data; outcome counts add up per strategy and match the documented headline; missing input is reported |
 | Dynamic obstacles | the three output files load and match the trajectory (rejected otherwise); obstacle positions follow their routes; replanned paths run from their start cell to the goal; the robot kept a positive gap and waited at least once; the current plan switches at each successful replan; `replanning.png` exists only with obstacles, and stale dynamic files are removed; the animation draws the obstacles at their interpolated positions, faded when unseen, and its blitted frames equal full renders; `run_demo.py` forwards the options |
 | Heading control plots | the experiment's metrics show P's steady-state errors `−d/Kp` and `w/Kp` and PID's ≈ 0, and "never" settling for P under the disturbance; all five figures are written; run files have a uniform 10 ms time base, wrapped errors and commands within the limit; missing and malformed inputs are reported |
@@ -147,6 +150,24 @@ because the process noise was evaluated at the measured increments. See
 identical output files and console summaries on 400 random maps (about half with the
 LiDAR on, which also covers the ray caster's new hit-face output), and the Python
 figures and GIFs of three scenarios are byte-identical.
+
+## Grid-alignment tests (`test_alignment.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Geometry | containment (boundary included), distances, overlap needs a positive area (edge and corner touches do not count), clipped areas (incl. a rotated square), ray-polygon and ray-circle hits, segment-polygon distance |
+| Rasterization | cell-aligned obstacles: all rules agree; the center rule samples the cell center; the majority rule needs more than half the area (30 % no, 60 % yes); any overlap contains the other rules on 200 random rotated rectangles |
+| Placement | the grid holds the whole scene for 100 random rotations and offsets; the transform is rigid |
+| Exact LiDAR | hit distance to a wall face, an in-sector ghost hit rate (0.6 over 4000 beams), out-of-sector beams always pass, the starting cell counts as observed, `isReal` |
+| Point evidence | a beam passing 3 mm away and continuing contradicts a hit; one that stops just past it (grazing) does not; an isolated hit is filtered out |
+| Point planner | segments join consecutive hits; chain ends carry a margin of range x beam spacing; the margin closes a gap a corner may hide (and without it the gap would pass); unobserved space is not used |
+| Alignment invariance | over 16 random alignments per width, the point planner's answer is the same for every alignment outside its tolerance band, while any overlap varies on a 0.75 m door and never passes a door narrower than 2 r |
+| Ground truth | the two-threshold fine lattice: 0.62 m passable, 0.58 m blocked, 0.60 m borderline |
+| Artifact vs. ghost | grid NO_PATH on a narrow passable door is recovered with no sensing (artifact); a reflection in a wide door is removed by re-sensing (not an artifact, beams > 0, never unsafe); a door narrower than 2 r is never opened |
+
+**Refactor check.** The perception loop now runs against a `SensorWorld` interface.
+Problem 1's tests pass unchanged, and its 300-case recovery CSV is identical apart from
+timing.
 
 ## Ghost-cell tests (`test_ghost_cells.cpp`, `test_ghost_perception.cpp`)
 
@@ -407,6 +428,18 @@ Additional unit tests:
   | Ghost: re-sensed cell not decided by evidence | 1 |
   | Ghost source ignores direction | 2 |
   | Ghost: passes not counted | 2 |
+  | Alignment: touching counts as overlap | 2 (alignment tests) |
+  | Alignment: center rule samples the cell corner | 1 |
+  | Alignment: majority threshold a quarter | 1 |
+  | Alignment: the beam's starting cell not observed | 1 |
+  | Alignment: ghost sector ignored | 2 |
+  | Alignment: contradiction without continuing past the hit | 1 |
+  | Alignment: no outlier filter | 1 |
+  | Alignment: no corner margin | 1 |
+  | Alignment: unobserved space ignored | 1 |
+  | Alignment: hits joined at any distance | 2 |
+  | Alignment: ground-truth thresholds swapped | 1 |
+  | Alignment: artifact flag set after re-sensing | 1 |
 
 - **Benchmark-scale optimality check:** every one of the 480 benchmark runs
   ([performance.md](performance.md)) compares A* with the reference BFS through
@@ -419,7 +452,7 @@ Additional unit tests:
 
 ## Sanitizers and static analysis
 
-Run in Phase 6, and again after each extension (latest: minimum ghost cells):
+Run in Phase 6, and again after each extension (latest: grid alignment):
 
 ```bash
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
@@ -429,7 +462,7 @@ cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
 
 | Tool | Result |
 |---|---|
-| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 47 C++ and CLI CTest entries pass, no reports |
+| AddressSanitizer + UndefinedBehaviorSanitizer (Debug, asserts on) | all 49 C++ and CLI CTest entries pass, no reports |
 | `cppcheck` 2.7 (`--enable=warning,performance,portability`) | no findings |
 | `clang-tidy` 14 (`bugprone-*`, `performance-*`, `clang-analyzer-*`) | 3 notes about string concatenation in CLI error messages (run only when reporting an error); left as is |
 | `ruff` (pyflakes, pycodestyle, bugbear, pyupgrade, simplify) | no findings |

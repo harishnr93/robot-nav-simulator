@@ -35,6 +35,8 @@ add_library(amr_core STATIC
     src/dynamic_obstacles.cpp
     src/ghost_cells.cpp
     src/ghost_perception.cpp
+    src/geometry2d.cpp
+    src/alignment.cpp
     src/csv_writer.cpp)
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
@@ -52,6 +54,11 @@ target_compile_options(robot_simulator PRIVATE ${AMR_WARNING_FLAGS})
 add_executable(heading_experiment src/heading_experiment.cpp)
 target_link_libraries(heading_experiment PRIVATE amr_core)
 target_compile_options(heading_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
+# Grid-alignment experiments (run with: ./build/alignment_experiment doorway|clutter|classify)
+add_executable(alignment_experiment src/alignment_experiment.cpp)
+target_link_libraries(alignment_experiment PRIVATE amr_core)
+target_compile_options(alignment_experiment PRIVATE ${AMR_WARNING_FLAGS})
 
 # "Why NO_PATH?" experiments (run with: ./build/ghost_experiment recovery|scaling)
 add_executable(ghost_experiment src/ghost_experiment.cpp)
@@ -74,7 +81,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_dynamic test_ghost_cells test_ghost_perception)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_dynamic test_ghost_cells test_ghost_perception test_alignment)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -256,6 +263,11 @@ if(AMR_BUILD_TESTS)
         COMMAND ghost_experiment example --seed 23 --density 0.08 --output ${CLI_OUT}/ghost)
     set_tests_properties(ghost_experiment_example PROPERTIES
         PASS_REGULAR_EXPRESSION "status FOUND, 2 cell\\(s\\), 8 optimal explanation\\(s\\)")
+
+    add_test(NAME alignment_experiment_example
+        COMMAND alignment_experiment example --output ${CLI_OUT}/alignment)
+    set_tests_properties(alignment_experiment_example PROPERTIES
+        PASS_REGULAR_EXPRESSION "example 0: angle 0 deg.*passable.*example 1: angle 0 deg.*NO_PATH")
 
     add_test(NAME cli_navigation_timeout
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/corridor.csv

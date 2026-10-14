@@ -730,6 +730,42 @@ class GhostExperimentPlotTests(unittest.TestCase):
             self.assertEqual(pg.main(["--input", tmp, "--output-dir", tmp]), 1)
 
 
+ALIGNMENT_DATA = SOURCE_DIR / "docs" / "alignment"
+
+
+class AlignmentExperimentPlotTests(unittest.TestCase):
+    """plot_alignment_experiment.py on the committed experiment data."""
+
+    def test_figures(self):
+        import plot_alignment_experiment as pa
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self.assertEqual(pa.main(["--input", str(ALIGNMENT_DATA), "--output-dir", str(out)]), 0)
+            for name in ("alignment_example.png", "alignment_doorway.png", "alignment_classify.png"):
+                self.assertTrue((out / name).is_file(), name)
+        plt.close("all")
+
+    def test_documented_doorway_result(self):
+        import plot_alignment_experiment as pa
+        rows = pa.read_rows(ALIGNMENT_DATA / "alignment_doorway.csv")
+        def share(method, width):
+            v = [int(r["passable"]) for r in rows
+                 if r["method"] == method and abs(float(r["door_width"]) - width) < 1e-9]
+            return sum(v) / len(v)
+        # The point planner passes every alignment from 0.67 m; any overlap does not.
+        for width in (0.67, 0.75, 0.85, 0.95):
+            self.assertEqual(share("lidar_points", width), 1.0)
+        self.assertLess(share("any_overlap", 0.85), 0.6)
+        # Nobody passes a door narrower than the robot.
+        for method in pa.METHODS:
+            self.assertEqual(share(method, 0.55), 0.0)
+
+    def test_missing_input_is_reported(self):
+        import plot_alignment_experiment as pa
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(pa.main(["--input", tmp, "--output-dir", tmp]), 1)
+
+
 HEADING_EXPERIMENT = SIMULATOR.parent / "heading_experiment"
 
 

@@ -1,0 +1,11 @@
+Classify: grid NO_PATH from noisy LiDAR maps (720 beams), cells 0.1 m, robot radius 0.3 m, 60 cases per kind
+  artifact: door 1-15 cm wider than 2 r (passable); ghost: door 30-60 cm wider than 2 r with a reflection in it; real: door 1-15 cm narrower than 2 r (blocked)
+  grid NO_PATH rate: artifact 60/64  ghost 60/413  real 60/60  
+
+kind      pipeline        recovered  unsafe  gave up  said artifact   median beams
+artifact  grid_recovery   6          47      7        -               20
+artifact  point_recovery  36         0       24       36              0
+ghost     grid_recovery   60         0       0        -               5
+ghost     point_recovery  60         0       0        1               48
+real      grid_recovery   0          25      35       -               0
+real      point_recovery  0          0       60       0               0

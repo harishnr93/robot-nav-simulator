@@ -70,6 +70,12 @@ comes from a reproducible benchmark.
   its goal, plus a perception loop that re-senses only those cells. It recovered all
   300 ghost-caused failures with a median of 5 LiDAR beams, where clearing the map
   recovered half of them with about 6800.
+- Grid alignment (`alignment_experiment`): a measurement of how the grid's rotation and
+  sub-cell offset alone decide whether a doorway is passable (a 25 cm band of door
+  widths for every rasterization rule), proven bounds, an alignment-robust planner on the
+  LiDAR's own hit points (a 3 cm band), and a test that tells discretization artifacts
+  from sensor ghosts. Grid-only recovery opened paths through walls in 72 of 180
+  NO_PATH cases; the point-aware recovery in none.
 - P vs. PID heading-control study (`heading_experiment`): a heading with motor lag and a
   disturbance, both controllers (PID with derivative on the measurement and anti-windup)
   in four scenarios, with overshoot, settling time, steady-state and tracking error and
@@ -92,7 +98,7 @@ comes from a reproducible benchmark.
 - Reproducible benchmark (`python/run_benchmark.py`): 6 grid sizes × 4 obstacle densities
   × 20 seeds. Failed runs are kept, and every run is checked against the reference BFS.
   Analysis (`python/analyze_results.py`) produces summary tables and performance plots.
-- 121 C++ test cases, 35 end-to-end CLI checks and 62 Python tests, including A* vs. BFS
+- 130 C++ test cases, 36 end-to-end CLI checks and 65 Python tests, including A* vs. BFS
   optimality on 500 random maps, trajectory checks under 5 speed/timestep settings,
   animation timing checks, pixel-exact checks of the fast GIF export, and analysis checks.
   Clean under AddressSanitizer/UndefinedBehaviorSanitizer, `cppcheck` and `ruff`.
@@ -457,6 +463,62 @@ looking was fast, but under sparse mapping it opened paths through 19 real obsta
 Method, results and what went wrong along the way:
 [docs/algorithms.md](docs/algorithms.md#15-why-no_path-minimum-ghost-cells-and-targeted-re-sensing-ghost_experiment).
 
+### Grid alignment: the same doorway, passable or not
+
+```bash
+./build/alignment_experiment example --output docs/alignment               # the figure below
+./build/alignment_experiment doorway --trials 60 --output docs/alignment   # width sweep
+./build/alignment_experiment clutter --trials 100 --output docs/alignment  # random rooms
+./build/alignment_experiment classify --trials 60 --output docs/alignment  # artifact vs ghost
+python3 python/plot_alignment_experiment.py                                 # -> docs/images/alignment_*.png
+```
+
+An occupancy grid rounds obstacles to whole cells, and the planner checks the robot's
+footprint only at cell centres. So whether a door is passable can depend on nothing but
+where the grid happened to start:
+
+![The same 75 cm door, two grid offsets 2.6 cm apart](docs/images/alignment_example.png)
+
+Across 60 random rotations and offsets per door width, with 0.1 m cells and a 0.6 m
+robot, every rasterization rule leaves a band of about 25 cm of door widths where the
+answer is a coin toss. With the conservative "any overlap" rule (the costmap default),
+a door 25 cm wider than the robot passes for only half of the alignments. The bounds
+are proven in the docs:
+- it is never unsafe;
+- it always passes once the door is 3√2 cells wider than the robot;
+- on an axis-aligned grid it needs 7 whole free cells.
+
+![Share of alignments that find each door passable](docs/images/alignment_doorway.png)
+
+**The fix** plans on the LiDAR's hit points instead of the grid's cells: exact clearance
+on a fine lattice. Three safeguards, each found from an unsafe case in testing, keep it
+safe:
+- joining nearby hits into surfaces;
+- a margin where a surface may continue between two beams;
+- keeping clear of space the LiDAR never observed.
+
+The band shrinks from about 25 cm to 3 cm, and in 100 random cluttered rooms the answer
+changed with the grid in 5 rooms instead of 22–29, never unsafely.
+
+**Artifact or ghost?** Problem 1 judged ghosts by beams passing through a *cell*. But a
+cell on a wall's edge is partly free, so beams pass through it as well as hit it, and
+the grid-only recovery took real wall cells for ghosts:
+
+![Artifacts, ghosts and real blocks](docs/images/alignment_classify.png)
+
+The point-aware recovery first plans on the points. A path there means the grid's
+NO_PATH was a discretization artifact, needing no sensing. Otherwise it re-senses with
+point-level evidence: a hit is contradicted only by a beam passing within 5 mm of it.
+
+On 60 grid NO_PATH cases of each kind:
+- **Grid-only recovery** opened unsafe paths through walls in 47 of 60 artifact cases
+  and 25 of 60 truly blocked doors.
+- **Point-aware recovery** was never unsafe. It recognised 36 artifacts without
+  sensing, which was every one outside its 3–4 cm tolerance band. It cleared all 60
+  ghosts and refused all 60 real blocks.
+Details, numbers and the safety fixes:
+[docs/algorithms.md](docs/algorithms.md#16-grid-alignment-when-the-same-doorway-is-passable-or-not-alignment_experiment).
+
 ### P vs. PID heading control
 
 ```bash
@@ -708,7 +770,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 48 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 50 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
@@ -722,13 +784,13 @@ robot-nav-simulator/
 ├── CMakeLists.txt          build, tests (CTest) and benchmark targets
 ├── include/, src/          C++17 core: grid_map, astar, footprint, robot, diff_drive, simulator,
 │                           heading_control, lidar, ekf, dynamic_obstacles, ghost_cells,
-│                           ghost_perception, csv_writer, main (CLI), heading_experiment,
-│                           ghost_experiment
+│                           ghost_perception, geometry2d, alignment, csv_writer, main (CLI),
+│                           heading_experiment, ghost_experiment, alignment_experiment
 ├── tests/                  C++ unit tests, Python tests, test map fixtures (tests/data/)
 ├── benchmarks/             bench_planner.cpp (in-process planner micro-benchmark)
 ├── python/                 generate_map, visualize_map, animate_robot, run_demo,
 │                           run_benchmark, analyze_results, plot_heading_control,
-│                           plot_ghost_experiment
+│                           plot_ghost_experiment, plot_alignment_experiment
 ├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine) and
 │                           moving obstacles for the obstacles map (obstacles_dynamic)
 ├── scripts/                build.sh, test.sh, run.sh
@@ -744,8 +806,10 @@ robot-nav-simulator/
   turns.
 - The footprint is a disc (no rectangular or oriented robots). Inflation is
   evaluated at cell centers, so on a coarse grid it can reject a passage the robot would
-  physically fit through (safe, but conservative); use a resolution that is small
-  compared with the radius.
+  physically fit through (safe, but conservative). Measured: with 0.1 m cells, doors up
+  to 3√2 cells wider than the robot can be refused depending only on the grid's
+  alignment. `alignment.hpp` shows the alignment-robust alternative on LiDAR points,
+  which `robot_simulator` does not use yet.
 - Leftover step distance is not carried over to the next waypoint. When `speed × dt`
   does not divide the cell size, the robot loses part of a timestep at every waypoint,
   so travel time is slightly longer than `path length / speed`.
@@ -802,6 +866,10 @@ robot-nav-simulator/
 - ✅ **Why NO_PATH?** the minimum ghost-cell explanation of a planning failure, and
   re-sensing only those cells (`ghost_experiment`). Open: the complexity of the lattice
   problem, and using the explanation live in `robot_simulator`.
+- ✅ **Grid alignment:** doorways whose passability depends on the grid's rotation and
+  offset, measured and bounded; an alignment-robust planner on LiDAR points; telling
+  discretization artifacts from sensor ghosts (`alignment_experiment`). Open: using it
+  in `robot_simulator`.
 
 ## License
 

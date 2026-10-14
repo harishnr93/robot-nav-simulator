@@ -77,7 +77,10 @@ uses.
 | `include/heading_control.hpp`, `src/heading_control.cpp` | Heading-control study: the heading plant with motor lag and disturbance (`HeadingPlant`, exact discretisation), P and PID controllers (`HeadingController`: derivative on the measurement, anti-windup), the closed-loop simulation and the metrics (`computeHeadingMetrics`). |
 | `src/heading_experiment.cpp` | `heading_experiment` executable: runs the four P vs. PID scenarios (and `--sweep`), writes CSV files and a summary table. |
 | `include/ghost_cells.hpp`, `src/ghost_cells.cpp` | "Why NO_PATH?": cell covers matching `inflateObstacles` (`computeCellCovers`), the exact minimum-weight ghost-set search (`findGhostCells`: labels with subset dominance, bottleneck bound, all optimal sets), the brute-force reference (`referenceGhostCount`) and `ghostWeight`. Independent of the simulator. |
-| `include/ghost_perception.hpp`, `src/ghost_perception.cpp` | The perception loop: a world with view-dependent ghost sources, beam tracing (`traceBeam`), a log-odds occupancy belief with hit/pass counts and hit bearings, the two-hypothesis ghost evidence, active re-sensing and the recovery strategies (`recover`). |
+| `include/ghost_perception.hpp`, `src/ghost_perception.cpp` | The perception loop (against any `SensorWorld`: the grid `GhostWorld` or the continuous world): a world with view-dependent ghost sources, beam tracing (`traceBeam`), a log-odds occupancy belief with hit/pass counts and hit bearings, the two-hypothesis ghost evidence, active re-sensing and the recovery strategies (`recover`). |
+| `include/geometry2d.hpp`, `src/geometry2d.cpp` | Continuous geometry for convex polygons: containment, distances, overlap with a cell (positive area), clipped area, ray intersection. |
+| `include/alignment.hpp`, `src/alignment.cpp` | Grid alignment: grid placement (rotation + sub-cell offset), the rasterization rules, a continuous world with an exact LiDAR (`ContinuousWorld`, a `SensorWorld`), hit points with point-level evidence (`PointMap`), the alignment-robust planner (`planOnClearance`), ground truth (`truePassability`) and the point-aware recovery (`recoverWithPoints`). |
+| `src/alignment_experiment.cpp` | `alignment_experiment` executable: `doorway`, `clutter`, `classify` and `example`. |
 | `src/ghost_experiment.cpp` | `ghost_experiment` executable: `recovery` (strategies compared on random worlds), `scaling` (solver study with brute-force checks) and `example` (one map for the figure). |
 | `include/footprint.hpp`, `src/footprint.cpp` | Disc footprint: exact disc and swept-disc overlap tests, obstacle inflation, and `planWithFootprint()` (A* on the inflated map with footprint-specific statuses). |
 | `include/csv_writer.hpp`, `src/csv_writer.cpp` | Writes `path.csv`, `planning_metrics.csv`, `trajectory.csv`, `simulation_metrics.csv`, and with the matching options `inflated_map.csv`, `lidar_scans.csv`, `localization.csv`, `dynamic_obstacles.csv`, `replans.csv` and `replanned_paths.csv`. |
@@ -200,7 +203,8 @@ frames with full renders pixel by pixel.
 | `amr_core` | static library | all simulator logic |
 | `robot_simulator` | executable | command-line interface |
 | `bench_planner` | executable | planner micro-benchmark (`-DAMR_BUILD_BENCHMARKS=OFF` to skip) |
-| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control`, `test_lidar`, `test_ekf`, `test_dynamic`, `test_ghost_cells`, `test_ghost_perception` | executables | unit tests (registered with CTest) |
+| `test_grid_map`, `test_astar`, `test_robot`, `test_footprint`, `test_octile`, `test_diff_drive`, `test_heading_control`, `test_lidar`, `test_ekf`, `test_dynamic`, `test_ghost_cells`, `test_ghost_perception`, `test_alignment` | executables | unit tests (registered with CTest) |
 | `heading_experiment` | executable | P vs. PID heading-control study |
+| `alignment_experiment` | executable | grid-alignment experiments (writes `docs/alignment/`, plotted by `python/plot_alignment_experiment.py`) |
 | `ghost_experiment` | executable | "Why NO_PATH?" experiments (writes `docs/ghost/`, plotted by `python/plot_ghost_experiment.py`) |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |

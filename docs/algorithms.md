@@ -1104,6 +1104,175 @@ at most:
 - **Complexity:** the solver is exact and exponential in the worst case. The
   polynomial-time question for the lattice version stays open (not attempted).
 
+## 16. Grid alignment: when the same doorway is passable or not (`alignment_experiment`)
+
+**Problem.** An occupancy grid is laid over a continuous world at some rotation and
+sub-cell offset. The planner then inflates obstacles at cell centres (section 8). Both
+steps quantize:
+
+- obstacles are rounded to whole cells;
+- configuration space is sampled at cell centres.
+
+So the same door can come out passable or blocked depending only on where the grid
+happened to start. The README listed cell-centre inflation as a known limitation. This
+section measures the effect, bounds it, removes it, and shows what it means for
+problem 1: some "ghosts" are not sensor errors but discretization artifacts.
+
+**Setup.**
+
+- **World:** continuous, made of convex polygons (`geometry2d.hpp`). A 4 m room has a
+  dividing wall 0.2 m thick with one doorway of width w.
+- **Robot and grid:** radius r = 0.3 m (the door is passable iff w ≥ 0.6 m); cells of
+  0.1 m.
+- **Alignments:** the grid is placed at a random rotation and sub-cell offset
+  (`placeGrid`).
+- **Grid rules compared:**
+  - *any overlap* (a cell is occupied if it shares any area with an obstacle; the
+    conservative costmap rule);
+  - *cell centre inside*;
+  - *majority coverage*;
+  - a *LiDAR log-odds map* built from exact scans (720 beams, 6 viewpoints).
+
+**The effect** (`docs/images/alignment_doorway.png`; 60 random alignments for each
+width from 0.50 to 1.10 m):
+
+| Method | Widths where the alignment decides | Band | Passable when blocked | Blocked when passable |
+|---|---|---|---|---|
+| Grid, any overlap | 0.75 – 0.99 m | 25 cm | 0 | 1719 of 3060 |
+| Grid, cell centre inside | 0.61 – 0.85 m | 25 cm | 0 | 939 |
+| Grid, majority coverage | 0.61 – 0.84 m | 24 cm | 0 | 867 |
+| Grid, LiDAR log-odds | 0.70 – 0.91 m | 22 cm | 0 | 1389 |
+| **LiDAR points + 2.5 cm lattice** | **0.64 – 0.66 m** | **3 cm** | **0** | 362 |
+| Exact geometry + 2.5 cm lattice (reference) | 0.62 – 0.63 m | 2 cm | 0 | 205 |
+
+With any overlap, a door 14 cm wider than the robot is never passable. One 25 cm wider
+passes for only 48 % of the alignments, and one 30 cm wider for 43 %. Two axis-aligned
+grids 2.6 cm apart already disagree on a 0.75 m door
+(`docs/images/alignment_example.png`). Even the less conservative rules give 45–62 %
+for doors 15–20 cm wider than the robot.
+
+**Bounds** (cell size s, robot radius r, any overlap):
+
+- **Never unsafe.** The occupied cells contain every obstacle, so a cell centre's
+  distance to them is at most its true clearance. A cell the grid calls free is truly
+  free. Measured: no unsafe answer in 3660 doorway and 1200 clutter cases.
+- **Always passable once w ≥ 2r + 3√2·s** (1.02 m here). Occupied cells reach at most
+  s√2 beyond an obstacle, so a centre with true clearance ≥ r + s√2 is free. In the
+  doorway those centres fill a strip of width w − 2r − 2√2·s. Any strip at least √2·s
+  wide (more precisely s(|cos θ| + |sin θ|)) contains a 4-connected chain of cell
+  centres across it. Measured: passable for every alignment from 1.00 m.
+- **On an axis-aligned grid,** the opening must hold n ≥ 2⌈r/s − ½⌉ + 1 = 7 whole
+  free cells, for a centre at least r from both sides. So 0.70 m is the least width
+  that can pass, and 0.80 m passes at any offset. Between those, the offset decides
+  (the example figure: 0.75 m).
+
+The centre and majority rules can also mark partly covered cells free. In principle
+that could make a grid pass a door narrower than 2r; it never happened in these runs.
+
+**The fix: plan on the LiDAR's points, not the grid** (`planOnClearance`). The hit
+points are continuous measurements of the surfaces, independent of the grid.
+
+1. **Join consecutive hits.** Consecutive hits of one scan closer than 2r are joined
+   into segments. A disc cannot pass between points closer than 2r anyway, so joining
+   never closes a usable passage.
+2. **Plan on a fine lattice.** The lattice spacing is h = s/4. A node is free when it
+   is at least r from every segment and from the map border.
+3. **Margin at chain ends.** Where a chain of joined hits ends, the true surface may
+   continue unseen up to the next beam (a corner between two beams). The end point
+   gets a margin of range × beam spacing.
+4. **Unobserved space.** The disc must also stay at least r from every cell the LiDAR
+   never observed (no beam passed through or hit it), because faces no viewpoint saw
+   may hide obstacles. Obstacle interiors are never observed, but they lie behind
+   their observed faces, so this never blocks more than the true geometry.
+
+The answer depends on the alignment only through h, not through s. The tolerance band
+is [2r, 2r + 2·R·Δθ + √2·h], where R is the range and Δθ the beam spacing. Measured: 3
+cm, against 22–25 cm for every grid rule.
+
+**What failed first.** Each fix was found by checking against the true geometry:
+
+| Observation | Cause | Fix |
+|---|---|---|
+| Point plans through obstacles the LiDAR never saw (true clearance 5 cm) | unseen box faces leave no points | keep r from unobserved cells |
+| Point plans 6–8 mm too close to box corners | a corner between two beams | margin of range × beam spacing at chain ends |
+| The point planner never left its start | a beam's own starting cell was never marked as observed | count the origin cell as passed |
+| A wide door "blocked" by a single point near the robot | a spurious return, never re-crossed within 5 mm | outlier filter: at least 2 hits within 5 cm |
+
+**Random clutter** (100 rooms with 6 rotated boxes, 12 alignments each, ground truth
+from a 5 mm lattice with two-sided thresholds):
+
+| Method | Worlds whose answer flips with alignment | Wrong answers | Passable when blocked |
+|---|---|---|---|
+| Grid, any overlap | 29 / 100 | 392 / 1200 | 0 |
+| Grid, cell centre inside | 22 | 187 | 0 |
+| Grid, majority coverage | 22 | 172 | 0 |
+| Grid, LiDAR log-odds | 23 | 284 | 0 |
+| **LiDAR points + lattice** | **5** | 61 (all cautious) | **0** |
+| Exact geometry + lattice | 2 | 15 | 0 |
+
+The point planner's remaining errors are cautious "blocked" answers caused by space
+the 5 viewpoints never saw: a limit of mapping coverage, not of alignment.
+
+### Artifact or ghost? (connecting to problem 1)
+
+Problem 1's ghost evidence counts beams that pass through a **cell**. With continuous
+geometry, cells on an obstacle's edge are partly free: beams pass through their free
+part as well as hit the wall. Cell-level evidence can therefore call a real wall cell
+a ghost and "recover" through the wall.
+
+The point map uses **point-level evidence** instead (`PointMap`):
+
+- **Contradiction:** a hit is contradicted only by a beam that passes within 5 mm of
+  that hit and continues at least 20 cm beyond it. Two contradictions drop it.
+- **Why the radius is tiny:** beams graze the corners of door jambs, and a wider
+  radius would erode the corners, making doors look wider than they are.
+- **Spurious returns:** beams almost never cross a random isolated hit that precisely,
+  so these are removed by the outlier filter instead.
+
+**Point-aware recovery** (`recoverWithPoints`) when the grid says NO_PATH:
+
+1. Plan on the points. If a path exists, the failure was a **discretization
+   artifact**: no sensing is needed.
+2. Otherwise the measurements themselves block the way. Explain with the minimum ghost
+   set (section 15) on the cells that hold points, weighted by their evidence.
+3. Re-sense those points from the most different bearing, with two beams aimed exactly
+   at each suspect hit (up to 8 per cell), and repeat.
+
+Grid NO_PATH cases from noisy LiDAR maps (720 beams, misses and spurious returns):
+
+| Kind (60 grid NO_PATH cases each) | Pipeline | Recovered | Unsafe | Gave up | Called an artifact | Median beams |
+|---|---|---|---|---|---|---|
+| Discretization artifact (door 1–15 cm wider than 2r) | grid-only (problem 1) | 6 | **47** | 7 | – | 17.5 |
+| | **point-aware** | 36 | **0** | 24 | 36 | **0** |
+| Sensor ghost (strong reflection in a door 30–60 cm wider) | grid-only | 60 | 0 | 0 | – | 5 |
+| | **point-aware** | **60** | **0** | 0 | 1 | 47 |
+| Real block (door 1–15 cm narrower than 2r) | grid-only | 0 | **25** | 35 | – | – |
+| | **point-aware** | 0 | **0** | **60** | 0 | – |
+
+- **Grid-only recovery is unsafe** on 47 of 60 artifacts and 25 of 60 real blocks. It
+  re-senses the edge cells of the door jambs, sees beams pass through their free part,
+  calls them ghosts, and plans through the wall.
+- **Point-aware recovery is never unsafe.** It called 36 artifacts with no sensing,
+  cleared every ghost, and refused every real block.
+- **Where it gave up on artifacts:** only doors inside its tolerance band. Below 0.66 m
+  it recovered 3 of 27; from 0.66 m it recovered all 33. Those are cautious answers,
+  not errors.
+- **Aiming at the hits:** the first version re-sensed each cell's centroid with
+  jittered beams and cleared only 39 of 60 ghosts. Aiming two beams exactly at each
+  suspect hit cleared all 60.
+
+**Limitations.**
+
+- **Planning with points needs the hits themselves** (a point cloud or scans). A grid
+  built from CAD geometry needs the polygons instead; that is what the
+  exact-geometry planner shows.
+- **Thin real obstacles** must return at least 2 hits to count (the outlier filter).
+- **Removing a reflection costs more beams** with point-level evidence (a median of 47
+  against 5): each beam only contradicts the hits it passes within 5 mm of, so beams
+  are aimed at the hits one by one. That is the price of never eroding real corners.
+- **Recall depends on coverage.** The unobserved-space rule makes the planner wait for
+  observations rather than guess, so it is cautious where mapping was sparse.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
