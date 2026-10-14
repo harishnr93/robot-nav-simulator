@@ -17,3 +17,9 @@ results/*
 .idea/
 *.swp
 .DS_Store
+
+# ROS 2 (colcon) build output, kept apart from the standalone build/
+build_ros2/
+install_ros2/
+log_ros2/
+log/

@@ -208,3 +208,31 @@ frames with full renders pixel by pixel.
 | `alignment_experiment` | executable | grid-alignment experiments (writes `docs/alignment/`, plotted by `python/plot_alignment_experiment.py`) |
 | `ghost_experiment` | executable | "Why NO_PATH?" experiments (writes `docs/ghost/`, plotted by `python/plot_ghost_experiment.py`) |
 | `python_visualization` | CTest entry | Python tests; registered only when a Python with NumPy, Matplotlib and Pillow is found (`.venv/` preferred) |
+
+The core sources are listed once, in `cmake/amr_core_sources.cmake`. The ROS 2 package
+compiles the same list into its own position-independent `amr_core_ros`, so the
+standalone CLI and the nodes cannot drift apart.
+
+## ROS 2 package
+
+`ros2/robot_nav_sim_ros` (optional, built with colcon; see [ros2.md](ros2.md)):
+
+```text
+ map_server_node ── /map (latched) ──► simulator_node
+   loadGridMapCsv()                      fromOccupancyGrid()           conversions.cpp
+                                         runMission()                  mission.cpp
+                                           inflate → planWithFootprint → simulatePath
+                                           (+ moving obstacles) → scanTrajectory → runLocalization
+                                         wall timer: one sample per dt / playback_rate
+                                           ├► /plan, /inflated_map, /navigation_status (latched)
+                                           ├► /odom, /tf, /trajectory, /scan, /ekf/*, /dynamic_obstacles
+ RViz2 ── /goal_pose, /initialpose ─────►  └ new mission from the robot's current cell
+```
+
+| File | Role |
+|---|---|
+| `conversions.hpp/.cpp` | every simulator ↔ ROS conversion: positions and headings (y down ↔ y up), `OccupancyGrid` rows, paths, `LaserScan` beam order, EKF covariance |
+| `mission.hpp/.cpp` | the standalone pipeline with no ROS dependency, so it is tested directly against `planWithFootprint` + `simulatePath` |
+| `map_server_node.cpp` | loads a map CSV and latches it on `/map` |
+| `simulator_node.cpp` | parameters, subscriptions, playback and publishing |
+| `launch/sim.launch.py`, `config/sim.rviz` | both nodes plus RViz2 with every display configured |

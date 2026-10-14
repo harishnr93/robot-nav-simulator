@@ -1,0 +1,46 @@
+# docker compose up sim        ROS 2 nodes + RViz2 (needs a display: Linux X11 or WSLg)
+# docker compose up headless   ROS 2 nodes only; inspect with `docker compose exec headless ros2 topic list`
+# docker compose run --rm demo standalone simulator + figures + GIF into ./results
+# docker compose run --rm test every test (standalone and ROS 2)
+# See docs/docker.md.
+x-image: &image
+  image: robot-nav-sim:latest
+  build:
+    context: .
+    args:
+      INSTALL_RVIZ: "true"
+
+services:
+  sim:
+    <<: *image
+    network_mode: host          # DDS discovery with the host and the X server
+    ipc: host
+    environment:
+      DISPLAY: ${DISPLAY:-:0}
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-}
+      XDG_RUNTIME_DIR: /tmp/runtime-root
+      QT_X11_NO_MITSHM: "1"
+      LIBGL_ALWAYS_SOFTWARE: "1"  # RViz2 without GPU passthrough
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    command: ["ros2", "launch", "robot_nav_sim_ros", "sim.launch.py"]
+
+  headless:
+    <<: *image
+    network_mode: host
+    ipc: host
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+    command: ["ros2", "launch", "robot_nav_sim_ros", "sim.launch.py", "rviz:=false"]
+
+  demo:
+    <<: *image
+    user: "${UID:-1000}:${GID:-1000}"   # results owned by you, not root
+    volumes:
+      - ./results:/ws/results
+    command: ["demo"]
+
+  test:
+    <<: *image
+    command: ["test"]

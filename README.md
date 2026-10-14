@@ -3,7 +3,7 @@
 A lightweight 2D autonomous mobile robot navigation simulator built with C++17 and Python,
 featuring A* path planning, occupancy-grid mapping, collision detection, trajectory
 visualization, and performance analysis. Runs on an ordinary laptop: no robot hardware,
-no ROS, no GPU.
+no ROS, no GPU. An optional ROS 2 package publishes the same simulation to RViz2.
 
 ![Animated robot navigation on the obstacles map](docs/images/navigation_obstacles.gif)
 
@@ -122,7 +122,11 @@ comes from a reproducible benchmark.
 ```
 
 The C++ planner is the single authoritative planning implementation; Python only
-generates maps and visualizes results. Details: [docs/architecture.md](docs/architecture.md).
+generates maps and visualizes results. The optional ROS 2 package
+(`ros2/robot_nav_sim_ros`) compiles the same C++ sources into two nodes. A
+`map_server_node` publishes `/map`, and a `simulator_node` runs the same pipeline and
+publishes the plan, the robot's pose, the LiDAR, the EKF and the moving obstacles for
+RViz2. Details: [docs/architecture.md](docs/architecture.md).
 
 ### Coordinate conventions
 
@@ -167,6 +171,21 @@ ctest --test-dir build --output-on-failure
 Or use the helper scripts: `scripts/build.sh` and `scripts/test.sh`. The Python tests are
 registered automatically when `.venv/` exists (or when the Python found by CMake has
 NumPy, Matplotlib and Pillow); otherwise CMake prints that they were skipped.
+
+### Docker
+
+Everything (the standalone simulator, the Python tools, and the ROS 2 package with RViz2)
+also comes as one image, so nothing but Docker is needed on the host:
+
+```bash
+docker compose build
+docker compose run --rm test     # all tests: 50 CTest entries + 21 ROS 2 tests
+docker compose run --rm demo     # results, figures and navigation.gif in ./results
+docker compose up sim            # ROS 2 nodes + RViz2 (WSLg or a Linux X11 desktop)
+docker compose up headless       # ROS 2 nodes only
+```
+
+Display setup, build arguments and more examples: [docs/docker.md](docs/docker.md).
 
 ## Quick demo
 
@@ -636,6 +655,27 @@ goal, the result is `START_TOO_CLOSE_TO_OBSTACLE` / `GOAL_TOO_CLOSE_TO_OBSTACLE`
 including why inflation is safe and when it is conservative:
 [docs/algorithms.md](docs/algorithms.md#8-robot-footprint-and-obstacle-inflation).
 
+### ROS 2 and RViz2
+
+The simulator also runs as ROS 2 nodes (tested on Humble). The standalone build
+doesn't need ROS. The ROS 2 package builds into its own `build_ros2/` and
+`install_ros2/` directories.
+
+```bash
+source /opt/ros/humble/setup.bash
+scripts/build_ros2.sh --test
+source install_ros2/setup.bash
+ros2 launch robot_nav_sim_ros sim.launch.py robot_model:=diff-drive lidar_beams:=36 ekf:=true
+```
+
+RViz2 opens with the map, the inflated map, the plan, the trajectory, the odometry, the
+scan, the EKF estimate with its covariance, and the moving obstacles. **2D Goal Pose**
+sends a new goal and the robot replans from where it is. **2D Pose Estimate** moves the
+robot. Frames follow REP 103 (`y` up, counter-clockwise yaw). The simulator's `y`-down
+grid is converted at the boundary.
+
+Topics, parameters, frame conversions and tests: [docs/ros2.md](docs/ros2.md).
+
 ### Generate maps
 
 ```bash
@@ -773,6 +813,10 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ctest --test-dir build --output-on-failure      # 50 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
+The ROS 2 package has 21 more tests (frame conversions, missions against the
+standalone pipeline, and a launch test of both nodes). Run them with
+`scripts/build_ros2.sh --test`.
+
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
 mutation checks (deliberately broken code that the tests must catch) and the sanitizer
 and static-analysis results.
@@ -793,8 +837,12 @@ robot-nav-simulator/
 │                           plot_ghost_experiment, plot_alignment_experiment
 ├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine) and
 │                           moving obstacles for the obstacles map (obstacles_dynamic)
-├── scripts/                build.sh, test.sh, run.sh
-├── docs/                   architecture, algorithms, testing, performance,
+├── ros2/robot_nav_sim_ros/ optional ROS 2 package: map_server_node, simulator_node,
+│                           frame conversions, launch file, RViz2 config, tests
+├── cmake/                  amr_core_sources.cmake (core sources shared with the ROS 2 build)
+├── scripts/                build.sh, test.sh, run.sh, build_ros2.sh
+├── Dockerfile, docker-compose.yml, docker/   one image with everything; entrypoint and test runner
+├── docs/                   architecture, algorithms, testing, performance, ros2, docker,
 │                           benchmark data and images
 └── results/                generated outputs (git-ignored)
 ```
@@ -817,6 +865,9 @@ robot-nav-simulator/
 - Moving obstacles are avoided reactively, with constant-velocity prediction: obstacles
   that reverse, close in from two sides, or keep blocking the only passage can still
   cause a collision or a timeout (about 2 % of random scenarios).
+- The ROS 2 simulator plays back precomputed missions. A new goal restarts from the
+  center of the robot's current cell. It does not take `/cmd_vel` commands
+  ([docs/ros2.md](docs/ros2.md#limitations)).
 - GIF export of the default ~200-frame animation takes about 9 s, most of it Pillow's GIF
   encoding. Lower `--fps` or `--dpi` for faster exports.
 
@@ -829,6 +880,9 @@ robot-nav-simulator/
 | CMake says "Python tests skipped" | create `.venv` and install `requirements.txt`, then re-run `cmake -S . -B build` |
 | `--show` / `--animate` opens no window | no display is available (e.g. SSH); use `--save-gif` instead |
 | `MP4 export needs FFmpeg` | `sudo apt install ffmpeg`, or use GIF export |
+| `docker compose up sim`: RViz2 says `could not connect to display` | Linux: `xhost +local:docker`; WSL2: check that `echo $DISPLAY` is set ([docs/docker.md](docs/docker.md#rviz2-display)) |
+| `ROS 2 is not sourced` from `scripts/build_ros2.sh` | `source /opt/ros/<distro>/setup.bash` first |
+| RViz2 shows no scan | the scan uses sensor-data (best-effort) QoS; set the LaserScan display's reliability to Best Effort (the bundled config does) |
 | `results were produced for a ... map` / `path crosses obstacles` | the CSV files in `results/` belong to another map; re-run the simulator with this map |
 
 ## Roadmap
@@ -861,8 +915,10 @@ robot-nav-simulator/
   true trajectory with error plots (`--ekf`).
 - ✅ **Dynamic obstacles:** moving obstacles, blocked-path detection and replanning
   with the reused `AStarPlanner` (`--dynamic-obstacles`).
-- **ROS 2 integration:** publishing the map, path and robot state for RViz2, keeping the
-  standalone simulator.
+- ✅ **ROS 2 integration:** `map_server_node` and `simulator_node` publish the map,
+  plan, pose, scan, EKF estimate and moving obstacles for RViz2, which can set goals and
+  poses; the standalone simulator is unchanged ([docs/ros2.md](docs/ros2.md)). Open:
+  `/cmd_vel` control so Nav2 can drive the robot.
 - ✅ **Why NO_PATH?** the minimum ghost-cell explanation of a planning failure, and
   re-sensing only those cells (`ghost_experiment`). Open: the complexity of the lattice
   problem, and using the explanation live in `robot_simulator`.

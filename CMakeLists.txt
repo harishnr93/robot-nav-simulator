@@ -22,22 +22,8 @@ set(AMR_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
 # ---------------------------------------------------------------------------
 # Core library: map loading, A* planning, motion simulation, CSV export
 # ---------------------------------------------------------------------------
-add_library(amr_core STATIC
-    src/grid_map.cpp
-    src/astar.cpp
-    src/robot.cpp
-    src/simulator.cpp
-    src/footprint.cpp
-    src/diff_drive.cpp
-    src/heading_control.cpp
-    src/lidar.cpp
-    src/ekf.cpp
-    src/dynamic_obstacles.cpp
-    src/ghost_cells.cpp
-    src/ghost_perception.cpp
-    src/geometry2d.cpp
-    src/alignment.cpp
-    src/csv_writer.cpp)
+include(cmake/amr_core_sources.cmake)  # AMR_CORE_SOURCES, shared with the ROS 2 package
+add_library(amr_core STATIC ${AMR_CORE_SOURCES})
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
 

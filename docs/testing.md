@@ -17,6 +17,9 @@ Each test executable can also be run directly for a per-case report:
 .venv/bin/python tests/test_python_visualization.py
 ```
 
+The ROS 2 package has its own 21 tests (gtest and launch_testing), run with
+`scripts/build_ros2.sh --test`. They are listed in [ros2.md](ros2.md#tests).
+
 The tests use a small assertion framework in `tests/test_framework.hpp` (`CHECK`,
 `CHECK_EQ`, `CHECK_NEAR`, `REQUIRE`) with no external dependencies. Floating-point
 values are compared with explicit tolerances.
