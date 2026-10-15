@@ -30,6 +30,7 @@ struct MissionOptions {
     amr::EkfConfig ekf;
     std::vector<amr::DynamicObstacle> obstacles;  ///< empty: a static world
     amr::ReplanningConfig replanning;
+    amr::PerceptionConfig perception;  ///< how moving obstacles are seen (default: LiDAR)
 };
 
 /// Empty string if the options are valid (the CLI's checks), otherwise the reason.

@@ -9,6 +9,9 @@
 #include "astar.hpp"
 #include "diff_drive.hpp"
 #include "footprint.hpp"
+#include "geometry2d.hpp"
+#include "lidar.hpp"
+#include "obstacle_tracking.hpp"
 
 namespace amr {
 
@@ -52,17 +55,23 @@ class DynamicView {
 public:
     DynamicView(const DynamicScenario& scenario, double robot_radius, double dt)
         : scenario_(scenario), robot_radius_(robot_radius), dt_(dt),
-          working_(*scenario.planning_map), last_seen_(scenario.obstacles.size()) {}
+          working_(*scenario.planning_map), last_seen_(scenario.obstacles.size()),
+          lidar_(lidarFor(scenario)), errors_(lidar_), tracker_(scenario.perception.tracker) {}
 
-    /// Look around from `robot` at time t: find the visible obstacles, estimate their
-    /// velocities and block the planning cells near their predicted sweeps (the
-    /// previous step's blocks are lifted first). Called once per step.
-    void observe(const GridMap& map, WorldPoint robot, double t) {
+    /// Look around from `robot` (heading `theta`) at time t: find the obstacles,
+    /// predict their motion and block the planning cells near their predicted sweeps
+    /// (the previous step's blocks are lifted first). Called once per step.
+    void observe(const GridMap& map, WorldPoint robot, double theta, double t) {
         for (const GridCoord& cell : blocked_) {
             working_.setOccupied(cell, false);
         }
         blocked_.clear();
         seen_.clear();
+
+        if (scenario_.perception.mode == ObstaclePerception::Lidar) {
+            observeWithLidar(map, robot, theta, t);
+            return;
+        }
         const double horizon = scenario_.replanning.prediction_horizon;
         for (std::size_t i = 0; i < scenario_.obstacles.size(); ++i) {
             const DynamicObstacle& obstacle = scenario_.obstacles[i];
@@ -79,7 +88,7 @@ public:
                             (center.y - last_seen_[i]->y) / dt_};
             }
             last_seen_[i] = center;
-            seen_.push_back({center, velocity, obstacle.radius});
+            seen_.push_back({center, velocity, obstacle.radius, {}, {}});
             const WorldPoint ahead{center.x + velocity.x * horizon,
                                    center.y + velocity.y * horizon};
             block(center, ahead, obstacle.radius + robot_radius_ + scenario_.replanning.margin);
@@ -91,6 +100,15 @@ public:
     /// obstacle keeps its estimated velocity. Each step is checked exactly.
     double predictedGap(const std::vector<WorldPoint>& robot) const {
         return predict(robot).gap;
+    }
+
+    /// Occlusion awareness: true if, standing at `p`, the robot could be reached
+    /// within the reaction time by an obstacle emerging from the free space hidden
+    /// (by walls) from `p`.
+    bool exposedToPhantoms(const GridMap& map, WorldPoint p) const {
+        const PerceptionConfig& c = scenario_.perception;
+        const double reach = c.phantom_speed * c.phantom_reaction + c.phantom_radius + robot_radius_;
+        return hiddenDistance(map, p, reach) < reach;
     }
 
     /// Prediction for a robot motion as in predictedGap(): the smallest gap and the
@@ -105,10 +123,17 @@ public:
             for (std::size_t j = 1; j < robot.size(); ++j) {
                 const double t0 = static_cast<double>(j - 1) * dt_;
                 const double t1 = static_cast<double>(j) * dt_;
-                const WorldPoint q0{s.center.x + s.velocity.x * t0, s.center.y + s.velocity.y * t0};
-                const WorldPoint q1{s.center.x + s.velocity.x * t1, s.center.y + s.velocity.y * t1};
+                WorldPoint q0{s.center.x + s.velocity.x * t0, s.center.y + s.velocity.y * t0};
+                WorldPoint q1{s.center.x + s.velocity.x * t1, s.center.y + s.velocity.y * t1};
+                double extra = 0.0;
+                if (!s.path.empty()) {  // tracked: the predicted path, inflated
+                    const std::size_t last = s.path.size() - 1;
+                    q0 = s.path[std::min(j - 1, last)];
+                    q1 = s.path[std::min(j, last)];
+                    extra = s.inflation[std::min(j, last)];
+                }
                 const double gap = closestApproach(robot[j - 1], robot[j], q0, q1) - s.radius -
-                                   robot_radius_;
+                                   extra - robot_radius_;
                 result.gap = std::min(result.gap, gap);
                 if (gap < 0.0) {
                     result.steps_to_contact = std::min(result.steps_to_contact, j - 1);
@@ -122,12 +147,129 @@ public:
     double dt() const { return dt_; }
     std::size_t blockedCount() const { return blocked_.size(); }
 
+    std::size_t tracksCreated() const { return created_; }
+
 private:
     struct Seen {
         WorldPoint center;
-        WorldPoint velocity;  ///< estimated, m/s
+        WorldPoint velocity;  ///< estimated, m/s (oracle)
         double radius;
+        std::vector<WorldPoint> path;   ///< tracked: predicted positions every dt (entry 0 = now)
+        std::vector<double> inflation;  ///< tracked: radius added for uncertainty, per entry
     };
+
+    /// Distance through free cells from `p` to the nearest free cell within sensing
+    /// range that is hidden from `p` by walls, searched up to `limit` (infinity beyond).
+    double hiddenDistance(const GridMap& map, WorldPoint p, double limit) const {
+        const double sensing = scenario_.replanning.sensing_range;
+        const double res = map.resolution();
+        const GridCoord start = map.worldToGrid(p);
+        if (!map.isFree(start)) {
+            return std::numeric_limits<double>::infinity();
+        }
+        const int w = map.width();
+        std::vector<std::pair<double, GridCoord>> heap{{0.0, start}};
+        std::vector<double> best;
+        std::vector<int> touched;
+        const auto slot = [&](GridCoord c) -> double& {
+            const int key = c.y * w + c.x;
+            if (best.empty()) {
+                best.assign(static_cast<std::size_t>(w * map.height()), std::numeric_limits<double>::infinity());
+            }
+            return best[static_cast<std::size_t>(key)];
+        };
+        slot(start) = 0.0;
+        const auto greater = [](const auto& a, const auto& b) { return a.first > b.first; };
+        while (!heap.empty()) {
+            std::pop_heap(heap.begin(), heap.end(), greater);
+            const auto [d, cell] = heap.back();
+            heap.pop_back();
+            if (d > slot(cell) || d > limit) {
+                continue;
+            }
+            const WorldPoint center = map.gridToWorld(cell);
+            const double straight = std::hypot(center.x - p.x, center.y - p.y);
+            if (straight > 0.0 && straight <= sensing &&
+                castRay(map, p, std::atan2(center.y - p.y, center.x - p.x), straight).hit) {
+                return d;  // hidden behind a wall
+            }
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const GridCoord next{cell.x + dx, cell.y + dy};
+                    if ((dx == 0 && dy == 0) || !map.isFree(next)) {
+                        continue;
+                    }
+                    const double nd = d + res * (dx != 0 && dy != 0 ? std::sqrt(2.0) : 1.0);
+                    if (nd < slot(next)) {
+                        slot(next) = nd;
+                        heap.push_back({nd, next});
+                        std::push_heap(heap.begin(), heap.end(), greater);
+                    }
+                }
+            }
+        }
+        return std::numeric_limits<double>::infinity();
+    }
+
+    static LidarConfig lidarFor(const DynamicScenario& scenario) {
+        LidarConfig lidar = scenario.perception.lidar;
+        if (lidar.beams == 0) {
+            lidar.beams = 360;
+            lidar.max_range = scenario.replanning.sensing_range;
+        }
+        return lidar;
+    }
+
+    /// Lidar perception: scan the map and the obstacles, subtract the map, track,
+    /// and block along every track's predicted path.
+    void observeWithLidar(const GridMap& map, WorldPoint robot, double theta, double t) {
+        LidarScan scan;
+        scan.time = t;
+        scan.origin = robot;
+        scan.heading = theta;
+        errors_.nextScan(t);
+        for (const double offset : beamOffsets(lidar_)) {
+            const double angle = theta + offset;
+            const RayHit wall = castRay(map, robot, angle, lidar_.max_range);
+            double range = wall.hit ? wall.range : std::numeric_limits<double>::infinity();
+            for (const DynamicObstacle& obstacle : scenario_.obstacles) {
+                range = std::min(range, rayToCircle(obstaclePosition(obstacle, t), obstacle.radius, robot, angle));
+            }
+            const bool hit = range <= lidar_.max_range;
+            scan.angles.push_back(angle);
+            scan.ranges.push_back(hit ? errors_.measure(range) : lidar_.max_range);
+            scan.hits.push_back(hit);
+        }
+        const bool full_circle = lidar_.fov >= 2.0 * kPi - 1e-12;
+        const auto detections =
+            detectMovingObstacles(map, scan, lidar_.max_range, full_circle, scenario_.perception.detection);
+        tracker_.update(t, detections, map, scan, lidar_.max_range);
+        for (const Track& track : tracker_.tracks()) {
+            created_ = std::max(created_, static_cast<std::size_t>(track.id + 1));
+        }
+        const double horizon = scenario_.replanning.prediction_horizon;
+        const auto steps = static_cast<std::size_t>(std::max(1.0, std::ceil(horizon / dt_ - 1e-9)));
+        for (const Track& track : tracker_.tracks()) {
+            const auto predicted = tracker_.predictPath(track, dt_, steps);
+            Seen seen{track.position(), track.velocity(), track.radius, {}, {}};
+            for (const PredictedPosition& p : predicted) {
+                seen.path.push_back(p.center);
+                seen.inflation.push_back(std::min(2.0 * p.sigma, scenario_.perception.max_inflation));
+            }
+            const double base = track.radius + robot_radius_ + scenario_.replanning.margin;
+            // The sweep over the horizon (the whole predicted path when the horizon is
+            // positive, the current position otherwise).
+            const std::size_t last = horizon > 0.0 ? seen.path.size() - 1 : 0;
+            const bool inflate = scenario_.perception.inflate_planning;
+            if (last == 0) {
+                block(seen.path[0], seen.path[0], base + (inflate ? seen.inflation[0] : 0.0));
+            }
+            for (std::size_t j = 0; j < last; ++j) {
+                block(seen.path[j], seen.path[j + 1], base + (inflate ? seen.inflation[j + 1] : 0.0));
+            }
+            seen_.push_back(std::move(seen));
+        }
+    }
 
     /// Block the free cells whose centers are closer than `reach` to segment a-b
     /// (the same cell-center rule as obstacle inflation).
@@ -157,7 +299,11 @@ private:
     GridMap working_;                // planning map plus the cells blocked by seen obstacles
     std::vector<GridCoord> blocked_; // cells set in working_ by the last observe()
     std::vector<Seen> seen_;
-    std::vector<std::optional<WorldPoint>> last_seen_;  // per obstacle, previous step
+    std::vector<std::optional<WorldPoint>> last_seen_;  // per obstacle, previous step (oracle)
+    LidarConfig lidar_;                                 // Lidar perception
+    RangeErrorModel errors_;
+    ObstacleTracker tracker_;
+    std::size_t created_ = 0;
 };
 
 /// Positions of a robot that starts at `position` and keeps following the
@@ -178,17 +324,22 @@ std::vector<WorldPoint> predictMotion(const std::vector<WorldPoint>& waypoints, 
     return path;
 }
 
+/// Smallest predicted gap accepted once the gate has waited out the patience, m.
+constexpr double kWaivedMargin = 0.02;
+
 /// Look-ahead gate: true unless following the path for the prediction horizon
 /// would come within `margin` of a seen obstacle (moving at its estimated
 /// velocity) while standing still would keep a larger gap.
 bool moveIsSafe(const DynamicView& view, const std::vector<WorldPoint>& waypoints,
                 std::size_t target, WorldPoint position, double step_limit,
-                const ReplanningConfig& config) {
+                const ReplanningConfig& config, bool margin_waived) {
     const auto steps = static_cast<std::size_t>(
         std::max(1.0, std::ceil(config.prediction_horizon / view.dt() - 1e-9)));
     const double moving = view.predictedGap(predictMotion(waypoints, target, position,
                                                           step_limit, steps));
-    if (moving >= config.margin) {
+    // After waiting out the patience, the margin is a wish, not a rule: an obstacle
+    // that patrols right next to the path never leaves it, and contact-free is enough.
+    if (moving >= (margin_waived ? kWaivedMargin : config.margin)) {
         return true;
     }
     const double standing = view.predictedGap(std::vector<WorldPoint>(steps + 1, position));
@@ -385,6 +536,10 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
 
     bool turning = false;
     double blocked_since = -1.0;  // dynamic: when the current path became blocked
+    double gate_since = -1.0;     // dynamic: when the look-ahead gate started holding the robot
+    double phantom_since = -1.0;  // occlusion-aware: when a blind corner started holding it
+    double phantom_commit_left = 0.0;  // occlusion-aware: meters still driven ignoring phantoms
+    const double dynamic_patience = dynamic ? dynamic->replanning.patience : 0.0;
     constexpr std::size_t kNoTarget = static_cast<std::size_t>(-1);
     std::size_t reverse_target = kNoTarget;  // dynamic: retreat waypoint, driven backwards
     while (result.status == NavigationStatus::NotRun && target < waypoints.size()) {
@@ -396,7 +551,7 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
         const double next = static_cast<double>(result.steps + 1) * config.dt;
         bool wait = false;
         if (dynamic) {
-            view->observe(map, position, now);
+            view->observe(map, position, theta, now);
             GridMap& planning = view->planningMap();
             // The goal itself never counts as blocked (it cannot be avoided, only
             // timed): the look-ahead gate decides when to drive into it.
@@ -427,7 +582,20 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
                     // otherwise from the waypoint it is driving to. If that waypoint
                     // is blocked, retreat: replan from the waypoint it came from
                     // (statically free, and just left), driving back to it first.
-                    const bool retreat = !at_cell && target_blocked;
+                    bool retreat = !at_cell && target_blocked;
+                    if (retreat && dynamic->replanning.choose_retreat &&
+                        planning.isOccupied(cells[target - 1])) {
+                        // Both ends of the segment are blocked (the robot is inside a
+                        // moving obstacle's predicted sweep): backing up is no safer by
+                        // rule. Head for the end that keeps the larger predicted gap.
+                        const auto steps = static_cast<std::size_t>(std::max(
+                            1.0, std::ceil(dynamic->replanning.prediction_horizon / config.dt - 1e-9)));
+                        const double ahead = view->predictedGap(
+                            predictMotion({waypoints[target]}, 0, position, step_limit, steps));
+                        const double back = view->predictedGap(
+                            predictMotion({waypoints[target - 1]}, 0, position, step_limit, steps));
+                        retreat = back >= 0.0 || back > ahead;
+                    }
                     const std::size_t from = at_cell || retreat ? target - 1 : target;
                     planning.setOccupied(cells[from], false);  // the robot's own cell
                     const PlanResult plan = planner.plan(planning, cells[from], cells.back(),
@@ -548,8 +716,13 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
             theta = desired;  // residual error <= kDriveAlignment is absorbed
         }
         const StepResult step = stepToward(position, waypoints[target], step_limit);
+        const bool margin_waived =
+            gate_since >= 0.0 && now - gate_since >= dynamic_patience - 1e-9;
         if (dynamic && !moveIsSafe(*view, waypoints, target, position, step_limit,
-                                   dynamic->replanning)) {
+                                   dynamic->replanning, margin_waived)) {
+            if (gate_since < 0.0) {
+                gate_since = now;
+            }
             // Look-ahead gate: driving on would meet a seen obstacle within the
             // prediction horizon, and standing still is safer. Let it pass.
             if (hits_obstacle(position, position, now, next)) {
@@ -562,6 +735,32 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
             record(next, 0.0, 0.0);
             continue;
         }
+        if (dynamic && dynamic->perception.occlusion_aware) {
+            // Creep round blind corners: take the step only if, from where it leads,
+            // nothing hidden could reach the robot before it can react; unless the
+            // robot has waited out the patience, then commit for a while.
+            if (phantom_commit_left <= 0.0 && view->exposedToPhantoms(map, step.position) &&
+                !view->exposedToPhantoms(map, position)) {
+                if (phantom_since < 0.0) {
+                    phantom_since = now;
+                }
+                if (now - phantom_since < dynamic_patience - 1e-9) {
+                    if (hits_obstacle(position, position, now, next)) {
+                        result.collision_count = 1;
+                        result.status = NavigationStatus::Collision;
+                        break;
+                    }
+                    ++result.wait_steps;
+                    ++result.steps;
+                    record(next, 0.0, 0.0);
+                    continue;
+                }
+                phantom_commit_left = dynamic->perception.phantom_commit;
+            }
+            phantom_since = -1.0;
+            phantom_commit_left -= step.distance;
+        }
+        gate_since = -1.0;
         if (!step_is_free(position, step.position) ||
             (dynamic && hits_obstacle(position, step.position, now, next))) {
             // The unsafe step is not executed; the robot stops at its last safe pose.
@@ -588,6 +787,9 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
         result.status = result.final_goal_error <= config.goal_tolerance
                             ? NavigationStatus::GoalReached
                             : NavigationStatus::Timeout;
+    }
+    if (dynamic) {
+        result.tracks_created = view->tracksCreated();
     }
     if (dynamic && !std::isfinite(result.min_dynamic_clearance)) {
         result.min_dynamic_clearance = 0.0;  // no obstacles

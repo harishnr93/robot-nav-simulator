@@ -11,7 +11,9 @@ set(AMR_CORE_SOURCES
     src/heading_control.cpp
     src/lidar.cpp
     src/ekf.cpp
+    src/surface_model.cpp
     src/dynamic_obstacles.cpp
+    src/obstacle_tracking.cpp
     src/ghost_cells.cpp
     src/ghost_perception.cpp
     src/geometry2d.cpp

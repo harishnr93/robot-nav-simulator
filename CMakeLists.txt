@@ -46,6 +46,11 @@ add_executable(alignment_experiment src/alignment_experiment.cpp)
 target_link_libraries(alignment_experiment PRIVATE amr_core)
 target_compile_options(alignment_experiment PRIVATE ${AMR_WARNING_FLAGS})
 
+# LiDAR perception experiments (run with: ./build/perception_experiment ekf|grazing|dynamic)
+add_executable(perception_experiment src/perception_experiment.cpp)
+target_link_libraries(perception_experiment PRIVATE amr_core)
+target_compile_options(perception_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
 # "Why NO_PATH?" experiments (run with: ./build/ghost_experiment recovery|scaling)
 add_executable(ghost_experiment src/ghost_experiment.cpp)
 target_link_libraries(ghost_experiment PRIVATE amr_core)
@@ -67,7 +72,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_dynamic test_ghost_cells test_ghost_perception test_alignment)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_dynamic test_ghost_cells test_ghost_perception test_alignment)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -210,7 +215,7 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 18 18 --robot-model diff-drive --lidar-beams 72 --ekf
                 --output ${CLI_OUT}/ekf)
     set_tests_properties(cli_ekf_localization PROPERTIES
-        PASS_REGULAR_EXPRESSION "EKF estimate: +position error RMS 0.004 m.*Dead reckoning: +position error RMS 0.533 m")
+        PASS_REGULAR_EXPRESSION "EKF estimate: +position error RMS 0.003 m.*Dead reckoning: +position error RMS 0.533 m")
 
     add_test(NAME cli_ekf_requires_diff_drive
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
@@ -230,7 +235,7 @@ if(AMR_BUILD_TESTS)
                 --dynamic-obstacles ${PROJECT_SOURCE_DIR}/maps/obstacles_dynamic.csv
                 --output ${CLI_OUT}/dynamic)
     set_tests_properties(cli_dynamic_replanning PROPERTIES
-        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Dynamic: +3 moving obstacle\\(s\\), sensing range 3.00 m. 3 replan\\(s\\)")
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Dynamic: +3 moving obstacle\\(s\\), sensing range 3.00 m. 12 replan\\(s\\)")
 
     add_test(NAME cli_rejects_bad_dynamic_obstacles
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv

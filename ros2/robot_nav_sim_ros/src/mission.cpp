@@ -51,6 +51,7 @@ Mission runMission(const amr::GridMap& map, amr::GridCoord start, amr::GridCoord
     scenario.planning_map = &mission.planning_map;
     scenario.obstacles = options.obstacles;
     scenario.replanning = options.replanning;
+    scenario.perception = options.perception;
     mission.sim = amr::simulatePath(map, mission.plan.path, options.motion, options.connectivity,
                                     options.obstacles.empty() ? nullptr : &scenario);
     mission.scans = amr::scanTrajectory(map, mission.sim.trajectory, options.lidar);

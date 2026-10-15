@@ -51,6 +51,7 @@ struct CliOptions {
     amr::LidarConfig lidar;
     amr::EkfConfig ekf;
     std::string dynamic_file;           ///< --dynamic-obstacles (empty: static world)
+    amr::PerceptionConfig perception;   ///< --obstacle-perception, --obstacle-prediction
     amr::ReplanningConfig replanning;
     std::filesystem::path output_dir = "results";
     bool reference_bfs = false;
@@ -94,6 +95,9 @@ void printUsage(std::ostream& os) {
           "  --lidar-range M       LiDAR maximum range in m (default 5)\n"
           "  --lidar-noise SIGMA   Gaussian range noise in m (default 0)\n"
           "  --lidar-seed N        Seed of the range noise (default 0)\n"
+          "  --lidar-bias SIGMA    Range bias shared by all beams of a scan, std in m\n"
+          "                        (default 0); a correlated error\n"
+          "  --lidar-bias-time S   Bias correlation time in s (default 0 = constant)\n"
           "  --ekf                 EKF localization (differential drive): noisy wheel\n"
           "                        odometry, corrected by the LiDAR scans if enabled\n"
           "  --odom-noise-dist K   Odometry distance error, m per sqrt(m) driven (0.05)\n"
@@ -102,6 +106,18 @@ void printUsage(std::ostream& os) {
           "  --odom-seed N         Seed of the odometry noise (default 0)\n"
           "  --ekf-range-sigma M   LiDAR range std assumed by the EKF in m (default 0.05)\n"
           "  --ekf-gate N          Reject beams whose innovation exceeds N std (default 3)\n"
+          "  --ekf-bias-sigma M    EKF range-bias state with this std in m (default 0 =\n"
+          "                        none); models a LiDAR bias shared by all beams\n"
+          "  --ekf-bias-time S     Correlation time of the bias state in s (0 = constant)\n"
+          "  --ekf-map-sigma M     EKF map-error states: offset std of each wall in m\n"
+          "                        (default 0 = none; res/sqrt(12) for a rasterized map)\n"
+          "  --ekf-map-tilt RAD    Tilt std of each wall's map error (default 0.02)\n"
+          "  --ekf-map-residual M  Residual map-error std per cell-sized patch (default 0)\n"
+          "  --ekf-surface S       Ranges predicted on the grid's faces (grid, default) or\n"
+          "                        on wall lines fitted to the grid (lines)\n"
+          "  --ekf-grazing P       Grazing beams: model (default; kept, weighted by their\n"
+          "                        linearization and map-error variance) or cutoff\n"
+          "  --ekf-max-incidence DEG  Cutoff policy: drop beams beyond DEG (default 78.46)\n"
           "  --dynamic-obstacles FILE  Moving obstacles (one per line: radius_m,speed_mps,\n"
           "                        x0,y0,x1,y1,... cells; back and forth); the robot\n"
           "                        replans when one blocks its path\n"
@@ -113,6 +129,13 @@ void printUsage(std::ostream& os) {
           "                        at its estimated velocity (default 2; 0 = where it is)\n"
           "  --replan-patience S   Wait up to S seconds for a blocked path to clear before\n"
           "                        replanning a detour (default 6; 0 = replan at once)\n"
+          "  --obstacle-perception P  How moving obstacles are seen: lidar (default; the\n"
+          "                        robot's own LiDAR, map subtraction and tracking) or\n"
+          "                        oracle (true positions in line of sight)\n"
+          "  --occlusion-aware     Also treat space hidden behind walls as possibly\n"
+          "                        occupied (creep round blind corners)\n"
+          "  --obstacle-prediction P  Lidar perception: reversals (default; learns where an\n"
+          "                        obstacle turns round) or constant-velocity\n"
 
           "  --robot-radius M      Robot footprint radius in m; obstacles are inflated\n"
           "                        by it for planning (default 0 = point robot)\n"
@@ -266,6 +289,75 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
                 ok = false;
             }
             options.lidar.seed = static_cast<std::uint32_t>(seed);
+        } else if (arg == "--lidar-bias") {
+            ok = parseNumber(options.lidar.bias_stddev);
+        } else if (arg == "--lidar-bias-time") {
+            ok = parseNumber(options.lidar.bias_time);
+        } else if (arg == "--ekf-bias-sigma") {
+            ok = parseNumber(options.ekf.model.bias_sigma);
+        } else if (arg == "--ekf-bias-time") {
+            ok = parseNumber(options.ekf.model.bias_time);
+        } else if (arg == "--ekf-map-sigma") {
+            ok = parseNumber(options.ekf.model.map_sigma);
+        } else if (arg == "--ekf-map-tilt") {
+            ok = parseNumber(options.ekf.model.map_tilt);
+        } else if (arg == "--ekf-map-residual") {
+            ok = parseNumber(options.ekf.model.map_residual);
+        } else if (arg == "--ekf-surface") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "grid" || value == "lines") {
+                    options.ekf.model.surface =
+                        value == "grid" ? amr::SurfaceKind::Grid : amr::SurfaceKind::Lines;
+                } else {
+                    error = "--ekf-surface must be grid or lines";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--obstacle-perception") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "oracle" || value == "lidar") {
+                    options.perception.mode = value == "oracle" ? amr::ObstaclePerception::Oracle
+                                                                : amr::ObstaclePerception::Lidar;
+                } else {
+                    error = "--obstacle-perception must be oracle or lidar";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--occlusion-aware") {
+            options.perception.occlusion_aware = true;
+        } else if (arg == "--obstacle-prediction") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "reversals" || value == "constant-velocity") {
+                    options.perception.tracker.prediction = value == "reversals"
+                                                                ? amr::MotionPrediction::LearnedReversals
+                                                                : amr::MotionPrediction::ConstantVelocity;
+                } else {
+                    error = "--obstacle-prediction must be reversals or constant-velocity";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--ekf-grazing") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "model" || value == "cutoff") {
+                    options.ekf.model.grazing =
+                        value == "model" ? amr::GrazingPolicy::Model : amr::GrazingPolicy::Cutoff;
+                } else {
+                    error = "--ekf-grazing must be model or cutoff";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--ekf-max-incidence") {
+            double degrees = 0.0;
+            ok = parseNumber(degrees);
+            options.ekf.model.max_incidence = degrees * kRadiansPerDegree;
         } else if (arg == "--dynamic-obstacles") {
             ok = requireValues(1);
             if (ok) {
@@ -531,6 +623,21 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
         }
         std::cout << ", mean NEES " << std::setprecision(2) << summary.mean_nees
                   << " (3 = consistent)\n";
+        const amr::MeasurementModelConfig& model = options.ekf.model;
+        if (!model.classic()) {
+            std::cout << "EKF model:      "
+                      << (model.surface == amr::SurfaceKind::Lines ? "wall lines" : "grid faces")
+                      << (model.grazing == amr::GrazingPolicy::Model ? ", grazing beams modeled"
+                                                                     : ", grazing cutoff");
+            if (model.bias_sigma > 0.0) {
+                std::cout << ", range bias estimated " << std::setprecision(3)
+                          << localization.back().bias << " m";
+            }
+            if (model.map_sigma > 0.0 || model.map_residual > 0.0) {
+                std::cout << ", " << localization.back().map_states << " map-error states";
+            }
+            std::cout << '\n';
+        }
     }
     std::cout << "Results:        " << options.output_dir.string() << '\n';
 }
@@ -666,6 +773,7 @@ int main(int argc, char** argv) {
         dynamic->planning_map = &inflation.planning_map;
         dynamic->obstacles = std::move(obstacles.obstacles);
         dynamic->replanning = options.replanning;
+        dynamic->perception = options.perception;
     }
     const amr::DynamicScenario* scenario = dynamic ? &*dynamic : nullptr;
     amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed

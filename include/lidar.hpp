@@ -12,35 +12,30 @@
 // Beam angles are relative to the robot's heading (the world frame for the point
 // robot, which has no heading). Optional zero-mean Gaussian range noise uses a
 // seeded generator, so scans are reproducible.
+//
+// Range errors can also be correlated: a range bias shared by every beam of a scan
+// (calibration, temperature), drifting over time as a first-order Gauss-Markov
+// process with stationary standard deviation bias_stddev and correlation time
+// bias_time (0: one constant bias for the whole run):
+//
+//     b_0 ~ N(0, s^2),   b_k = a b_(k-1) + sqrt(1 - a^2) s w_k,   a = exp(-dt / tau)
+//
+// Every beam of scan k with a return reads range + b_k + white noise. Correlated
+// errors are what an EKF that treats beams as independent gets wrong (ekf.hpp).
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <random>
 #include <string>
 #include <vector>
 
 #include "grid_map.hpp"
+#include "lidar_config.hpp"
 #include "simulator.hpp"
 #include "types.hpp"
 
 namespace amr {
-
-struct LidarConfig {
-    int beams = 0;               ///< number of beams; 0 = LiDAR disabled
-    double fov = 2.0 * 3.14159265358979323846;  ///< field of view, rad (2 pi = full circle)
-    double max_range = 5.0;      ///< m; beams that hit nothing within it report no return
-    double noise_stddev = 0.0;   ///< Gaussian range noise, m (0 = exact ranges)
-    std::uint32_t seed = 0;      ///< noise generator seed
-
-    bool enabled() const { return beams > 0; }
-};
-
-/// Upper bounds that keep scans and their CSV output reasonably sized.
-constexpr int kMaxLidarBeams = 3600;
-constexpr double kMaxLidarRange = 1000.0;
-
-/// Empty string if the configuration is valid, otherwise the reason.
-std::string validateLidarConfig(const LidarConfig& config);
 
 /// Which kind of cell boundary a ray hit (used for the range Jacobian of the EKF).
 enum class RayFace {
@@ -78,5 +73,71 @@ struct LidarScan {
 std::vector<LidarScan> scanTrajectory(const GridMap& map,
                                       const std::vector<TrajectorySample>& trajectory,
                                       const LidarConfig& config);
+
+/// Exact range of one beam in some world: hit, range (max_range when nothing is hit).
+struct BeamRange {
+    bool hit = false;
+    double range = 0.0;
+};
+
+/// The same for any world: `cast(origin, angle, max_range, time)` gives the exact
+/// range of one beam (e.g. a continuous world, or the map plus moving obstacles).
+/// Noise and bias are applied exactly as in scanTrajectory (same generator order),
+/// so scanTrajectory(map, ...) equals this with castRay on the map.
+template <typename Caster>
+std::vector<LidarScan> scanTrajectoryWith(const Caster& cast,
+                                          const std::vector<TrajectorySample>& trajectory,
+                                          const LidarConfig& config);
+
+/// Range errors of one scan's beams (white noise and the scan's bias); internal
+/// helper for scanTrajectoryWith, exposed so the template can stay in the header.
+class RangeErrorModel {
+public:
+    explicit RangeErrorModel(const LidarConfig& config);
+    /// Advance the bias to the scan at `time` (call once per scan, in time order).
+    void nextScan(double time);
+    /// Measured range for an exact range with a return.
+    double measure(double exact);
+    double bias() const { return bias_; }
+
+private:
+    LidarConfig config_;
+    std::mt19937 rng_;
+    std::normal_distribution<double> noise_;
+    std::mt19937 bias_rng_;
+    std::normal_distribution<double> unit_{0.0, 1.0};
+    double bias_ = 0.0;
+    double last_time_ = 0.0;
+    bool first_ = true;
+};
+
+template <typename Caster>
+std::vector<LidarScan> scanTrajectoryWith(const Caster& cast,
+                                          const std::vector<TrajectorySample>& trajectory,
+                                          const LidarConfig& config) {
+    std::vector<LidarScan> scans;
+    if (!config.enabled()) {
+        return scans;
+    }
+    const std::vector<double> offsets = beamOffsets(config);
+    RangeErrorModel errors(config);
+    scans.reserve(trajectory.size());
+    for (const TrajectorySample& sample : trajectory) {
+        LidarScan scan;
+        scan.time = sample.state.time;
+        scan.origin = {sample.state.x, sample.state.y};
+        scan.heading = sample.state.theta;
+        errors.nextScan(scan.time);
+        for (const double offset : offsets) {
+            const double angle = scan.heading + offset;
+            const BeamRange ray = cast(scan.origin, angle, config.max_range, scan.time);
+            scan.angles.push_back(angle);
+            scan.ranges.push_back(ray.hit ? errors.measure(ray.range) : ray.range);
+            scan.hits.push_back(ray.hit);
+        }
+        scans.push_back(std::move(scan));
+    }
+    return scans;
+}
 
 }  // namespace amr

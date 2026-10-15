@@ -179,7 +179,7 @@ also comes as one image, so nothing but Docker is needed on the host:
 
 ```bash
 docker compose build
-docker compose run --rm test     # all tests: 50 CTest entries + 21 ROS 2 tests
+docker compose run --rm test     # all tests: 52 CTest entries + 21 ROS 2 tests
 docker compose run --rm demo     # results, figures and navigation.gif in ./results
 docker compose up sim            # ROS 2 nodes + RViz2 (WSLg or a Linux X11 desktop)
 docker compose up headless       # ROS 2 nodes only
@@ -375,9 +375,10 @@ python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
 ```
 
 ```text
-EKF estimate:   position error RMS 0.005 m, max 0.019 m, final 0.000 m; heading RMS 0.11 deg
+EKF estimate:   position error RMS 0.004 m, max 0.020 m, final 0.000 m; heading RMS 0.10 deg
 Dead reckoning: position error RMS 0.580 m, max 1.359 m, final 1.359 m; heading RMS 6.96 deg
-EKF updates:    12647 beams fused, 36 rejected by the 3.0-sigma gate, mean NEES 0.58 (3 = consistent)
+EKF updates:    12927 beams fused, 36 rejected by the 3.0-sigma gate, mean NEES 0.61 (3 = consistent)
+EKF model:      grid faces, grazing beams modeled
 ```
 
 ![EKF estimate vs. dead reckoning in the animation](docs/images/navigation_ekf.gif)
@@ -396,11 +397,51 @@ within 2 cm of the truth.
 
 The filter is checked for honesty, not just accuracy. Over many runs its normalized
 estimation error squared (NEES) averages 3.2 without the LiDAR and 3.2 with 5 cm range
-noise; 3 is ideal. The 0.58 above is cautious on purpose, because the filter assumes
+noise; 3 is ideal. The 0.61 above is cautious on purpose, because the filter assumes
 5 cm range noise and the default LiDAR is exact (set `--ekf-range-sigma` to the actual
 noise). Getting there exposed a subtle modelling error, described with the method in
 [docs/algorithms.md](docs/algorithms.md#13-ekf-localization---ekf). The EKF costs about
 0.1 µs per beam. The robot is still steered by its true pose, so the EKF only observes.
+
+### Correlated LiDAR errors, real walls and grazing beams
+
+The EKF above assumes every beam's error is independent. That holds in this
+simulator's own world, but two common errors are shared between beams:
+
+- **A range bias:** calibration or temperature shortens every beam of a scan alike.
+- **A rasterized map:** a real wall that the map put half a cell off shortens every
+  beam that hits it, scan after scan.
+
+Fusing such beams as if they were independent counts the same error dozens of times,
+and the filter becomes overconfident. The fix makes the shared error part of the
+state:
+
+```bash
+# A 3 cm LiDAR bias: the classic filter's mean NEES is 56; with a bias state, 3.6.
+./build/robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18 --robot-model diff-drive \
+    --lidar-beams 72 --lidar-noise 0.02 --lidar-bias 0.03 --ekf --ekf-range-sigma 0.02 --ekf-bias-sigma 0.03
+# A map rasterized from real walls (0.1 m cells): wall lines and per-wall error states.
+./build/robot_simulator ... --ekf --ekf-surface lines --ekf-map-sigma 0.029
+```
+
+| 40 random routes, 72 beams, 2 cm noise | Mean NEES (3 = honest) | Position RMS |
+|---|---|---|
+| 3 cm LiDAR bias: independent beams | 741 | 2.4 cm |
+| 3 cm LiDAR bias: **bias state** | **3.95** | **0.4 cm** |
+| Rasterized walls (0.1 m, up to 6° rotated): independent beams | 3295 | 3.3 cm |
+| … inflated noise / every 6th beam (usual workarounds) | 927 / 125 | 3.0 / 3.1 cm |
+| … **wall lines + wall states** | **6.9** | **2.3 cm** |
+
+- `--ekf-surface lines` recovers sub-cell walls from the grid: staircases of a
+  slanted wall become one fitted line. On a 6° wall the range error drops from 30 mm
+  to under 4 mm, and the range derivatives no longer jump at every cell edge.
+- Grazing beams are now kept and weighted by their own linearization variance
+  (`--ekf-grazing model`, the default). Beams whose hit could slide off the end of a
+  wall are dropped. This replaces the fixed 78° cutoff, which in the experiment was
+  neither the most accurate nor the most consistent choice on any map tested.
+
+Measurements, method and limits:
+[docs/algorithms.md](docs/algorithms.md#17-correlated-range-errors-sub-cell-walls-and-grazing-beams-perception_experiment).
 
 ### Dynamic obstacles and replanning
 
@@ -411,7 +452,7 @@ python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
 
 ```text
 Navigation:     GOAL_REACHED
-Dynamic:        3 moving obstacle(s), sensing range 3.00 m; 3 replan(s) in 0.009 ms, 9.5 s waiting, closest gap 0.486 m
+Dynamic:        3 moving obstacle(s), sensing range 3.00 m; 12 replan(s) in 0.025 ms, 3.2 s waiting, closest gap 0.373 m
 ```
 
 ![Moving obstacles and replanning in the animation](docs/images/navigation_dynamic.gif)
@@ -419,19 +460,35 @@ Dynamic:        3 moving obstacle(s), sensing range 3.00 m; 3 replan(s) in 0.009
 ![Replans and clearance over time](docs/images/replanning.png)
 
 Three obstacles move back and forth: one crosses the top corridor, one dawdles across
-the corner, and one patrols the right-hand lane. The robot only sees them within 3 m
-and in line of sight. It estimates their velocities and treats the cells they are about
-to sweep as blocked. When its path is blocked it waits up to 6 s for the way to clear,
-then replans with A*. The same `AStarPlanner` object serves every replan, reusing its
-buffers. Before each step it checks that it will not meet an obstacle within the next
-2 s, so it crosses behind a moving obstacle rather than in front of it.
+the corner, and one patrols the right-hand lane.
 
-On 500 random scenarios with three moving obstacles each, the robot reaches the goal in
-98.2 % (point) and 98.8 % (differential drive) of the runs, against 71 % for a robot that
-does not react. The point robot never collided; the differential drive collided in
-2 runs. Most of the remaining runs time out safely, waiting for a passage an obstacle
-keeps blocking. Each rule of the method came from a failure found in testing; see
-[docs/algorithms.md](docs/algorithms.md#14-dynamic-obstacles-and-replanning---dynamic-obstacles-file).
+- **Seeing them:** the robot uses its own LiDAR. Returns that the known map does not
+  explain are clustered into discs and tracked by Kalman filters. A track survives
+  short occlusions (it coasts) and is dropped when the LiDAR sees through where it
+  should be.
+- **Predicting them:** each track learns where its obstacle turns round, so its
+  predicted path bounces between those points instead of running straight on.
+- **Avoiding them:** the cells an obstacle is about to sweep count as blocked. When
+  its path is blocked, the robot waits up to 6 s for the way to clear, then replans
+  with A*. The same `AStarPlanner` object serves every replan, reusing its buffers.
+  Before each step it checks that it will not meet an obstacle within the next 2 s, so
+  it crosses behind a moving obstacle rather than in front of it.
+
+On 500 random scenarios with three moving obstacles each:
+
+| | Reached (point / diff-drive) | Collisions | Shuttling reversals per run |
+|---|---|---|---|
+| Robot that does not react | 64 % / 61 % | 180 / 196 | – |
+| Handed the true positions (the original shortcut) | 97.2 % / 94.8 % | 3 / 6 | 4.1 / 5.4 |
+| **Own LiDAR, tracking, learned reversals** | **98.8 % / 98.6 %** | **3 / 3** | **2.0 / 2.0** |
+
+With faster obstacles (0.6–1.0 m/s) the gap widens: 94.7 % against 83–86 %, with a
+third of the shuttling. `--obstacle-perception oracle` restores the original shortcut.
+`--occlusion-aware` treats space hidden behind walls as possibly occupied; it is
+measured but off by default, because it made things worse. Details:
+[docs/algorithms.md](docs/algorithms.md#18-moving-obstacles-from-the-lidar-alone-tracking-reversals-occlusion---obstacle-perception)
+(and [section 14](docs/algorithms.md#14-dynamic-obstacles-and-replanning---dynamic-obstacles-file)
+for the replanning rules).
 
 ### Why NO_PATH? Minimum ghost cells
 
@@ -810,7 +867,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 50 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 52 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 The ROS 2 package has 21 more tests (frame conversions, missions against the

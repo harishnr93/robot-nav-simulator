@@ -62,7 +62,9 @@ A new goal, initial pose or map starts a new mission from the robot's current ce
 | `max_angular_speed`, `heading_gain`, `initial_heading_deg` | CLI defaults | differential drive |
 | `lidar_beams`, `lidar_fov_deg`, `lidar_range`, `lidar_noise`, `lidar_seed` | 0 (off), 360, … | `--lidar-*` |
 | `ekf`, `odom_noise_dist`, `odom_noise_turn`, `odom_noise_drift`, `odom_seed`, `ekf_range_sigma` | off | `--ekf`, odometry noise |
+| `lidar_bias`, `lidar_bias_time`, `ekf_bias_sigma`, `ekf_bias_time`, `ekf_map_sigma`, `ekf_map_tilt`, `ekf_surface` (`grid`/`lines`), `ekf_grazing` (`model`/`cutoff`) | 0, 0, 0, 0, 0, 0.02, `grid`, `model` | `--lidar-bias*`, `--ekf-bias-*`, `--ekf-map-*`, `--ekf-surface`, `--ekf-grazing` |
 | `dynamic_obstacles_file`, `sensing_range`, `replan_patience` | none | `--dynamic-obstacles`, replanning |
+| `obstacle_perception` (`lidar`/`oracle`), `occlusion_aware` | `lidar`, false | `--obstacle-perception`, `--occlusion-aware` |
 | `playback_rate` | 1.0 | simulation seconds per wall-clock second |
 | `map_frame`, `robot_frame` | `map`, `base_link` | |
 

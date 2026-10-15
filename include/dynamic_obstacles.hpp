@@ -11,10 +11,12 @@
 // at the obstacle's reversal and corner times leaves intervals where both move
 // linearly; the closest approach of two linear motions has a closed form.
 //
-// The robot does not know the routes. It only sees obstacles within its sensing
-// range and in line of sight (the segment from the robot to the obstacle center
-// does not cross a static obstacle), at their current positions. From two
-// consecutive sightings it estimates an obstacle's velocity (simulator.hpp).
+// The robot does not know the routes. By default it perceives obstacles through its
+// own LiDAR only (map subtraction and tracking, obstacle_tracking.hpp). The original
+// shortcut (ObstaclePerception::Oracle) gives it their true positions when within
+// its sensing range and in line of sight (the segment from the robot to the obstacle
+// center does not cross a static obstacle), with the velocity from two consecutive
+// sightings (simulator.hpp).
 #pragma once
 
 #include <cstddef>

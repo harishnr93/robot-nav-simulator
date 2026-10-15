@@ -91,9 +91,28 @@ public:
         o.ekf.odometry.drift = declare_parameter<double>("odom_noise_drift", o.ekf.odometry.drift);
         o.ekf.odometry.seed = static_cast<std::uint32_t>(declare_parameter<int>("odom_seed", 0));
         o.ekf.range_sigma = declare_parameter<double>("ekf_range_sigma", o.ekf.range_sigma);
+        o.lidar.bias_stddev = declare_parameter<double>("lidar_bias", 0.0);
+        o.lidar.bias_time = declare_parameter<double>("lidar_bias_time", 0.0);
+        o.ekf.model.bias_sigma = declare_parameter<double>("ekf_bias_sigma", 0.0);
+        o.ekf.model.bias_time = declare_parameter<double>("ekf_bias_time", 0.0);
+        o.ekf.model.map_sigma = declare_parameter<double>("ekf_map_sigma", 0.0);
+        o.ekf.model.map_tilt = declare_parameter<double>("ekf_map_tilt", o.ekf.model.map_tilt);
+        const std::string surface = declare_parameter<std::string>("ekf_surface", "grid");
+        const std::string grazing = declare_parameter<std::string>("ekf_grazing", "model");
+        if ((surface != "grid" && surface != "lines") || (grazing != "model" && grazing != "cutoff")) {
+            throw std::runtime_error("ekf_surface must be grid or lines, ekf_grazing model or cutoff");
+        }
+        o.ekf.model.surface = surface == "lines" ? amr::SurfaceKind::Lines : amr::SurfaceKind::Grid;
+        o.ekf.model.grazing = grazing == "model" ? amr::GrazingPolicy::Model : amr::GrazingPolicy::Cutoff;
         obstacles_file_ = declare_parameter<std::string>("dynamic_obstacles_file", "");
         o.replanning.sensing_range = declare_parameter<double>("sensing_range", o.replanning.sensing_range);
         o.replanning.patience = declare_parameter<double>("replan_patience", o.replanning.patience);
+        const std::string perception = declare_parameter<std::string>("obstacle_perception", "lidar");
+        if (perception != "lidar" && perception != "oracle") {
+            throw std::runtime_error("obstacle_perception must be lidar or oracle");
+        }
+        o.perception.mode = perception == "lidar" ? amr::ObstaclePerception::Lidar : amr::ObstaclePerception::Oracle;
+        o.perception.occlusion_aware = declare_parameter<bool>("occlusion_aware", false);
         playback_rate_ = declare_parameter<double>("playback_rate", 1.0);
         map_frame_ = declare_parameter<std::string>("map_frame", "map");
         robot_frame_ = declare_parameter<std::string>("robot_frame", "base_link");

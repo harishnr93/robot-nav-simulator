@@ -750,14 +750,17 @@ horizontal face:  H = [  0,        −1/sin φ,   −r / tan φ ]
 ```
 
 (The tests check it against finite differences of the ray caster at 500 random poses.)
-Beams are skipped where this linearization is poor: a predicted corner hit, a grazing
-beam (incidence above about 78°, where `1/cos φ` explodes) and beams without a measured
-or predicted return. A beam whose innovation `ν = z − r̂` is larger than `--ekf-gate`
+Beams are skipped where there is nothing to linearize: a predicted corner hit, and beams
+without a measured or predicted return. Grazing beams (where `1/cos φ` explodes) are
+kept and weighted by their own linearization variance, by default (`--ekf-grazing
+model`, section 17); the classic rule dropped every beam beyond 78.46°
+(`--ekf-grazing cutoff`). A beam whose innovation `ν = z − r̂` is larger than `--ekf-gate`
 (default 3) standard deviations `√(H P Hᵀ + R)` is rejected as an outlier. Typically the
 real beam passed an obstacle edge that the predicted one hit, or the other way round.
 About 0.25 % of the beams are rejected on the demo route.
 
-The accepted beams are fused in one batch update in **information form**:
+With the classic model, the accepted beams are fused in one batch update in
+**information form**:
 
 ```text
 P⁺ = (P⁻¹ + Σ Hᵢᵀ Hᵢ / R)⁻¹,     x⁺ = x + P⁺ Σ Hᵢᵀ νᵢ / R,     R = --ekf-range-sigma² (0.05 m)
@@ -765,7 +768,8 @@ P⁺ = (P⁻¹ + Σ Hᵢᵀ Hᵢ / R)⁻¹,     x⁺ = x + P⁺ Σ Hᵢᵀ νᵢ
 
 This is the standard Kalman update of all the beams stacked (tested against
 `K = P Hᵀ / (H P Hᵀ + R)` for one beam), but it only inverts 3 × 3 matrices, however
-many beams there are.
+many beams there are. The other models (section 17) fuse the beams one at a time, all
+linearized at the prior; without extra states that equals the batch update to 1e-9.
 
 **Starting pose.** The filter, and dead reckoning, start from the true start pose plus
 an error drawn from the initial uncertainty (1 cm, 0.01 rad). Starting exactly at the
@@ -781,16 +785,17 @@ on the obstacles route:
 |---|---|
 | Prediction only, 200 runs | 3.19 |
 | 72 beams, 5 cm range noise, `--ekf-range-sigma 0.05`, 100 runs | 3.16 |
-| 72 beams, exact ranges, default sigma 0.05 m (one run) | 0.49 |
+| 72 beams, exact ranges, default sigma 0.05 m (one run) | 0.67 |
 
 The last line is cautious on purpose: the default assumes 5 cm of range noise, while
 the default LiDAR is exact. Set `--ekf-range-sigma` to the actual noise for a consistent
 filter.
 
-**Results** (obstacles map, 72 beams, defaults, one run): position error RMS 4 mm and
-at most 1.5 cm, against 0.53 m RMS and 1.14 m at the end for dead reckoning; heading
-RMS 0.06° against 4.8°. Over odometry seeds 0–5, the EKF stays at 3–4 mm RMS (at most
-1.7 cm) while dead reckoning ranges from 0.16 to 0.94 m RMS.
+**Results** (obstacles map, 72 beams, defaults, one run): position error RMS 3 mm and
+at most 1.4 cm, against 0.53 m RMS and 1.14 m at the end for dead reckoning; heading
+RMS 0.05° against 4.8°. Over odometry seeds 0–5, the EKF stays at 3 mm RMS (at most
+2 cm) while dead reckoning ranges from 0.16 to 0.94 m RMS. (With the classic 78.46°
+cutoff: 4 mm and 0.06°.)
 
 **Cost.** About 0.1 µs per beam (a ray cast plus a rank-one information update): 7.5 µs
 per timestep with 72 beams, 2.9 ms for the whole run.
@@ -809,9 +814,10 @@ per timestep with 72 beams, 2.9 ms for the whole run.
 **Limitations.**
 
 - The map is known and static. This is localization, not SLAM.
-- Range measurements of one scan are treated as independent. Map discretization makes
-  neighbouring beams' errors correlated, which a real implementation would model or
-  avoid by subsampling beams.
+- By default, range measurements of one scan are treated as independent, which is
+  right for this simulator's own world (the map is the truth, and the LiDAR noise is
+  white). Correlated errors (a LiDAR bias, or a map that is a rasterization of the real
+  walls) are modeled by the measurement models of section 17.
 - Requires the differential drive (`--robot-model diff-drive`): the odometry model
   measures turns and distances driven.
 - The estimate does not feed back into the control. Closing that loop is part of the
@@ -1272,6 +1278,304 @@ Grid NO_PATH cases from noisy LiDAR maps (720 beams, misses and spurious returns
   are aimed at the hits one by one. That is the price of never eroding real corners.
 - **Recall depends on coverage.** The unobserved-space rule makes the planner wait for
   observations rather than guess, so it is cautious where mapping was sparse.
+
+## 17. Correlated range errors, sub-cell walls and grazing beams (`perception_experiment`)
+
+**Why:** the EKF of section 13 treats the beams of a scan as independent. That is true
+in this simulator's own world, where the map is the truth and the LiDAR noise is white.
+It is false for two common errors that many beams share:
+
+- **A range bias** common to a whole scan (calibration, temperature).
+- **A map that is a rasterization of the real walls.** A wall that the map put 4 cm
+  behind its true position shortens every beam that hits it, in every scan.
+
+Fusing 60 beams that share one error as if they were independent shrinks the
+covariance as if 60 errors had averaged out. The filter becomes confident, wrong, and
+deaf to later corrections.
+
+**Measuring it.** `perception_experiment ekf` runs random routes (differential drive,
+72 beams, 2 cm white noise, 40 routes per row) and measures the NEES (3 = honest, as in
+section 13) and the position RMS. It uses two worlds:
+
+- **grid:** the map is the truth, plus an optional LiDAR bias (`--lidar-bias`, a
+  Gauss–Markov process: constant, or drifting with `--lidar-bias-time`).
+- **continuous:** the obstacles map's blocks as polygons. Each block is shifted by up
+  to 0.45 cells and rotated by up to 6°; the outer walls are shifted and tilted by up
+  to 1°. The LiDAR sees the polygons. The robot's map is their rasterization (majority
+  rule), as good as a grid of that size can be.
+
+**Fix 1: shared errors as states.** The exact treatment of coloured noise is to put
+the shared error into the state (`AugmentedEkf`):
+
+- **Bias state** `b` (`--ekf-bias-sigma`, `--ekf-bias-time`): every beam reads
+  `h(pose) + b`.
+- **Wall states** (`--ekf-map-sigma`, `--ekf-map-tilt`): each wall the beams hit gets
+  an offset `a` and a tilt `t`. Its true surface lies `a + t (s − s₀)` behind the
+  mapped one at position `s` along it, so a beam at incidence `α` reads
+  `h + (a + t (s − s₀)) / cos α`. On the line surface (fix 2), a wall is one fitted
+  segment. On the grid, hits within 10° and half a cell of each other belong to one
+  wall.
+
+The structure was measured first (`perception_experiment maperror`). Fitting one offset
+and tilt per wall leaves 8 mm of the 35 mm RMS map error at 0.1 m cells, and 2.6 cm of
+14 cm at 0.5 m; about 0.5 % of beams are gross (> 0.5 m). A first version used a
+Gaussian process with distance-based correlation along surfaces. It correlated walls
+that merely faced the same way and missed that one wall's error is shared along its
+whole length, and its NEES stayed at about 180.
+
+With these states the remaining noise is white, and the beams are fused one at a time,
+all linearized at the prior. Without extra states this equals the information-form
+batch update to 1e-9 (tested).
+
+**Fix 2: sub-cell walls (`--ekf-surface lines`).** A rasterized slanted wall is a
+staircase. On the grid, every step has its own axis-aligned normal, so the range
+derivative jumps at every cell edge (`∂r/∂y` alternates between `−1/sin φ` and 0). A
+small pose change moves the hit to another step, where the range jumps too. The line
+surface recovers the walls from the grid:
+
+1. **Trace:** trace every obstacle boundary as a closed chain of cell faces, and merge
+   collinear faces into the exact axis-aligned outline.
+2. **Detect staircases:** a straight wall rasterized off-axis turns alternately left
+   and right, with one-face risers and treads whose lengths differ by at most one. A
+   real corner repeats a turn; a longer run in the riser direction is a jog or a
+   corner side and stays exact.
+3. **Fit:** each staircase gets one line, a total-least-squares fit through its face
+   midpoints. It is rejected if any midpoint lies more than 0.75 cells off.
+   Neighbouring lines are intersected near their shared vertex; elsewhere a short
+   connector joins them.
+
+| 0.1 m cells, beams at 20° to the normal | Range RMS vs. truth | Largest jump of `∂r/∂y` along the wall |
+|---|---|---|
+| Grid, 3° / 6° / 17° / 33° walls | 31 / 30 / 29 / 29 mm | 1.06 |
+| Lines, same walls | 0.08 / 3.7 / 0.5 / 1.1 mm | 0 |
+
+Axis-aligned maps come out exactly as the grid (tested on the obstacles map: identical
+ranges and normals). A C1 bicubic interpolation of the occupancy was tried first and
+dropped. Interpolation keeps the staircase (normals spread by 14° on a 6° wall, some by
+up to 68°), and straightening it would need a kernel as wide as a step, about 10 cells.
+
+**Results** (mean NEES, its median over runs, the share of samples within the 95 %
+bound, and position RMS):
+
+| Model | Bias 3 cm (grid) | Rasterized 0.1 m, rotated | 0.1 m, axis-aligned | 0.05 m, rotated | 0.25 m, rotated |
+|---|---|---|---|---|---|
+| Independent beams (classic) | 741 / 237 / 18 % / 2.4 cm | 3295 / 2790 / 0 % / 3.3 cm | 4099 / 3780 / 0 % / 3.7 cm | 906 / 782 / 5 % / 1.8 cm | 21627 / 18099 / 0 % / 9.8 cm |
+| Noise inflated to cover the error | 143 / 72 / 29 % / 2.1 cm | 927 / 840 / 3 % / 3.0 cm | 1225 / 873 / 0 % / 3.4 cm | 585 / 476 / 8 % / 1.8 cm | 1420 / 1375 / 0 % / 7.5 cm |
+| … and every 6th beam only | 27 / 12 / 48 % / 2.2 cm | 125 / 98 / 9 % / 3.1 cm | 171 / 139 / 5 % / 3.4 cm | 82 / 74 / 23 % / 1.9 cm | 201 / 194 / 4 % / 7.4 cm |
+| Bias state | **3.95 / 3.96 / 90 % / 0.4 cm** | – | – | – | – |
+| Wall states, grid surface | – | 20 / 9.9 / 48 % / 3.5 cm | 5.1 / 4.0 / 82 % / 2.0 cm | 23 / 13 / 40 % / 1.9 cm | 38 / 11 / 46 % / 9.2 cm |
+| **Wall states, line surface** | – | **6.9 / 4.4 / 76 % / 2.3 cm** | **4.3 / 3.1 / 89 % / 2.0 cm** | **7.0 / 5.7 / 70 % / 1.2 cm** | **19 / 8.6 / 56 % / 6.1 cm** |
+
+- The usual workarounds (inflating `R`, subsampling beams) reduce the overconfidence
+  10–100×, but it stays 10–400× too large. The error is shared, not just large, so no
+  per-beam variance can describe it.
+- The bias state is honest and six times more accurate: it estimates the bias to
+  0.2 mm.
+- Wall states on the line surface bring rasterized maps from NEES 900–22000 to 4–19,
+  and halve the position error at 0.05–0.1 m cells.
+- Residual states per cell-sized patch (`--ekf-map-residual`) help little and cost
+  20× more.
+- The wall-state prior was swept (`--sweep`): an offset std of `res/√12` and a tilt
+  std of 0.02 rad are best. Larger priors are *worse* on both counts. When every wall
+  is free to move, the pose is less constrained, and the EKF's linearization at
+  changing estimates (the known EKF-SLAM inconsistency) grows.
+
+**Fix 3: grazing beams (`--ekf-grazing model`, now the default).** The classic rule
+dropped every beam beyond 78.46° incidence. `perception_experiment grazing` swept that
+cutoff from 45° to 89° and compared it with a model that keeps every beam, weighted
+by what it is worth:
+
+- **Linearization variance** `½ tr(G P G P)`, where `G` is the range Hessian of a flat
+  surface (in closed form, tested against finite differences). This is the exact
+  variance of the second-order term for a Gaussian pose error, and it grows without
+  bound towards 90°. Only `|cos α| < 0.02` is skipped, for numerical safety.
+- **Map error along the normal**, magnified by `1/cos α`: the wall states, plus what
+  they leave (0.3 of the offset std, measured).
+- **Sliding off the end of a wall:** at grazing incidence a normal error moves the hit
+  along the wall by `(normal error) × tan α`. When that slide (2σ) could carry the
+  hit past the end of the wall, the real beam may hit something else, so it is
+  skipped. This is a topological risk, not a variance.
+
+| | Grid world (exact map) | Rasterized, 0.1 m | Rasterized, 0.05 m |
+|---|---|---|---|
+| Cutoff 45° | 3.21 / 0.46 cm / 0.19° | 4.47 / 2.25 cm | 4.57 / 1.34 cm |
+| Cutoff 60° | 3.19 / 0.42 cm / 0.11° | 4.80 / 2.17 cm | 4.71 / 1.18 cm |
+| Cutoff 78.46° (classic) | 4.14 / 0.39 cm / 0.06° | 6.91 / 2.29 cm | 6.99 / 1.21 cm |
+| Cutoff 89° | 19.2 / 0.39 cm / 0.08° | 12.1 / 3.25 cm | 10.6 / 1.53 cm |
+| **Model** | **3.76 / 0.38 cm / 0.05°** | **5.01 / 2.18 cm** | **4.53 / 1.09 cm** |
+
+(Mean NEES / position RMS / heading RMS.)
+
+- A fixed cutoff trades consistency against accuracy. Low cutoffs are honest but
+  throw away the beams that fix heading (0.19° heading RMS at 45°). High cutoffs keep
+  them but become overconfident.
+- The model gives the best accuracy on every map and is consistent on the exact one.
+  On rasterized maps it is about as consistent as the best cutoff, with better
+  accuracy. On the CLI's demo route it reaches 3 mm and 0.05° (4 mm and 0.06° with the
+  classic cutoff).
+
+**Cost.** The augmented filter costs `O(n²)` per beam for `n` states: 0.04 ms per
+72-beam scan with wall states (about 30 states), and about 1 ms with residual patches.
+
+**Limitations.**
+
+- The remaining overconfidence on rasterized maps (NEES 4–7 at 0.05–0.1 m cells, 19
+  at 0.25 m) is the EKF's own linearization inconsistency once map states are
+  estimated. Coarse maps also change shape, not just position: blocks one or two cells
+  wide gain or lose a cell, which no Gaussian error model covers. At 0.5 m cells (the
+  CLI's default maps) every model stays far from honest, so localize on a finer map.
+- Wall states are dropped least-recently-used beyond `max_map_states` (200). A wall
+  seen again after that starts from its prior, so its correlation with earlier scans
+  is forgotten.
+- The line surface fits straight walls only. Curved walls stay staircases, or become
+  short segments when their steps are regular.
+
+## 18. Moving obstacles from the LiDAR alone: tracking, reversals, occlusion (`--obstacle-perception`)
+
+**Why:** section 14's robot did not perceive moving obstacles. It was handed their true
+positions whenever they were within 3 m and the line to their centres crossed no wall
+(an "oracle"). It took their velocity from two consecutive sightings and forgot any
+obstacle the moment it went out of sight. This section replaces that shortcut with the
+robot's own LiDAR. It also fixes two weaknesses the shortcut hid:
+
+- **Reversals:** the robot predicted every obstacle straight on, so it could not
+  anticipate a reversal. Each reversal flipped the predicted sweep, and with it the
+  best detour, which caused back-and-forth livelocks.
+- **Forgetting:** an obstacle stopped existing the moment a wall hid it.
+
+**Detection by map subtraction** (`detectMovingObstacles`). Each step the robot scans
+(360 beams over a full circle by default, range = sensing range, 2 cm noise in the
+experiments). Since the map is known, so is every beam's expected range.
+
+- **Foreign returns:** a return more than 10 cm shorter than expected hit something
+  the map does not contain.
+- **Clusters:** consecutive foreign returns closer than 0.3 m form a cluster.
+- **Merge:** clusters whose fitted discs overlap are merged (a wall in front of part of
+  an obstacle splits it).
+- **Minimum size:** clusters need at least 2 points, which drops single stray returns.
+- **Disc fit:** each cluster is fitted by Gauss–Newton to `|p − c| = R`. The robot sees
+  only the near side, so the centre lies behind the hits. The radius is fitted when 3+
+  points span 60°+ of the disc; otherwise it is the 0.3 m prior.
+- **Tested:** on 100 scans of the static map, map subtraction finds nothing. Discs are
+  located to 3 cm, with their radius to 3 cm.
+
+**Tracking** (`ObstacleTracker`). Each track is a constant-velocity Kalman filter
+(0.5 m/s² white acceleration). Each scan:
+
+| Step | Rule | Why (the failure that led to it) |
+|---|---|---|
+| Association | Greedy by Mahalanobis distance within a χ² gate (99.9 %), and 1 m. Confirmed tracks pick before tentative ones. | A stray one-point fragment at a disc's edge started a tentative track that stole the next detection, so the real track starved and never saw the reversal. |
+| Birth | Only from detections that do not overlap a confirmed track's disc. | Same: fragments of a tracked obstacle spawned duplicates. |
+| Two-point start | On a track's second detection, velocity = difference of the two positions, with its covariance. | Starting from velocity 0 ± 1 m/s, a 2 m/s obstacle's estimate pointed the wrong way for the first 0.3 s. |
+| Maneuvers | A normalized innovation above the 99 % gate (one scan), or the last three together above the 6-dof 99 % gate, resets the velocity uncertainty. | A slow obstacle turning round shifts each innovation only a little, but always the same way. |
+| Negative evidence | An undetected track is checked against the scan: if a beam passed through where its disc should be (and the map does not hide it there), that is a miss. 3 misses in a row delete it; a tentative track goes after 1. | – |
+| Coasting | If the disc is hidden (by a wall or another return) or out of range, the track keeps being predicted, with growing uncertainty, for up to 10 s. | The oracle forgot an obstacle the moment it went behind a wall. |
+
+**Predictions that survive reversals** (`predictPath`, item 7). Once a track has moved
+along a straight line (positions within 12 cm RMS of their principal axis), every
+reversal of its velocity along the axis records a turning point. The turning point is
+the farthest position reached before the reversal. The predictor then moves the
+obstacle along the axis and reflects it at the known ends; without a known end in the
+direction of travel it extrapolates. A turning point is learned only from a reversal
+the LiDAR actually watched, with detections less than 0.3 s apart through the turn. An
+obstacle that turns while hidden and reappears says nothing about where it turned;
+learning from it gave turning points far too short. Every predicted position carries
+its standard deviation. The look-ahead gate inflates the obstacle by 2σ (at most
+0.1 m); the planning map is not inflated.
+
+Prediction accuracy (`perception_experiment prediction`; a robot watching one obstacle
+patrol a random lane for 60 s, 300 lanes, after a 10 s warm-up):
+
+| | RMS error 1 s / 2 s ahead | 2 s ahead > 0.5 m off | When a reversal falls within the 2 s: RMS, > 0.5 m off |
+|---|---|---|---|
+| Constant velocity, 0.2–0.5 m/s | 0.48 / 0.87 m | 47 % | 0.98 m, 73 % |
+| **Learned reversals**, 0.2–0.5 m/s | **0.37 / 0.51 m** | **9 %** | **0.38 m, 7 %** |
+| Constant velocity, 0.6–1.0 m/s | 1.27 / 2.23 m | 86 % | 2.26 m, 96 % |
+| **Learned reversals**, 0.6–1.0 m/s | **0.93 / 1.17 m** | **17 %** | **0.97 m, 15 %** |
+
+**Decision rules changed along the way** (they apply to both perceptions):
+
+- **Choosing the retreat.** A robot inside a fast obstacle's predicted sweep used to
+  back up to its previous waypoint by rule, even when that waypoint lay in the middle
+  of the obstacle's lane. When backing up is itself predicted to end in contact, it now
+  heads for whichever end of its segment keeps the larger predicted gap. Over 1000
+  scenarios of the test generator this cut collisions from 26 to 23 (oracle) and from
+  28 to 7 (LiDAR). On blind junctions with 2 m/s cross traffic it took LiDAR tracking
+  from 64 % to 92 %.
+- **Soft margin.** An obstacle patrolling the lane next to the goal (0.23 m away) never
+  leaves; with the full 0.25 m margin the robot waited for it until the timeout. After
+  waiting out the patience (6 s), the gate accepts any contact-free motion.
+
+**Results** (`perception_experiment dynamic`, the obstacles map, start (1, 1), goal
+(18, 18), 3 obstacles on random lanes of 2–8 cells, 600 s limit; reversals = times the
+robot's direction of motion flips by more than 150°, i.e. shuttling):
+
+| 500 scenarios, 0.2–0.5 m/s | Reached | Collisions | Timeouts | Travel vs. oracle | Reversals per run |
+|---|---|---|---|---|---|
+| Point, blind | 64.0 % | 180 | 0 | – | – |
+| Point, oracle (original) | 97.2 % | 3 | 11 | – | 4.1 |
+| Point, LiDAR, constant velocity | 97.8 % | 5 | 6 | +5.7 s | 4.7 |
+| **Point, LiDAR, learned reversals** | **98.8 %** | **3** | **3** | +4.2 s | **2.0** |
+| Differential drive, oracle | 94.8 % | 6 | 20 | – | 5.4 |
+| Differential drive, LiDAR, constant velocity | 97.6 % | 8 | 4 | +4.5 s | 3.6 |
+| **Differential drive, LiDAR, learned reversals** | **98.6 %** | **3** | **4** | +2.3 s | **2.0** |
+
+| 300 scenarios, 0.6–1.0 m/s | Reached | Collisions | Timeouts | Reversals per run |
+|---|---|---|---|---|
+| Point, oracle | 85.7 % | 8 | 35 | 16.5 |
+| Point, LiDAR, constant velocity | 89.7 % | 7 | 24 | 12.6 |
+| **Point, LiDAR, learned reversals** | **94.7 %** | 8 | **8** | **5.1** |
+| Differential drive, oracle | 82.7 % | 9 | 43 | 14.3 |
+| **Differential drive, LiDAR, learned reversals** | **94.7 %** | **4** | **12** | **4.7** |
+
+- The robot that perceives obstacles through its own LiDAR does better than the one
+  handed their true positions. That is because tracks remember (coasting) and predict
+  reversals, not because they are more precise. Learned reversals cut the shuttling by
+  a factor of 2–3 and, with fast obstacles, the timeouts by a factor of 4.
+- **Ablations:** without uncertainty inflation, collisions rise from 3 to 5–6 at
+  normal speeds. Without coasting, collisions rise from 3 to 5–6 at normal speeds and
+  from 8 to 10 with fast obstacles.
+- **Cost:** about 0.13 ms per step with 360 beams (two ray casts per beam, detection,
+  tracking). Travel is 2–4 s longer than with the oracle, because tracks keep blocking
+  where an obstacle may still be.
+
+**Occluded space (item 8).** Two kinds of hidden obstacle:
+
+1. **Seen, then hidden:** coasting keeps the obstacle, as above. This is the measured
+   gain.
+2. **Never seen** (`--occlusion-aware`): free space hidden behind walls may hold an
+   obstacle moving at up to 1 m/s. Before each step the robot looks from where the
+   step would take it, and holds if something emerging from the space still hidden
+   from there could reach it within 0.5 s. It creeps round blind corners, seeing more
+   with every step. Space beyond the sensing range does not count, since obstacles
+   coming from there are seen in time. After the patience it commits for 1.5 m.
+
+   It was measured on blind junctions (`perception_experiment junction`): a corridor
+   crossed by three side corridors that walls hide until the robot is at the crossing,
+   with cross traffic on long lanes:
+
+   | 200 runs | Cross traffic 0.6–1.2 m/s: reached / collisions | 1.5–2.5 m/s |
+   |---|---|---|
+   | Oracle | 100 % / 0 | 100 % / 0 |
+   | LiDAR tracking | 100 % / 0 (diff-drive 99 % / 2) | 92 % / 16 |
+   | + occlusion-aware | 70 % / 24, 37 timeouts | 0.5 % / 3, 196 timeouts |
+
+   It is off by default because it makes things worse. No collision in any benchmark
+   involved an obstacle in view for less than a second ("seen < 1 s" stays 0): the
+   robot already sees down a side corridor before it enters it. Holding at a blind
+   corner often means holding where cross traffic passes, and waiting gains no
+   information, because what is hidden stays hidden. The remaining junction collisions
+   at 2 m/s (8 %) come from obstacles faster than 3 m of sensing range allows to
+   react to (the oracle avoids them only through its zero latency). They need longer
+   range or speed limits, not occlusion reasoning.
+
+**Limitations.**
+
+- Learned turning points assume straight patrol lanes. Routes with corners fall back
+  to constant velocity.
+- Obstacles are discs. Two obstacles closer than the cluster distance are one cluster.
+- The LiDAR used for obstacles is separate from the EKF's (section 13), which still
+  sees only the static map, and the robot is still steered by its true pose.
 
 ## Limitations
 
