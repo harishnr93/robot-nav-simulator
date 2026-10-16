@@ -15,7 +15,10 @@
 
 #include "astar.hpp"
 #include "csv_writer.hpp"
+#include "closed_loop.hpp"
 #include "ekf.hpp"
+#include "localization_planning.hpp"
+#include "particle_filter.hpp"
 #include "footprint.hpp"
 #include "lidar.hpp"
 #include "grid_map.hpp"
@@ -57,6 +60,10 @@ struct CliOptions {
     bool reference_bfs = false;
     amr::Connectivity connectivity = amr::Connectivity::Four;
     bool show_help = false;
+    double localization_weight = -1.0;  ///< --plan-for-localization (< 0: shortest path)
+    bool steer_by_estimate = false;     ///< --steer-by-estimate
+    double safety_margin = 0.0;         ///< --safety-margin (extra inflation), m
+    bool particle_filter = false;       ///< --particle-filter
 };
 
 /// Result of the optional optimality check against the reference BFS.
@@ -142,6 +149,15 @@ void printUsage(std::ostream& os) {
           "  --output DIR          Output directory (default results/)\n"
           "  --connectivity 4|8    Grid moves: 4 = straight only (default), 8 = also\n"
           "                        diagonal (cost sqrt(2), no cutting obstacle corners)\n"
+          "  --plan-for-localization W  Prefer routes where the LiDAR localizes well: each\n"
+          "                        step costs its length x (1 + W x penalty), the penalty\n"
+          "                        growing with the cell's position uncertainty after one\n"
+          "                        scan (needs --connectivity 8; 0 = shortest path)\n"
+          "  --safety-margin M     Extra inflation beyond the robot radius for planning, m\n"
+          "  --steer-by-estimate   Drive by the EKF estimate instead of the true pose\n"
+          "                        (needs --ekf; not with --dynamic-obstacles)\n"
+          "  --particle-filter     Also localize globally with a particle filter (no prior\n"
+          "                        knowledge of the start) and report when it found the robot\n"
           "  --reference-bfs       Also run the reference search (BFS for 4-connected,\n"
           "                        exact Dijkstra for 8-connected) and check A* optimality\n"
           "  -h, --help            Show this help and exit\n"
@@ -315,6 +331,22 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
                     ok = false;
                 }
             }
+        } else if (arg == "--plan-for-localization") {
+            ok = parseNumber(options.localization_weight);
+            if (ok && options.localization_weight < 0.0) {
+                error = "--plan-for-localization must be a non-negative weight";
+                ok = false;
+            }
+        } else if (arg == "--safety-margin") {
+            ok = parseNumber(options.safety_margin);
+            if (ok && (options.safety_margin < 0.0 || options.safety_margin > amr::kMaxRobotRadius)) {
+                error = "--safety-margin must be between 0 and 100 m";
+                ok = false;
+            }
+        } else if (arg == "--steer-by-estimate") {
+            options.steer_by_estimate = true;
+        } else if (arg == "--particle-filter") {
+            options.particle_filter = true;
         } else if (arg == "--obstacle-perception") {
             ok = requireValues(1);
             if (ok) {
@@ -447,6 +479,15 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
         } else if (options.ekf.enabled && options.motion.model != amr::RobotModel::DiffDrive) {
             error = "--ekf requires --robot-model diff-drive (the odometry measures turns "
                     "and distances driven)";
+        } else if (options.localization_weight >= 0.0 && options.connectivity != amr::Connectivity::Eight) {
+            error = "--plan-for-localization requires --connectivity 8";
+        } else if (options.steer_by_estimate && !options.ekf.enabled) {
+            error = "--steer-by-estimate requires --ekf (it drives by the EKF estimate)";
+        } else if (options.steer_by_estimate && !options.dynamic_file.empty()) {
+            error = "--steer-by-estimate does not support --dynamic-obstacles";
+        } else if (options.particle_filter &&
+                   (!options.lidar.enabled() || options.motion.model != amr::RobotModel::DiffDrive)) {
+            error = "--particle-filter requires --lidar-beams and --robot-model diff-drive";
         }
     }
     if (!error.empty()) {
@@ -751,10 +792,22 @@ int main(int argc, char** argv) {
 
     // Plan on the inflated map (identical to `map` for a point robot). Inflation is
     // timed separately and is not part of the planning time.
-    const Inflation inflation = inflate(map, options.motion.robot_radius);
-    const amr::PlanResult plan =
-        amr::planWithFootprint(map, inflation.planning_map, options.start, options.goal,
-                               options.connectivity);
+    const Inflation inflation = inflate(map, options.motion.robot_radius + options.safety_margin);
+    amr::PlanResult plan;
+    if (options.localization_weight >= 0.0) {
+        // Localization-aware planning: the localizability of every cell for this LiDAR.
+        amr::LocalizabilityConfig lc;
+        lc.beams = options.lidar.enabled() ? options.lidar.beams : 72;
+        lc.max_range = options.lidar.max_range;
+        lc.range_sigma = options.ekf.range_sigma;
+        amr::LocalizationPlanConfig pc;
+        pc.weight = options.localization_weight;
+        plan = amr::planForLocalization(inflation.planning_map, options.start, options.goal,
+                                        amr::computeLocalizability(map, lc), pc);
+    } else {
+        plan = amr::planWithFootprint(map, inflation.planning_map, options.start, options.goal,
+                                      options.connectivity);
+    }
     // The BFS check runs after planning, on the same planning map.
     const ReferenceCheck reference = options.reference_bfs
                                          ? checkAgainstBfs(inflation.planning_map, options, plan)
@@ -777,17 +830,37 @@ int main(int argc, char** argv) {
     }
     const amr::DynamicScenario* scenario = dynamic ? &*dynamic : nullptr;
     amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed
-    if (plan.success()) {
+    std::vector<amr::LocalizationSample> closed_loop_localization;
+    if (plan.success() && options.steer_by_estimate) {
+        // Closed loop: the controller only knows the EKF estimate.
+        amr::ClosedLoopConfig config;
+        config.motion = options.motion;
+        config.lidar = options.lidar;
+        config.ekf = options.ekf;
+        amr::ClosedLoopResult loop = amr::simulateWithEstimate(map, plan.path, config, options.connectivity);
+        sim.status = loop.status;
+        sim.trajectory = std::move(loop.trajectory);
+        sim.steps = sim.trajectory.empty() ? 0 : sim.trajectory.size() - 1;
+        sim.collision_count = loop.status == amr::NavigationStatus::Collision ? 1 : 0;
+        for (std::size_t k = 1; k < sim.trajectory.size(); ++k) {
+            sim.distance_traveled += std::hypot(sim.trajectory[k].state.x - sim.trajectory[k - 1].state.x,
+                                                sim.trajectory[k].state.y - sim.trajectory[k - 1].state.y);
+        }
+        sim.final_goal_error = loop.final_goal_error;
+        closed_loop_localization = std::move(loop.localization);
+    } else if (plan.success()) {
         sim = amr::simulatePath(map, plan.path, options.motion, options.connectivity, scenario);
     }
     // The LiDAR observes the real map from every trajectory sample; it does not
-    // influence the motion.
+    // influence the motion (except through the estimate, with --steer-by-estimate).
     const std::vector<amr::LidarScan> scans =
         amr::scanTrajectory(map, sim.trajectory, options.lidar);
     // The EKF runs alongside as well: it estimates the pose from noisy odometry and
-    // the scans, but the robot is controlled with its true pose.
+    // the scans, but the robot is controlled with its true pose (unless it steers by
+    // the estimate, then that run's estimates are reported).
     const std::vector<amr::LocalizationSample> localization =
-        amr::runLocalization(map, sim.trajectory, scans, options.lidar, options.ekf);
+        options.steer_by_estimate ? closed_loop_localization
+                                  : amr::runLocalization(map, sim.trajectory, scans, options.lidar, options.ekf);
 
     std::error_code ec;
     std::filesystem::create_directories(options.output_dir, ec);
@@ -803,6 +876,41 @@ int main(int argc, char** argv) {
     }
 
     printSummary(options, map, inflation, plan, reference, sim, scans, localization, scenario);
+    if (options.particle_filter && !sim.trajectory.empty()) {
+        // Global localization: the particle filter starts knowing nothing.
+        amr::ParticleFilterConfig pf;
+        pf.seed = options.ekf.odometry.seed;
+        const auto samples = amr::runParticleFilter(map, sim.trajectory, scans, options.lidar,
+                                                    options.ekf.odometry, pf, true);
+        double found = -1.0, sq = 0.0, n = 0.0;
+        for (const auto& s : samples) {
+            const double e = std::hypot(s.truth.x - s.estimate.pose.x, s.truth.y - s.estimate.pose.y);
+            if (e < 0.3) {
+                if (found < 0.0) {
+                    found = s.time;
+                }
+            } else {
+                found = -1.0;
+            }
+        }
+        for (const auto& s : samples) {
+            if (found >= 0.0 && s.time >= found) {
+                sq += std::pow(s.truth.x - s.estimate.pose.x, 2) + std::pow(s.truth.y - s.estimate.pose.y, 2);
+                n += 1.0;
+            }
+        }
+        std::cout << "Particle filter: ";
+        if (found >= 0.0) {
+            std::cout << "found the robot after " << std::setprecision(1) << found << " s (global start), "
+                      << "position error RMS " << std::setprecision(3) << std::sqrt(sq / n) << " m after; "
+                      << samples.back().particles << " particles, "
+                      << std::setprecision(0) << 100.0 * samples.back().estimate.share << " % on the estimate\n";
+        } else {
+            std::cout << "did not settle on the robot (the map may have several matching places: "
+                      << std::setprecision(0) << 100.0 * samples.back().estimate.share
+                      << " % on the best one)\n";
+        }
+    }
     if (!reference.agrees) {
         std::cerr << "Error: A* result disagrees with the reference BFS\n";
         return kExitReferenceMismatch;

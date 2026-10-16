@@ -664,7 +664,8 @@ std::vector<LocalizationSample> runLocalization(const GridMap& map,
                                                 const std::vector<TrajectorySample>& trajectory,
                                                 const std::vector<LidarScan>& scans,
                                                 const LidarConfig& lidar,
-                                                const EkfConfig& config) {
+                                                const EkfConfig& config,
+                                                const std::vector<bool>& kidnapped) {
     std::vector<LocalizationSample> samples;
     if (!config.enabled || trajectory.empty()) {
         return samples;
@@ -711,8 +712,10 @@ std::vector<LocalizationSample> runLocalization(const GridMap& map,
             const std::array<double, 2> var = odometryVariances(commanded, config.odometry);
             const double distance_noise = std::sqrt(var[0]) * unit(rng);
             const double rotation_noise = std::sqrt(var[1]) * unit(rng);
-            const OdometryIncrement measured{truth.distance + distance_noise,
-                                             truth.rotation + rotation_noise};
+            const bool jump = k < kidnapped.size() && kidnapped[k];
+            const OdometryIncrement measured =
+                jump ? OdometryIncrement{0.0, 0.0}
+                     : OdometryIncrement{truth.distance + distance_noise, truth.rotation + rotation_noise};
             odometry = applyIncrement(odometry, measured);
             if (classic) {
                 ekf.predict(measured, var);

@@ -300,12 +300,15 @@ struct LocalizationSample {
 };
 
 /// Run the filter along a trajectory. `scans` must be empty (prediction only) or
-/// hold one scan per trajectory sample, taken with `lidar`.
+/// hold one scan per trajectory sample, taken with `lidar`. `kidnapped[k]` true:
+/// between samples k - 1 and k the robot was carried away (the odometry reports no
+/// motion, the noise sequence is unchanged).
 std::vector<LocalizationSample> runLocalization(const GridMap& map,
                                                 const std::vector<TrajectorySample>& trajectory,
                                                 const std::vector<LidarScan>& scans,
                                                 const LidarConfig& lidar,
-                                                const EkfConfig& config);
+                                                const EkfConfig& config,
+                                                const std::vector<bool>& kidnapped = {});
 
 /// Error statistics of one pose source against the truth.
 struct PoseErrorStats {

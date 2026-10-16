@@ -38,6 +38,7 @@ values are compared with explicit tolerances.
 | `test_lidar` | simulated LiDAR: exact ray casting, beam layout, noise, scans along a trajectory |
 | `test_ekf` | EKF localization: odometry model, Jacobians, Kalman update, gate, convergence, NEES consistency |
 | `test_correlated_errors` | correlated range errors: LiDAR bias process, augmented EKF (bias and wall states), wall-line surface, grazing-beam model |
+| `test_localization` | particle filter (global start, kidnapping, matching places), localizability, localization-aware planning, steering by the estimate |
 | `test_obstacle_tracking` | moving obstacles from the LiDAR alone: map subtraction, disc fitting, fragment merging, tracking through reversals, learned turning points, two-point start, negative evidence and coasting, LiDAR perception in the simulator, occlusion awareness |
 | `test_dynamic` | moving obstacles and replanning: motion model, exact contact, loading, visibility, waiting, detours, retreats, invariants |
 | `test_ghost_cells` | minimum ghost cells: covers vs. inflation, exact solver vs. brute force (count, every optimal set, weighted), overlapping footprints, statuses |
@@ -155,6 +156,23 @@ because the process noise was evaluated at the measured increments. See
 identical output files and console summaries on 400 random maps (about half with the
 LiDAR on, which also covers the ray caster's new hit-face output), and the Python
 figures and GIFs of three scenarios are byte-identical.
+
+## Localization tests (`test_localization.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Global localization | from 50 000 particles over the whole obstacles map: within 15 cm of the truth after 1 s and to the end, under 3 cm RMS, more than 90 % of the weight on the estimate, at most 2000 particles once converged, no global restart, deterministic |
+| Kidnapped robot | carried from the top corridor to the far corner with no odometry: the recovering filter is within 15 cm again 3 s later and stays; without recovery, and the EKF, end more than 1 m off |
+| Symmetric room | 4 runs on the point-symmetric room from a global start: all weight on the true place and its mirror, the true place never dropped, mean final weight on it between 0.2 and 0.8 (measured 0.61) |
+| One difference decides | twin rooms that differ by one block: 3 runs end at the true place |
+| Localizability | a hall corner pins the position below 5 cm, its blind middle leaves more than 5 m, walls are infinite; more range never makes a cell worse |
+| Localization-aware planning | weight 0 gives exactly the 8-connected shortest path; weight 1 cuts the blind distance to under a quarter (measured 12.4 m to 0) for a longer path; the penalty formula |
+| Steering by the estimate | exact odometry follows the plan to the goal (error under 1 cm); the LiDAR EKF reaches the goal within 8 cm; dead reckoning ends more than 20 cm off or collides; a collision ends at contact |
+
+Also in CTest: the CLI's `--particle-filter` finds the robot on the first scan;
+`--steer-by-estimate` with `--plan-for-localization 1` reaches the goal in the hall
+with no safety margin (the shortest route collides); `--plan-for-localization`
+requires `--connectivity 8`.
 
 ## Moving-obstacle perception tests (`test_obstacle_tracking.cpp`)
 

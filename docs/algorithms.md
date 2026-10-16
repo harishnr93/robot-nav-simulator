@@ -1577,6 +1577,186 @@ robot's direction of motion flips by more than 150°, i.e. shuttling):
 - The LiDAR used for obstacles is separate from the EKF's (section 13), which still
   sees only the static map, and the robot is still steered by its true pose.
 
+## 19. Global localization, matching places, planning for localization, steering by the estimate (`localization_experiment`)
+
+The EKF of section 13 tracks a pose it already roughly knows, and it only observes: the
+robot is steered by its true pose. This section adds four things:
+
+- **Item 9:** finding the robot from scratch, including after it is carried away.
+- **Item 10:** what happens when several places look the same.
+- **Item 11:** choosing routes where localization stays good.
+- **Item 12:** steering by the estimate.
+
+### Particle filter (`particle_filter.hpp`, `--particle-filter`)
+
+Monte Carlo localization uses the existing ray caster as its sensor model. A particle
+is a pose. The motion update applies the measured odometry with the error model of
+section 13, inflated 1.5×. The measurement update scores 36 of the scan's beams with
+the classic mixture: a Gaussian around the expected range, plus uniform random
+readings, plus readings at maximum range. The log-likelihood is divided by 10,
+because a scan's beams are not independent (section 17).
+
+What it took for the filter to work reliably, each step found by a failing measurement:
+
+| Problem measured | Cause | Fix |
+|---|---|---|
+| Global start found the robot in 60 % of runs, after a median 9 s | 5000 particles over 80 m² and 360° average 0.15 per 30 cm × 10° cell; often none starts near the truth | 50 000 particles for the first scan, then KLD-sampling (1 % error) brings them down to a few hundred |
+| Converged estimate 6–8 cm off | A likelihood wide enough for the global search | Annealing: the width follows the particles' spread, from 0.3 m while they are spread out down to 0.05 m once they agree |
+| On a symmetric map the true place died out in half the runs within 4 scans | Coarse clouds: a place's few particles with nearly the right heading decide its score, and resampling starves the loser | Places (connected 0.5 m × 0.5 m × 30° cells) resampled on their own, keeping their weight (a mixture particle filter); each scan first refines coarse places on their own (annealing layers at 0.6, 0.3 and 0.15 m), so places are compared on their best fit; one common likelihood width for all places |
+| Kidnap recovery took a median 9 s, p90 24 s | A few thousand random particles are too sparse to land near the new pose | When the scans fit less than half as well as before, restart global localization |
+| Recovery tail grew to 14 s, and runs took 4× longer | A feedback loop: injected particles kept their parent's weight, held the fit statistic down, and so kept injection going | Kidnap statistic = the best place's fit at the sharp width; injected particles enter with negligible weight; inject only below 90 % of the long-term fit; refine only coarse places |
+
+Results on the obstacles map, routes of 8+ m, 2 cm range noise:
+
+| | Found | Time to find (median / p90) | RMS after | Particles after |
+|---|---|---|---|---|
+| Global, 72 beams, 5 m (50 runs) | 100 % | 0.0 / 0.0 s | 1.0 cm | ~900 |
+| Global, 36 beams, 3 m, 5 cm noise (50 runs) | 100 % | 0.0 / 7.0 s | 1.3 cm | ~960 |
+
+| Kidnapped: carried 3+ m, odometry reports nothing (50 runs) | Recovered | Median / p90 | False restarts before the kidnapping |
+|---|---|---|---|
+| **Particle filter with recovery** | **100 %** | **1.2 / 1.7 s** | 0 |
+| Particle filter without recovery | 4 % | 28 s | 0 |
+| EKF | 0 % | – | 0 |
+
+The filter costs about 10 ms per scan (36 beams × ~900 particles), against 0.04 ms for
+the EKF. The two complement each other: the particle filter finds and re-finds the
+robot, and the EKF tracks it precisely and cheaply (0.3 cm RMS against the particle
+filter's 1 cm).
+
+### Matching places (item 10)
+
+The test maps are:
+
+- **twin rooms** (identical rooms 8.5 m apart), the same with one block of difference,
+  and the same furnished differently;
+- **a room symmetric under a half turn**;
+- **a corridor with pillars every 2 m**, and the same with irregular pillars.
+
+**EKF.** It starts from the true pose plus an error drawn from its own prior (the
+covariance it is given), with heading std 0.1 rad, 40 routes per row. The result is
+counted as wrong place when it ends within 0.3 m and 10° of a matching place:
+
+| Prior std | Pillars every 2 m: correct / **wrong place** / lost | Irregular pillars | Twin rooms (8.5 m) |
+|---|---|---|---|
+| 0.25 m | 90 / **0** / 10 % | 95 / 0 / 5 % | 100 / 0 / 0 % |
+| 0.5 m | 73 / **5** / 23 % | 85 / 0 / 15 % | 90 / 0 / 10 % |
+| 1 m | 45 / **18** / 38 % | 50 / 0 / 50 % | 53 / 0 / 48 % |
+| 1.5 m | 23 / **18** / 60 % | 28 / 5 / 68 % | 18 / 0 / 83 % |
+| 2 m | 18 / **18** / 65 % | 18 / 3 / 80 % | 23 / 0 / 78 % |
+
+- The EKF locks onto the nearest place that fits. With matching places 2 m apart, a
+  prior uncertainty of half that spacing or more sends 18 % of the runs to the wrong
+  pillar, against 0–5 % with irregular pillars.
+- When wrong, it claims 1–10 cm of uncertainty: confidently wrong, with nothing in its
+  covariance to show it.
+- Matching places 8.5 m apart are never reached. The EKF gets lost locally first, just
+  as often as in the differently furnished rooms.
+
+**Particle filter**, global start, 40 runs:
+
+| Map | Ends at the true place | At the matching place | True place ever dropped | Final weight on the true place |
+|---|---|---|---|---|
+| Twin rooms (identical) | 48 % | 53 % | 0 | 54 % |
+| Twin rooms, one block of difference | **100 %** | 0 % | 0 | 100 % |
+| Half-turn symmetric room | 53 % | 48 % | 0 | 52 % |
+
+- Where nothing distinguishes the places, the filter cannot know, and says so: half its
+  weight stays on each, in every run.
+- One difference anywhere in view decides it.
+- Before the mixture resampling and the place refinement, the true place was dropped
+  in 16–20 of 40 runs, and one block of difference decided only 55 % of them.
+
+### Planning for good localization (item 11; `localization_planning.hpp`, `--plan-for-localization W`)
+
+`computeLocalizability` scores each free cell by the scan the robot would take there:
+the information of all beams (exact range Jacobians, section 13), with the heading
+eliminated (Schur complement). The score is the position std in the worst direction.
+It is millimetres next to corners, large along featureless walls, and about 10 m (the
+prior) where nothing is in range. The planner is A* with step cost
+`length × (1 + W × penalty)`, where `penalty = clamp(log2(u / 5 cm), 0, 4)`. With
+W = 0 it gives exactly the shortest path (tested); the octile heuristic stays
+admissible.
+
+Results on the hall (22 m × 15 m, a 3 m LiDAR sees nothing in its middle), 60
+start–goal pairs of 10+ m, EKF along each route:
+
+| W | Path length | Blind distance (u > 0.5 m) | Worst error (mean / p90) | Runs worse than 0.5 m |
+|---|---|---|---|---|
+| 0 (shortest) | 14.9 m | 6.4 m | 27 / 61 cm | 13.3 % |
+| 0.25 | 16.2 m | 1.1 m | 16 / 16 cm | 3.3 % |
+| **0.5** | **17.4 m (+17 %)** | **0.3 m** | **4.6 / 8.5 cm** | **0 %** |
+| 1 | 17.5 m | 0.3 m | 4.6 / 8.5 cm | 0 % |
+| 4 | 17.9 m | 0.2 m | 4.4 / 7.8 cm | 0 % |
+
+17 % more path cuts the worst localization error six-fold and removes the failures.
+Beyond W = 0.5 there is little left to gain.
+
+### Steering by the estimate (item 12; `closed_loop.hpp`, `--steer-by-estimate`, `--safety-margin`)
+
+The controller knows only the EKF estimate:
+
+- **Control:** it turns towards the next waypoint as the estimate sees it, then drives
+  with small heading corrections.
+- **Truth:** the true robot moves exactly as commanded.
+- **Sensing:** odometry and the LiDAR measure the true motion and pose.
+- **Collisions:** the true disc is checked against the map.
+
+The planner inflates obstacles by robot radius + margin. Results on the obstacles map
+at 0.1 m cells (so that centimetre margins are not lost to the inflation's
+quantization), robot radius 0.2 m, 60 routes:
+
+| Localization | Max true error | Collisions at margin 0 / 5 cm / 10 cm / 30 cm |
+|---|---|---|
+| True pose (exact odometry) | 0.4 cm | 0 / 0 / 0 / 0 % |
+| EKF, 72 beams, 5 m | 1.9 cm | 0 / 0 / 0 / 0 % |
+| EKF, 18 beams, 2 m | 13 cm | **8.3 / 1.7 / 0 / 0 %** |
+| EKF, 18 beams, 2 m, odometry 3× worse | 37–42 cm | 5 / 0 / 0 / 0 % |
+| Dead reckoning (no LiDAR) | 40–59 cm | 63 / 62 / 50 / 55 % |
+
+- With the estimate steering, a path planned with exactly the robot's radius has no
+  slack: the hall's pillars are spaced so that a 0.03 mm deviation touches one (the
+  CLI demo below). The margin is what the localization error may use up.
+- While the LiDAR keeps the error bounded, a margin of about the error's size removes
+  the collisions: 10 cm for 13 cm of error. The error is mostly along the path, which
+  the margin does not need to cover.
+- Dead reckoning's error grows without bound, and no fixed margin helps (50–63 %).
+- **A covariance-aware hold** (`safety_sigmas`) does not help either. Holding when the
+  estimate's 3σ disc touches an obstacle, for up to 3 s, then committing for 1 m, gave
+  10 % collisions instead of 5 % with the poor LiDAR, and no gain for dead reckoning.
+  Most of the error is odometry drift accumulated while driving, and standing still
+  does not remove it. It stays an option, off by default.
+
+**Items 11 and 12 together** (the hall, 72 beams with 5 m range, 40 routes):
+
+| Route | Max true error | Collisions (margins 0–20 cm) |
+|---|---|---|
+| Shortest (across the blind middle) | 6.6–12.6 cm | 0–2.5 % |
+| Localization-aware (W = 1) | 2.4–5.6 cm | 0 % |
+
+The CLI shows it on one route (`--start 6 8 --goal 38 22`, 3 m range):
+
+- **Shortest route, no margin:** it collides after a 16 cm error.
+- **Shortest route, 10 cm margin:** it reaches the goal.
+- **Localization-aware route, no margin:** it reaches the goal, its error never above
+  6 cm.
+
+With a weak LiDAR (18 beams, 2 m) no route in that hall keeps the error small (about
+60 cm on either). Localization-aware routes then run along walls, with less clearance
+(24 cm against 80 cm), for no safety gain: route choice can only use what the sensor
+can see.
+
+**Limitations.**
+
+- The particle filter costs about 250× the EKF per scan. Run it to find the robot, and
+  the EKF to track it.
+- Localizability is evaluated per cell, from one scan. It ignores how long the robot
+  stays in poorly observable places (only distance through them is charged) and how
+  heading error builds up.
+- Steering assumes no actuation error (the robot does exactly what it is commanded) and
+  an EKF motion model of "turn, then drive". With heading corrections while driving,
+  that model is slightly wrong: 0.4 cm of error even with exact odometry.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at

@@ -12,6 +12,9 @@ set(AMR_CORE_SOURCES
     src/lidar.cpp
     src/ekf.cpp
     src/surface_model.cpp
+    src/particle_filter.cpp
+    src/localization_planning.cpp
+    src/closed_loop.cpp
     src/dynamic_obstacles.cpp
     src/obstacle_tracking.cpp
     src/ghost_cells.cpp

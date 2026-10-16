@@ -51,6 +51,11 @@ add_executable(perception_experiment src/perception_experiment.cpp)
 target_link_libraries(perception_experiment PRIVATE amr_core)
 target_compile_options(perception_experiment PRIVATE ${AMR_WARNING_FLAGS})
 
+# Localization experiments (run with: ./build/localization_experiment global|kidnap|...)
+add_executable(localization_experiment src/localization_experiment.cpp)
+target_link_libraries(localization_experiment PRIVATE amr_core)
+target_compile_options(localization_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
 # "Why NO_PATH?" experiments (run with: ./build/ghost_experiment recovery|scaling)
 add_executable(ghost_experiment src/ghost_experiment.cpp)
 target_link_libraries(ghost_experiment PRIVATE amr_core)
@@ -72,7 +77,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_dynamic test_ghost_cells test_ghost_perception test_alignment)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_localization test_dynamic test_ghost_cells test_ghost_perception test_alignment)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -228,6 +233,26 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 2 2 --robot-model diff-drive --ekf --ekf-range-sigma 0)
     set_tests_properties(cli_rejects_bad_ekf_settings PROPERTIES
         PASS_REGULAR_EXPRESSION "invalid EKF parameters: EKF range sigma")
+
+    add_test(NAME cli_particle_filter_global
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --lidar-beams 72 --ekf
+                --particle-filter --output ${CLI_OUT}/particle_filter)
+    set_tests_properties(cli_particle_filter_global PROPERTIES
+        PASS_REGULAR_EXPRESSION "Particle filter: found the robot after 0.0 s")
+
+    add_test(NAME cli_steer_by_estimate_with_localization_planning
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/hall.csv
+                --start 6 8 --goal 38 22 --robot-model diff-drive --robot-radius 0.25
+                --lidar-beams 72 --lidar-range 3 --ekf --connectivity 8
+                --plan-for-localization 1 --steer-by-estimate --output ${CLI_OUT}/steering)
+    set_tests_properties(cli_steer_by_estimate_with_localization_planning PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED")
+
+    add_test(NAME cli_plan_for_localization_requires_8
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/hall.csv
+                --start 6 8 --goal 38 22 --plan-for-localization 1)
+    set_tests_properties(cli_plan_for_localization_requires_8 PROPERTIES WILL_FAIL TRUE)
 
     add_test(NAME cli_dynamic_replanning
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv

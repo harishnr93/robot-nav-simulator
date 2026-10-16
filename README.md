@@ -179,7 +179,7 @@ also comes as one image, so nothing but Docker is needed on the host:
 
 ```bash
 docker compose build
-docker compose run --rm test     # all tests: 52 CTest entries + 21 ROS 2 tests
+docker compose run --rm test     # all tests: 56 CTest entries + 21 ROS 2 tests
 docker compose run --rm demo     # results, figures and navigation.gif in ./results
 docker compose up sim            # ROS 2 nodes + RViz2 (WSLg or a Linux X11 desktop)
 docker compose up headless       # ROS 2 nodes only
@@ -335,6 +335,10 @@ Its exit code is the simulator's (for example `4` when there is no path).
 | `maps/corridor.csv` | `1 1` → `18 18` |
 | `maps/maze.csv` | `1 1` → `19 19` |
 | `maps/obstacles_fine.csv` | `20 2` → `20 37` with `--resolution 0.25` (footprint demo) |
+| `maps/hall.csv` | `6 8` → `38 22` (a hall whose middle a 3 m LiDAR cannot see; localization-aware planning) |
+| `maps/twin_rooms.csv`, `twin_rooms_marked.csv`, `twin_rooms_different.csv` | two identical rooms; one block apart; furnished differently (matching places) |
+| `maps/point_symmetric.csv` | a room that looks the same after a half turn |
+| `maps/pillar_corridor.csv`, `pillar_corridor_irregular.csv` | pillars every 2 m (matching places 2 m apart); irregular pillars |
 
 The first four maps have one-cell (0.5 m) gaps and are meant for a point robot. Use
 `maps/obstacles_fine.csv` for a robot footprint: it has the same layout at 0.25 m cells.
@@ -442,6 +446,37 @@ state:
 
 Measurements, method and limits:
 [docs/algorithms.md](docs/algorithms.md#17-correlated-range-errors-sub-cell-walls-and-grazing-beams-perception_experiment).
+
+### Global localization, matching places, localization-aware planning, steering by the estimate
+
+```bash
+# Find the robot from scratch (and again after it is carried away) with a particle filter.
+./build/robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18 --robot-model diff-drive \
+    --lidar-beams 72 --ekf --particle-filter
+# Prefer routes the LiDAR can localize on, and drive by the estimate instead of the truth.
+./build/robot_simulator --map maps/hall.csv --start 6 8 --goal 38 22 --robot-model diff-drive \
+    --robot-radius 0.25 --lidar-beams 72 --lidar-range 3 --ekf --connectivity 8 \
+    --plan-for-localization 1 --steer-by-estimate
+```
+
+- **Particle filter:**
+  - finds the robot from no prior knowledge in 100 % of runs, usually on the first scan;
+  - recovers a kidnapped robot in a median 1.2 s (p90 1.7 s), where the EKF never does;
+  - on a map with two identical places, keeps both at about 50/50 instead of picking
+    one, and decides correctly once anything differs.
+- **The EKF on a corridor with pillars every 2 m** locks onto the wrong pillar in 18 %
+  of runs once its prior is uncertain by 1 m, and claims centimetres of uncertainty
+  while doing so.
+- **Localization-aware routes** (`--plan-for-localization`) in a hall whose middle the
+  3 m LiDAR cannot see: 17 % longer, with the worst localization error 27 → 4.6 cm and
+  runs worse than 0.5 m 13 % → 0.
+- **Steering by the estimate** (`--steer-by-estimate`, `--safety-margin`): a path
+  planned with exactly the robot's radius has no slack once the estimate steers. While
+  the LiDAR bounds the error, a margin about the error's size removes collisions (13 cm
+  of error: 8.3 % collisions at 0, none at 10 cm). With dead reckoning, no margin is
+  enough.
+
+Details: [docs/algorithms.md](docs/algorithms.md#19-global-localization-matching-places-planning-for-localization-steering-by-the-estimate-localization_experiment).
 
 ### Dynamic obstacles and replanning
 
@@ -867,7 +902,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 52 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 56 CTest entries: C++ suites, CLI checks, Python suite
 ```
 
 The ROS 2 package has 21 more tests (frame conversions, missions against the
