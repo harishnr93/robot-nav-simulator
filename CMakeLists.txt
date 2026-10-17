@@ -56,6 +56,12 @@ add_executable(localization_experiment src/localization_experiment.cpp)
 target_link_libraries(localization_experiment PRIVATE amr_core)
 target_compile_options(localization_experiment PRIVATE ${AMR_WARNING_FLAGS})
 
+# Planning with moving obstacles (run with: ./build/planning_experiment turns|spacetime|margins|robots)
+find_package(Threads REQUIRED)
+add_executable(planning_experiment src/planning_experiment.cpp)
+target_link_libraries(planning_experiment PRIVATE amr_core Threads::Threads)
+target_compile_options(planning_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
 # "Why NO_PATH?" experiments (run with: ./build/ghost_experiment recovery|scaling)
 add_executable(ghost_experiment src/ghost_experiment.cpp)
 target_link_libraries(ghost_experiment PRIVATE amr_core)
@@ -77,7 +83,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_localization test_dynamic test_ghost_cells test_ghost_perception test_alignment)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_localization test_dynamic test_ghost_cells test_ghost_perception test_alignment test_planning)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -260,7 +266,7 @@ if(AMR_BUILD_TESTS)
                 --dynamic-obstacles ${PROJECT_SOURCE_DIR}/maps/obstacles_dynamic.csv
                 --output ${CLI_OUT}/dynamic)
     set_tests_properties(cli_dynamic_replanning PROPERTIES
-        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Dynamic: +3 moving obstacle\\(s\\), sensing range 3.00 m. 12 replan\\(s\\)")
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Dynamic: +3 moving obstacle\\(s\\), sensing range 3.00 m. 2 replan\\(s\\)")
 
     add_test(NAME cli_rejects_bad_dynamic_obstacles
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
@@ -268,6 +274,45 @@ if(AMR_BUILD_TESTS)
                 --dynamic-obstacles ${PROJECT_SOURCE_DIR}/tests/data/bad_dynamic_obstacles.csv)
     set_tests_properties(cli_rejects_bad_dynamic_obstacles PROPERTIES
         PASS_REGULAR_EXPRESSION "line 2: route segment 0-1 crosses a static obstacle")
+
+    add_test(NAME cli_dynamic_spacetime
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive
+                --dynamic-obstacles ${PROJECT_SOURCE_DIR}/maps/obstacles_dynamic.csv
+                --dynamic-planner space-time --livelock-window 15 --output ${CLI_OUT}/dynamic_spacetime)
+    set_tests_properties(cli_dynamic_spacetime PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*planner space-time, livelock switch after 15.0 s: 0 switch")
+
+    add_test(NAME cli_turn_aware
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --turn-aware
+                --output ${CLI_OUT}/turn_aware)
+    set_tests_properties(cli_turn_aware PROPERTIES
+        PASS_REGULAR_EXPRESSION "travel time 37.00 s.*2 turns in place")
+
+    add_test(NAME cli_turn_aware_requires_diff_drive
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --turn-aware)
+    set_tests_properties(cli_turn_aware_requires_diff_drive PROPERTIES
+        PASS_REGULAR_EXPRESSION "--turn-aware requires --robot-model diff-drive")
+
+    add_test(NAME cli_rejects_bad_dynamic_planner
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --dynamic-planner sideways)
+    set_tests_properties(cli_rejects_bad_dynamic_planner PROPERTIES
+        PASS_REGULAR_EXPRESSION "--dynamic-planner must be reactive or space-time")
+
+    add_test(NAME cli_rejects_bad_spacetime_horizon
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --spacetime-horizon 0)
+    set_tests_properties(cli_rejects_bad_spacetime_horizon PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid replanning parameters: space-time horizon")
+
+    add_test(NAME planning_experiment_turns
+        COMMAND planning_experiment turns --runs 20 --output ${CLI_OUT}/planning_turns)
+    set_tests_properties(planning_experiment_turns PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PASS_REGULAR_EXPRESSION "time saved per route")
 
     add_test(NAME cli_rejects_bad_replanning_settings
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv

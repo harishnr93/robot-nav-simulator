@@ -245,6 +245,55 @@ void testPatrolIsTrackedThroughReversals() {
     CHECK(worst < 0.25);
 }
 
+/// The learned turning points are kept relative to the lane center, which is refit
+/// from a sliding window of positions. As the window slides, a learned end may only
+/// move outwards (a later reversal watched further out), never wander with the
+/// window's mean (it used to: 0.9 m off in one benchmark run).
+void testTurningPointsStayPutAsTheHistorySlides() {
+    const GridMap map = obstaclesMap();
+    for (const double speed : {0.13, 0.2, 0.45}) {
+        amr::DynamicObstacle ob;
+        ob.route = {map.gridToWorld({7, 10}), map.gridToWorld({7, 15})};
+        ob.speed = speed;
+        ob.radius = 0.3;
+        amr::ObstacleTracker tracker;
+        double worst_inward = 0.0;
+        bool have = false;
+        WorldPoint last_low{}, last_high{};  // outermost so far
+        watch(map, map.gridToWorld({9, 12}), ob, 250.0, tracker, [&](double, const amr::ObstacleTracker& tr) {
+            if (tr.tracks().empty()) {
+                return;
+            }
+            const amr::Track& track = tr.tracks().front();
+            if (!track.lane || !track.has_low_end || !track.has_high_end) {
+                return;
+            }
+            const auto at = [&](double e) {
+                return WorldPoint{track.lane_center.x + e * track.lane_axis.x,
+                                  track.lane_center.y + e * track.lane_axis.y};
+            };
+            // World ends sorted along the route (it runs along +y).
+            WorldPoint low = at(track.low_end), high = at(track.high_end);
+            if (low.y > high.y) {
+                std::swap(low, high);
+            }
+            // Against the outermost position each end has reached so far.
+            if (have) {
+                worst_inward = std::max({worst_inward, low.y - last_low.y, last_high.y - high.y});
+                last_low.y = std::min(last_low.y, low.y);
+                last_high.y = std::max(last_high.y, high.y);
+            } else {
+                last_low = low;
+                last_high = high;
+            }
+            have = true;
+        });
+        std::cout << "    " << speed << " m/s: worst inward move of a learned end " << worst_inward << " m\n";
+        CHECK(have);
+        CHECK(worst_inward < 0.03);
+    }
+}
+
 /// An obstacle that turns round where the robot cannot see it: no turning point is
 /// learned at that end (it would be a guess), only at the end that was watched.
 void testUnwatchedReversalIsNotLearned() {
@@ -372,6 +421,7 @@ int main() {
         {"Fragments of one obstacle are merged", testFragmentsAreMerged},
         {"A patrol is tracked through its reversals", testPatrolIsTrackedThroughReversals},
         {"A reversal out of sight is not learned", testUnwatchedReversalIsNotLearned},
+        {"Turning points stay put as the history slides", testTurningPointsStayPutAsTheHistorySlides},
         {"Two-point start of a fast obstacle", testTwoPointStartOfAFastObstacle},
         {"Negative evidence and coasting", testMissesAndCoasting},
         {"Simulator with LiDAR perception", testSimulatorWithLidarPerception},

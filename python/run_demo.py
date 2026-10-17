@@ -87,11 +87,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sensing-range", type=float,
                         help="dynamic obstacles are seen within this range, m (default 3)")
     parser.add_argument("--replan-margin", type=float,
-                        help="clearance around a seen obstacle when replanning, m (default 0.25)")
+                        help="clearance around a seen obstacle when replanning, m (default 0.15)")
     parser.add_argument("--prediction-horizon", type=float,
-                        help="seconds of estimated obstacle motion to avoid (default 2)")
+                        help="seconds of estimated obstacle motion to avoid (default 1)")
     parser.add_argument("--replan-patience", type=float,
                         help="wait this long for a blocked path before a detour, s (default 6)")
+    parser.add_argument("--dynamic-planner", choices=("reactive", "space-time"),
+                        help="how to plan around moving obstacles (default reactive)")
+    parser.add_argument("--livelock-window", type=float,
+                        help="switch planner after this long without progress, s (default 15; 0 = off)")
+    parser.add_argument("--turn-aware", action="store_true",
+                        help="differential drive: plan the fastest path counting turns")
     parser.add_argument("--connectivity", type=int, choices=(4, 8),
                         help="grid moves: 4 = straight (default), 8 = also diagonal")
     parser.add_argument("--robot-radius", type=float,
@@ -138,12 +144,15 @@ def simulator_command(args: argparse.Namespace) -> list[str]:
                  None if args.dynamic_obstacles is None else str(args.dynamic_obstacles)),
                 ("--sensing-range", args.sensing_range), ("--replan-margin", args.replan_margin),
                 ("--prediction-horizon", args.prediction_horizon),
-                ("--replan-patience", args.replan_patience))
+                ("--replan-patience", args.replan_patience), ("--dynamic-planner", args.dynamic_planner),
+                ("--livelock-window", args.livelock_window))
     for flag, value in optional:
         if value is not None:
             command += [flag, value if isinstance(value, str) else repr(value)]
     if args.ekf:
         command.append("--ekf")
+    if args.turn_aware:
+        command.append("--turn-aware")
     return command
 
 

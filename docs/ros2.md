@@ -64,6 +64,8 @@ A new goal, initial pose or map starts a new mission from the robot's current ce
 | `ekf`, `odom_noise_dist`, `odom_noise_turn`, `odom_noise_drift`, `odom_seed`, `ekf_range_sigma` | off | `--ekf`, odometry noise |
 | `lidar_bias`, `lidar_bias_time`, `ekf_bias_sigma`, `ekf_bias_time`, `ekf_map_sigma`, `ekf_map_tilt`, `ekf_surface` (`grid`/`lines`), `ekf_grazing` (`model`/`cutoff`) | 0, 0, 0, 0, 0, 0.02, `grid`, `model` | `--lidar-bias*`, `--ekf-bias-*`, `--ekf-map-*`, `--ekf-surface`, `--ekf-grazing` |
 | `dynamic_obstacles_file`, `sensing_range`, `replan_patience` | none | `--dynamic-obstacles`, replanning |
+| `replan_margin`, `prediction_horizon`, `livelock_window` | 0.15, 1.0, 15.0 | `--replan-margin`, `--prediction-horizon`, `--livelock-window` |
+| `dynamic_planner` (`reactive`/`space-time`), `spacetime_horizon` | `reactive`, 20.0 | `--dynamic-planner`, `--spacetime-horizon` |
 | `obstacle_perception` (`lidar`/`oracle`), `occlusion_aware` | `lidar`, false | `--obstacle-perception`, `--occlusion-aware` |
 | `playback_rate` | 1.0 | simulation seconds per wall-clock second |
 | `map_frame`, `robot_frame` | `map`, `base_link` | |

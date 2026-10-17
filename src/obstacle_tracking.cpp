@@ -294,6 +294,25 @@ void ObstacleTracker::learnLane(Track& track) const {
         track.lane = false;
         return;
     }
+    // The learned turning points are positions along the axis from the lane center,
+    // and the refit moves both (the history is a sliding window): carry them over
+    // as the world points they are.
+    if (track.has_low_end || track.has_high_end) {
+        const auto reproject = [&](double e) {
+            const WorldPoint w{track.lane_center.x + e * track.lane_axis.x,
+                               track.lane_center.y + e * track.lane_axis.y};
+            return (w.x - mx) * axis.x + (w.y - my) * axis.y;
+        };
+        const double low = reproject(track.low_end), high = reproject(track.high_end);
+        if (track.lane_axis.x * axis.x + track.lane_axis.y * axis.y >= 0.0) {
+            track.low_end = low;
+            track.high_end = high;
+        } else {  // the axis flipped: the ends swap
+            std::swap(track.has_low_end, track.has_high_end);
+            track.low_end = high;
+            track.high_end = low;
+        }
+    }
     track.lane = true;
     track.lane_center = {mx, my};
     track.lane_axis = axis;

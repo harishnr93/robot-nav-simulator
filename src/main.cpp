@@ -24,6 +24,7 @@
 #include "grid_map.hpp"
 #include "robot.hpp"
 #include "simulator.hpp"
+#include "spacetime_planner.hpp"
 #include "types.hpp"
 
 namespace {
@@ -63,6 +64,7 @@ struct CliOptions {
     double localization_weight = -1.0;  ///< --plan-for-localization (< 0: shortest path)
     bool steer_by_estimate = false;     ///< --steer-by-estimate
     double safety_margin = 0.0;         ///< --safety-margin (extra inflation), m
+    bool turn_aware = false;            ///< --turn-aware (fastest path with turns, diff-drive)
     bool particle_filter = false;       ///< --particle-filter
 };
 
@@ -131,11 +133,19 @@ void printUsage(std::ostream& os) {
           "  --sensing-range M     Dynamic obstacles are seen within M meters, in line\n"
           "                        of sight (default 3)\n"
           "  --replan-margin M     Extra clearance around a seen obstacle when\n"
-          "                        replanning, m (default 0.25)\n"
+          "                        replanning, m (default 0.15)\n"
           "  --prediction-horizon S  Block where a seen obstacle will be within S seconds\n"
-          "                        at its estimated velocity (default 2; 0 = where it is)\n"
+          "                        at its estimated velocity (default 1; 0 = where it is)\n"
           "  --replan-patience S   Wait up to S seconds for a blocked path to clear before\n"
           "                        replanning a detour (default 6; 0 = replan at once)\n"
+          "  --dynamic-planner P   reactive (default; replan around seen obstacles) or\n"
+          "                        space-time (safe interval planning over predicted\n"
+          "                        motion: timed plans that wait or detour)\n"
+          "  --spacetime-horizon S  Space-time planner: seconds of predicted obstacle\n"
+          "                        motion planned against (default 20)\n"
+          "  --livelock-window S   Switch planner (reactive <-> space-time) when the robot\n"
+          "                        has not got closer to the goal for S seconds\n"
+          "                        (default 15; 0 = off)\n"
           "  --obstacle-perception P  How moving obstacles are seen: lidar (default; the\n"
           "                        robot's own LiDAR, map subtraction and tracking) or\n"
           "                        oracle (true positions in line of sight)\n"
@@ -154,6 +164,8 @@ void printUsage(std::ostream& os) {
           "                        growing with the cell's position uncertainty after one\n"
           "                        scan (needs --connectivity 8; 0 = shortest path)\n"
           "  --safety-margin M     Extra inflation beyond the robot radius for planning, m\n"
+          "  --turn-aware          Differential drive: plan the fastest path counting the\n"
+          "                        time spent turning in place, not the shortest\n"
           "  --steer-by-estimate   Drive by the EKF estimate instead of the true pose\n"
           "                        (needs --ekf; not with --dynamic-obstacles)\n"
           "  --particle-filter     Also localize globally with a particle filter (no prior\n"
@@ -345,6 +357,8 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             }
         } else if (arg == "--steer-by-estimate") {
             options.steer_by_estimate = true;
+        } else if (arg == "--turn-aware") {
+            options.turn_aware = true;
         } else if (arg == "--particle-filter") {
             options.particle_filter = true;
         } else if (arg == "--obstacle-perception") {
@@ -403,6 +417,22 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             ok = parseNumber(options.replanning.patience);
         } else if (arg == "--prediction-horizon") {
             ok = parseNumber(options.replanning.prediction_horizon);
+        } else if (arg == "--dynamic-planner") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string text = argv[++i];
+                if (text == "reactive" || text == "space-time") {
+                    options.replanning.planner =
+                        text == "reactive" ? amr::DynamicPlanner::Reactive : amr::DynamicPlanner::SpaceTime;
+                } else {
+                    error = "--dynamic-planner must be reactive or space-time, got '" + text + "'";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--spacetime-horizon") {
+            ok = parseNumber(options.replanning.spacetime_horizon);
+        } else if (arg == "--livelock-window") {
+            ok = parseNumber(options.replanning.livelock_window);
         } else if (arg == "--ekf") {
             options.ekf.enabled = true;
         } else if (arg == "--odom-noise-dist") {
@@ -481,6 +511,10 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
                     "and distances driven)";
         } else if (options.localization_weight >= 0.0 && options.connectivity != amr::Connectivity::Eight) {
             error = "--plan-for-localization requires --connectivity 8";
+        } else if (options.turn_aware && options.motion.model != amr::RobotModel::DiffDrive) {
+            error = "--turn-aware requires --robot-model diff-drive (a point robot turns for free)";
+        } else if (options.turn_aware && options.localization_weight >= 0.0) {
+            error = "--turn-aware cannot be combined with --plan-for-localization";
         } else if (options.steer_by_estimate && !options.ekf.enabled) {
             error = "--steer-by-estimate requires --ekf (it drives by the EKF estimate)";
         } else if (options.steer_by_estimate && !options.dynamic_file.empty()) {
@@ -637,6 +671,13 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
                   << std::setprecision(1) << static_cast<double>(sim.wait_steps) * options.motion.dt
                   << " s waiting, closest gap " << std::setprecision(3)
                   << sim.min_dynamic_clearance << " m\n";
+        std::cout << "                planner "
+                  << (options.replanning.planner == amr::DynamicPlanner::SpaceTime ? "space-time" : "reactive");
+        if (options.replanning.livelock_window > 0.0) {
+            std::cout << ", livelock switch after " << std::setprecision(1) << options.replanning.livelock_window
+                      << " s: " << sim.strategy_switches << " switch(es)";
+        }
+        std::cout << '\n';
         if (sim.collided_obstacle >= 0) {
             std::cout << "                hit by moving obstacle " << sim.collided_obstacle
                       << '\n';
@@ -768,6 +809,42 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
                                           options.motion, sim, error);
 }
 
+/// Turn-aware planning for the differential drive: space-time planning with no
+/// moving obstacles is A* over (cell, heading) with the turning time as cost.
+amr::PlanResult planTurnAware(const amr::GridMap& map, const amr::GridMap& planning_map, const CliOptions& options) {
+    amr::PlanResult plan;
+    plan.status = amr::validatePlanRequest(map, options.start, options.goal);
+    if (plan.status == amr::PlanStatus::Success && !planning_map.isFree(options.start)) {
+        plan.status = amr::PlanStatus::StartOccupied;
+    } else if (plan.status == amr::PlanStatus::Success && !planning_map.isFree(options.goal)) {
+        plan.status = amr::PlanStatus::GoalOccupied;
+    }
+    if (plan.status != amr::PlanStatus::Success) {
+        return plan;
+    }
+    amr::SpaceTimeConfig config;
+    config.dt = options.motion.dt;
+    config.speed = options.motion.speed;
+    config.connectivity = options.connectivity;
+    config.turn_aware = true;
+    config.max_angular_speed = options.motion.max_angular_speed;
+    config.max_expansions = 4000000;
+    const amr::SpaceTimePlan timed =
+        amr::planSpaceTime(planning_map, options.start, options.motion.initial_heading, options.goal, {}, config);
+    plan.status = timed.success ? amr::PlanStatus::Success : amr::PlanStatus::NoPath;
+    plan.expanded_nodes = timed.expanded;
+    plan.planning_time_ms = timed.planning_time_ms;
+    if (timed.success) {
+        plan.path = amr::planCells(timed);
+        for (std::size_t i = 1; i < plan.path.size(); ++i) {
+            const bool diagonal = plan.path[i].x != plan.path[i - 1].x && plan.path[i].y != plan.path[i - 1].y;
+            plan.diagonal_moves += diagonal ? 1 : 0;
+        }
+        plan.path_cost = static_cast<int>(plan.path.size()) - 1;
+    }
+    return plan;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -804,6 +881,8 @@ int main(int argc, char** argv) {
         pc.weight = options.localization_weight;
         plan = amr::planForLocalization(inflation.planning_map, options.start, options.goal,
                                         amr::computeLocalizability(map, lc), pc);
+    } else if (options.turn_aware) {
+        plan = planTurnAware(map, inflation.planning_map, options);
     } else {
         plan = amr::planWithFootprint(map, inflation.planning_map, options.start, options.goal,
                                       options.connectivity);

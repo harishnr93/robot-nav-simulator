@@ -1539,6 +1539,17 @@ robot's direction of motion flips by more than 150°, i.e. shuttling):
   tracking). Travel is 2–4 s longer than with the oracle, because tracks keep blocking
   where an obstacle may still be.
 
+**Re-measured after section 20** (the turning-point fix, margin 0.15 m, look-ahead 1 s,
+livelock switch; same scenarios):
+
+| | 500 scenarios, 0.2–0.5 m/s: point / diff-drive | 300 scenarios, 0.6–1.0 m/s |
+|---|---|---|
+| Oracle sightings | 100 % / 98.0 % (0 / 10 collisions) | 98.3 % / 94.0 % (3 / 16) |
+| LiDAR, constant velocity | 99.8 % / 97.2 % (1 / 14) | 96.7 % / 92.0 % (8 / 23) |
+| **LiDAR, learned reversals** | **99.8 % / 98.6 % (1 / 6)** | **100 % / 97.3 % (0 / 8)** |
+
+The ordering is unchanged, and learned reversals now matter most with fast obstacles.
+
 **Occluded space (item 8).** Two kinds of hidden obstacle:
 
 1. **Seen, then hidden:** coasting keeps the obstacle, as above. This is the measured
@@ -1757,6 +1768,241 @@ can see.
   an EKF motion model of "turn, then drive". With heading corrections while driving,
   that model is slightly wrong: 0.4 cm of error even with exact odometry.
 
+## 20. Planning with moving obstacles: space and time, turns, livelock, margins, several robots (`planning_experiment`)
+
+Sections 14 and 18 react: they block where a seen obstacle is about to be, wait, detour,
+and hold before a step that would meet it. This section plans with the obstacles'
+predicted motion (item 13), plans for the differential drive's turns (item 14), detects
+when the robot is stuck (item 15), measures how much margin and look-ahead are needed
+(item 16), and lets several such robots meet (item 17). The benchmark is section 18's:
+the obstacles map, start (1, 1), goal (18, 18), three obstacles on random 2–8-cell
+lanes, 500 scenarios at 0.2–0.5 m/s and 300 at 0.6–1.0 m/s, LiDAR perception, 600 s
+limit. "Previous settings" below is the reactive robot as it stood before this section
+(margin 0.25 m, look-ahead 2 s): it failed in 2.2 % (point) and 4 % (diff-drive) of the
+normal-speed runs.
+
+### Planning over space and time (item 13; `spacetime_planner.hpp`, `--dynamic-planner space-time`)
+
+Safe interval path planning (SIPP, Phillips & Likhachev 2011) on the grid:
+
+- **Predictions** cover `--spacetime-horizon` (20 s) at the simulation step: each LiDAR
+  track's predicted path (bouncing at learned turning points, section 18), inflated by
+  its 2σ uncertainty. Beyond the horizon everything counts as safe.
+- **Safe intervals:** a cell is unsafe at step k when a predicted obstacle centre is
+  closer to the cell centre than obstacle radius + inflation + robot radius + margin +
+  half the obstacle's displacement over one step. A cell's safe intervals are the
+  maximal runs of safe steps.
+- **Search** over (cell, safe interval, heading), cost = arrival time. From a state the
+  robot may wait in its cell (to the end of the interval) and turn, then move to a
+  neighbour; the earliest arrival in each of the neighbour's safe intervals is kept,
+  after checking the robot's positions along the move at every step (it moves between
+  cells too). The heuristic (straight-line distance / speed) is admissible.
+- **In the simulator** the robot follows the timed plan: it holds at a cell until the
+  planned departure, turning towards the next cell meanwhile. Every step it checks the
+  plan's own motion, waits included, against the current predictions over the 1 s
+  look-ahead (for contact; the plan already kept the margin). A plan that fails is
+  replanned: from the robot's cell, or, between cells, from whichever end of the
+  segment gives the earlier arrival (the planner's start is then reached later, after
+  a drive that must itself be free of walls and obstacles). The reactive rules take
+  over only while no plan exists.
+
+What it took, each step found by a failing benchmark run:
+
+1. **The gate and the plan disagreed.** The look-ahead gate predicted the robot driving
+   on without stopping, but the plan waits at cells, so the gate vetoed plans that were
+   safe: 5000 replans on the spot. The plan's motion is now checked as planned.
+2. **Crossing after the horizon.** When no crossing fits inside the horizon with the
+   margin, the best plan crosses just after it, where everything counts as safe, and
+   every replan pushes the crossing out again. Like the gate after its patience, the
+   planner then settles for a contact-free plan.
+3. **Phantom obstacles** with perfect prediction: the LiDAR tracks of the scripted
+   obstacles were added as well, extrapolated straight on.
+4. **Held between cells**, head-on with an obstacle that had turned round: hence the
+   replanning from either end of the segment.
+5. **A tracker bug.** Turning points were stored relative to the lane centre, which is
+   refit from a sliding window of positions, so they drifted with it: 0.9 m in one run.
+   They are now carried over as the world points they are. This also helps the
+   reactive robot; a test checks that a learned end never moves inwards.
+6. **Route flapping.** Replanning at every cell flipped between two routes of about the
+   same arrival as the predictions' phase shifted. A routine replan now keeps the plan
+   while it stays contact-free over the whole horizon, unless the new one arrives at
+   least 1 s earlier.
+7. **Following an obstacle into its lane.** With its turning point ahead not yet seen,
+   the prediction ran straight on, through walls, and the plan followed it into its
+   lane until it came back. Such a track is now planned against two hypotheses: it
+   turns at the wall ahead, or it turns now.
+
+**Results** (fixes / breaks: failures of the previous settings solved / their successes
+lost):
+
+| 500 scenarios, 0.2–0.5 m/s | Point: reached, collisions, timeouts, travel | Diff-drive | Fixes / breaks |
+|---|---|---|---|
+| Reactive, previous settings | 97.8 %, 2, 9, 48.7 s | 96.0 %, 10, 10, 58.6 s | – |
+| **Reactive + livelock switch (default)** | **100 %, 0, 0, 39.8 s** | **99.2 %, 4, 0, 46.7 s** | 11/0, 20/4 |
+| Space-time | 100 %, 0, 0, 36.1 s | 97.4 %, 3, 10, 40.0 s | 11/0, 19/12 |
+| Space-time + livelock switch | 100 %, 0, 0, 36.1 s | 98.2 %, 4, 5, 40.2 s | 11/0, 19/8 |
+| Space-time, perfect prediction | 100 %, 0, 0, 34.2 s | 99.8 %, 0, 1, 37.5 s | 11/0, 20/1 |
+
+| 300 scenarios, 0.6–1.0 m/s | Point | Diff-drive |
+|---|---|---|
+| Reactive, previous settings | 96.3 %, 3, 8, 58.1 s | 95.3 %, 5, 9, 74.9 s |
+| **Reactive + livelock switch (default)** | **99.3 %, 2, 0, 41.3 s** | **99.0 %, 3, 0, 49.7 s** |
+| Space-time + livelock switch | 98.0 %, 6, 0, 36.9 s | 94.7 %, 2, 14, 41.6 s |
+| Space-time, perfect prediction | 100 %, 0, 0, 34.2 s | 99.3 %, 0, 2, 38.0 s |
+
+- **With perfect predictions, planning over space and time all but solves the
+  benchmark,** and is the fastest: 34 s against 49 s for the previous reactive robot.
+  Its remaining failures are the planner's; there are almost none.
+- **With predictions from the LiDAR, it is only as good as 20 s of prediction.** At
+  normal speeds the point robot reaches the goal every time, 10 % faster than the
+  reactive one. The differential drive, which needs longer to get out of the way, and
+  fast obstacles, whose predictions go wrong sooner, expose the gap: 94.7 % with fast
+  obstacles against 99 % for the reactive robot.
+- So the reactive robot stays the default, and space-time planning is what it switches
+  to when it is stuck (item 15) and an option (`--dynamic-planner space-time`) for
+  well-predicted environments. Planning takes 0.4–0.7 ms per plan (1–1.7 ms with the
+  denser perfect predictions).
+
+### Turn-aware planning (item 14; `--turn-aware`)
+
+The same search with no obstacles and turn costs is A* over (cell, heading): every
+change of heading costs ceil((angle / max angular speed + 0.3 s) / dt) steps of turning
+in place (the turn-then-drive controller of section 10). It finds the path that is
+fastest to drive, not the shortest (`planning_experiment turns`, 200 random routes,
+differential drive):
+
+| Map | Shortest: length, turns, travel | Turn-aware | Time saved per route: median, best |
+|---|---|---|---|
+| Obstacles, 4-connected | 7.95 m, 2.8, 21.45 s | 8.00 m, 1.7, 19.81 s | 1.0 s, 11.4 s |
+| Obstacles, 8-connected | 7.07 m, 3.0, 19.02 s | 7.11 m, 2.1, 18.12 s | 0.5 s, 5.5 s |
+| Hall | 11.99 m, 1.7, 27.95 s | 11.99 m, 1.1, 26.99 s | 0.1 s, 7.0 s |
+| Maze | 26.35 m, 12.9, 73.53 s | identical | 0 |
+
+It is never slower, and its planned arrival is within 1–2 % of the simulated one (the
+controller's last few degrees of each turn). In a maze every turn is forced. On the CLI's
+obstacles route: 3 → 2 turns, 38.5 → 37.0 s. With moving obstacles, the space-time
+planner is turn-aware for the differential drive.
+
+### Detecting livelock and switching strategy (item 15; `--livelock-window`, default 15 s)
+
+- **Detection:** a Dijkstra pass from the goal over the static planning map gives every
+  cell's remaining distance. If the robot's best remaining distance has not improved
+  for the window, it is stuck: shuttling (livelock) or waiting (deadlock), it does not
+  matter which.
+- **Switch:** it changes strategy (reactive ↔ space-time) for one window, an escape,
+  then returns to its usual one.
+- **Once per place:** the switch re-arms only when the robot is 1 m closer to the goal
+  than where it got stuck. Without that, a robot blocked by another robot parked on its
+  goal in a corridor flipped between the two strategies' routes every window until the
+  timeout (2–3 % of the 3–4-robot runs).
+
+On the benchmark (with the new margin and look-ahead, below, in both columns):
+
+| | Without the switch: reached, wait, travel | With it (default) |
+|---|---|---|
+| Point, 0.2–0.5 m/s | 99.8 %, 5.5 s, 40.4 s | 100 %, 3.8 s, 39.8 s |
+| Diff-drive, 0.2–0.5 m/s | 99.4 %, 5.2 s, 48.4 s | 99.2 %, 4.1 s, 46.7 s |
+| Point, 0.6–1.0 m/s | 99.3 %, 7.5 s, 45.0 s | 99.3 %, 4.4 s, 41.3 s |
+| Diff-drive, 0.6–1.0 m/s | 98.7 %, 7.9 s, 53.8 s | 99.0 %, 4.7 s, 49.7 s |
+
+Most of the previous settings' timeouts went with the smaller margin and look-ahead
+(item 16). The switch takes the last one, cuts waiting by 20–40 % and travel by up to
+4 s; it fires 45–76 times in 500 runs. Together, they solve all 11 (point) and 20
+(diff-drive) failures of the previous settings; 4 diff-drive runs that those settings
+completed collide instead (3 without the switch).
+
+### Smallest safe margin and prediction horizon (item 16; `planning_experiment margins`)
+
+The margin (`--replan-margin`) is clearance added around a seen obstacle; the
+horizon is how far ahead the look-ahead gate (`--prediction-horizon`) or the
+space-time planner (`--spacetime-horizon`) looks. Swept over 300 scenarios each, with
+the livelock switch:
+
+| Reactive, margin / look-ahead | 0.2–0.5 m/s: point, diff-drive (collisions) | Travel (point, diff) |
+|---|---|---|
+| 0 m / 1 s | 99.0 % (3), 96.3 % (11) | 36.5, 43.2 s |
+| 0.05 m / 1 s | 99.7 % (1), 98.3 % (5) | 36.9, 44.3 s |
+| 0.1 m / 1 s | 100 % (0), 98.3 % (5) | 38.9, 45.9 s |
+| **0.15 m / 1 s** | **100 % (0), 99.0 % (3)** | **39.8, 46.9 s** |
+| 0.15 m / 0.5 s | 100 % (0), 99.3 % (2) | 38.0, 45.0 s |
+| 0.15 m / 2 s | 100 % (0), 99.7 % (1) | 42.3, 50.1 s |
+| 0.25 m / 2 s (previous) | 99.7 % (1), 99.0 % (3) | 44.3, 52.6 s |
+| 0.35 m / 2 s | 99.7 % (1), 98.7 % (4) | 44.6, 54.8 s |
+
+With fast obstacles (0.6–1.0 m/s, 300 scenarios), point / diff-drive reached (collisions):
+0 m / 1 s: 99.7 % (1), 97.3 % (8); 0.1 m / 1 s: 99.3 % (2), 97.0 % (9);
+**0.15 m / 1 s: 99.3 % (2), 99.0 % (3)**; 0.15 m / 0.5 s: 98.7 % (4), 95.7 % (13);
+0.15 m / 2 s: 98.7 % (4), 99.0 % (3); 0.25 m / 2 s (previous): 98.3 % (4), 96.3 % (7);
+0.35 m / 2 s: 98.7 % (2), 95.3 % (10).
+
+- **The margin:** below 0.1 m, collisions climb steeply (11 for the diff-drive at 0).
+  Above 0.25 m they do not fall further, while the robot travels longer and waits
+  inside sweeps it cannot leave. **0.1–0.15 m is the smallest safe margin.**
+- **The look-ahead:** 0.5 s misses fast obstacles; 3 s blocks so much that the robot
+  waits and is caught inside sweeps. **About 1 s**, roughly the time to get out of an
+  obstacle's way, is best.
+- **The space-time planner** barely depends on the margin (it waives it when no crossing
+  fits), but needs **at least 10 s** of prediction: with 2–5 s, plans are myopic (91–98 %
+  for the diff-drive).
+- No setting gives zero collisions for every model and speed. The defaults are now
+  margin 0.15 m and look-ahead 1 s (were 0.25 m and 2 s).
+
+### Several robots that all replan (item 17; `multi_robot.hpp`, `planning_experiment robots`)
+
+`simulateRobots` steps one `Navigator` per robot together (the simulation loop of
+`simulatePath`, one step at a time). Each robot decides from where the others are at
+the start of the step and perceives them like moving obstacles: discs in its LiDAR
+scans that it tracks, or oracle sightings. Then all move, and two robots whose centres
+come closer than the sum of their radii during the step (closest approach of the two
+linear motions) both stop in a collision. A robot that has arrived stays where it is,
+a disc in everyone's way. Nobody coordinates: no shared plans, priorities or messages.
+
+**Symmetry.** In an open room, two identical reactive robots swapping places head-on
+mirror each other exactly and wait for each other forever; four swapping corners do the
+same. The livelock switch alone does not help two mirrored point robots: both detect the
+livelock at the same instant, switch together and stay mirrored. Staggered windows
+(robot i waits (1 + 0.25 i) times the window, the default) break the symmetry:
+
+| Open-room swap | Reactive, no switch | Switch, equal windows | **Switch, staggered** | Space-time + switch |
+|---|---|---|---|---|
+| 2 point robots head-on | stuck | stuck | **33.3 s** | 29.5 s |
+| 4 point robots, corners | stuck | 56.8 s | **55.1 s** | 23.9 s |
+| 2 diff-drive head-on | stuck | 127.1 s | **40.2 s** | 30.6 s |
+| 4 diff-drive, corners | 2 of 4 stuck | 54.4 s | **61.3 s** | 67.3 s |
+
+**Random tasks** (100 sets per robot count on the obstacles map, radius 0.2 m, starts and
+goals at least 1 m apart, 300 s limit; all = every robot arrived):
+
+| Robots | Reactive, no switch: all, makespan | **Reactive + switch (default)** | Space-time + switch |
+|---|---|---|---|
+| 2 (point / diff-drive) | 100 / 100 %, 25 / 32 s | **100 / 100 %, 24 / 32 s** | 100 / 98 %, 24 / 28 s |
+| 3 | 100 / 100 %, 32 / 42 s | **100 / 100 %, 32 / 42 s** | 98 / 97 %, 27 / 34 s |
+| 4 | 98 / 100 %, 38 / 50 s | **99 / 100 %, 36 / 49 s** | 98 / 97 %, 30 / 37 s |
+| 6 | 93 / 96 %, 50 / 68 s | **94 / 96 %, 50 / 68 s** | 97 / 94 %, 37 / 46 s |
+
+- **No robot ever touched another** in the 4000 multi-robot runs.
+- The failures are timeouts in the map's one-cell corridors: a robot parks on its goal
+  in a corridor another one needs, or two meet head-on where neither can let the other
+  pass. Without coordination, someone has to give way, and the rules only make that
+  likely, not certain.
+- Space-time planning finishes sooner (by 16–32 % with three or more robots: it times
+  crossings instead of waiting for a clear path), and with six point robots it is the
+  most reliable. With the slower-turning diff-drive, its constant-velocity
+  predictions of robots that themselves replan go wrong more often.
+- On random tasks the staggering changes little (exact mirror images are rare), but it
+  is what resolves the mirrored ones above.
+
+**Limitations.**
+
+- Predictions are per obstacle and deterministic (one path, or two hypotheses for an
+  unseen turning point). Planning against distributions or sets of futures, and
+  replanning on a moving start (now the ends of a segment), are left out.
+- Other robots are predicted like obstacles, at constant velocity: no reasoning about
+  their plans or about who yields (no reciprocal avoidance, priorities or reservation).
+- The livelock detector measures progress on the static map: a robot that must take a
+  long detour around a parked one makes "no progress" for a while and may switch for
+  nothing.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
@@ -1765,7 +2011,8 @@ can see.
 - The point robot has no orientation and changes direction instantly. The
   differential-drive model (section 10) adds heading and turn-rate limits, but no
   acceleration limits or dynamics: velocities change instantly. It stops to turn at every
-  corner, and the planner minimises path length, not travel time including turns.
+  corner; the planner minimises path length unless `--turn-aware` (section 20) asks for
+  the fastest path, turns included.
 - Paths are optimal on the grid graph (4- or 8-connected), not in continuous space: they
   turn only at cell centers and in 45° steps. Any-angle planning (e.g. Theta*) or path
   smoothing could shorten them further.

@@ -63,6 +63,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -108,15 +109,40 @@ struct TrajectorySample {
     double angular_velocity = 0.0;  ///< rad/s
 };
 
+/// Planner for moving obstacles.
+enum class DynamicPlanner {
+    /// Replan shortest paths on the planning map with the cells about to be swept
+    /// blocked; wait, retreat and gate (the rules below).
+    Reactive,
+    /// Plan over space and time (spacetime_planner.hpp) against the predicted motion of
+    /// every perceived obstacle, waiting where the plan says; replan on every cell and
+    /// at least every spacetime_period. Reactive rules take over when no timed plan
+    /// is found; the look-ahead gate stays as a safety net.
+    SpaceTime,
+};
+
 /// Sensing and replanning parameters for dynamic obstacles.
 struct ReplanningConfig {
     double sensing_range = 3.0;  ///< obstacles are seen within this distance (to their edge), m
-    double margin = 0.25;        ///< extra clearance around a seen obstacle when planning, m
-    double prediction_horizon = 2.0;  ///< seconds of estimated obstacle motion blocked, s
+    double margin = 0.15;        ///< extra clearance around a seen obstacle when planning, m
+    double prediction_horizon = 1.0;  ///< seconds of estimated obstacle motion blocked, s
     double patience = 6.0;       ///< how long the path may stay blocked before a detour, s
     /// When backing up to the previous waypoint would itself end in contact, head for
     /// whichever end of the current segment keeps the larger predicted gap.
     bool choose_retreat = true;
+    /// How the robot plans around moving obstacles.
+    DynamicPlanner planner = DynamicPlanner::Reactive;
+    double spacetime_horizon = 20.0;  ///< SpaceTime: seconds of predicted motion planned against
+    double spacetime_period = 0.0;    ///< SpaceTime: replan at least this often (on a cell), s (0: every step)
+    /// SpaceTime: plan against the obstacles' true future motion (an omniscient upper
+    /// bound for benchmarks), instead of the perceived and predicted one.
+    bool perfect_prediction = false;
+    /// Livelock detection: if the robot's remaining distance to the goal (along the
+    /// static planning map) has not improved for this long, it is stuck, shuttling
+    /// (livelock) or waiting (deadlock), and switches strategy: reactive <->
+    /// space-time. The new strategy gets a full window before the next switch.
+    /// 0 disables the detector.
+    double livelock_window = 15.0;
 };
 
 /// How the robot perceives moving obstacles.
@@ -179,6 +205,8 @@ struct ReplanEvent {
 /// Upper bound on validated replanning parameters.
 constexpr double kMaxSensingRange = 1000.0;
 constexpr double kMaxPredictionHorizon = 100.0;
+/// Upper bound accepted for ReplanningConfig::livelock_window, s.
+constexpr double kMaxLivelockWindow = 3600.0;
 
 /// Empty string if the replanning parameters are valid, otherwise the reason.
 std::string validateReplanningConfig(const ReplanningConfig& config);
@@ -201,6 +229,8 @@ struct SimulationResult {
     std::size_t wait_steps = 0;           ///< steps spent waiting for a blocked path
     int collided_obstacle = -1;           ///< index of the obstacle hit, -1 if none
     std::size_t tracks_created = 0;       ///< Lidar perception: tracks started over the run
+    int strategy_switches = 0;            ///< livelocks detected (strategy switched)
+    int collided_robot = -1;              ///< multi_robot: id of the robot hit, -1 if none
     double min_dynamic_clearance = 0.0;   ///< closest gap to any obstacle edge over the run, m
 
     bool success() const { return status == NavigationStatus::GoalReached; }
@@ -225,5 +255,43 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
                               const MotionConfig& config,
                               Connectivity connectivity = Connectivity::Four,
                               const DynamicScenario* dynamic = nullptr);
+
+/// Another robot, as the others see it: where it is now (multi_robot.hpp).
+struct MovingDisc {
+    int id = 0;
+    WorldPoint center;
+    double radius = 0.0;
+};
+
+class NavigatorState;
+
+/// One robot's navigation, one timestep at a time: simulatePath runs a navigator to
+/// the end; several navigators stepped together are robots that see each other
+/// (multi_robot.hpp). The map, path and scenario must outlive the navigator.
+class Navigator {
+public:
+    Navigator(const GridMap& map, const std::vector<GridCoord>& path, const MotionConfig& config,
+              Connectivity connectivity = Connectivity::Four, const DynamicScenario* dynamic = nullptr);
+    ~Navigator();
+    Navigator(Navigator&&) noexcept;
+    Navigator& operator=(Navigator&&) noexcept;
+
+    /// True once the run ended (goal, collision, timeout or an invalid request).
+    bool finished() const;
+    /// Decide and take one timestep. `others` (other robots, perceived like moving
+    /// obstacles) are where they are at the start of the step; contact with them is
+    /// not checked here (the caller knows how everyone moved).
+    void step(const std::vector<MovingDisc>& others = {});
+    /// End the run with a collision with another robot (`other` = its id).
+    void collideWithRobot(int other);
+    /// Where the robot is (center) and was at the start of the last step.
+    WorldPoint position() const;
+    WorldPoint previousPosition() const;
+    /// The result so far (complete once finished()).
+    const SimulationResult& result() const;
+
+private:
+    std::unique_ptr<NavigatorState> state_;
+};
 
 }  // namespace amr

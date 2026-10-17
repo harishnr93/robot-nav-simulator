@@ -687,7 +687,10 @@ int modeDynamic(const Options& o) {
                                   << "," << b.y << "\n";
                     }
                 }
-                if (sim.status == amr::NavigationStatus::Collision) {
+                if (sim.status == amr::NavigationStatus::Collision && sim.collided_obstacle < 0) {
+                    ++score.collisions;  // a wall (no moving obstacle involved)
+                    std::cerr << "wall collision: run " << run << ", model " << model << ", " << variants[v].name << "\n";
+                } else if (sim.status == amr::NavigationStatus::Collision) {
                     ++score.collisions;
                     const double seen = timeInView(map, sim.trajectory,
                                                    obstacles[static_cast<std::size_t>(sim.collided_obstacle)],
@@ -813,7 +816,9 @@ int modeJunction(const Options& o) {
                 score.waits += static_cast<double>(sim.wait_steps) * motion.dt;
                 score.reversals += countReversals(sim.trajectory);
                 score.replans += static_cast<double>(sim.replans.size());
-                if (sim.status == amr::NavigationStatus::Collision) {
+                if (sim.status == amr::NavigationStatus::Collision && sim.collided_obstacle < 0) {
+                    ++score.collisions;  // a wall (no moving obstacle involved)
+                } else if (sim.status == amr::NavigationStatus::Collision) {
                     ++score.collisions;
                     const double seen = timeInView(map, sim.trajectory,
                                                    obstacles[static_cast<std::size_t>(sim.collided_obstacle)],

@@ -107,6 +107,17 @@ public:
         obstacles_file_ = declare_parameter<std::string>("dynamic_obstacles_file", "");
         o.replanning.sensing_range = declare_parameter<double>("sensing_range", o.replanning.sensing_range);
         o.replanning.patience = declare_parameter<double>("replan_patience", o.replanning.patience);
+        o.replanning.margin = declare_parameter<double>("replan_margin", o.replanning.margin);
+        o.replanning.prediction_horizon =
+            declare_parameter<double>("prediction_horizon", o.replanning.prediction_horizon);
+        o.replanning.livelock_window = declare_parameter<double>("livelock_window", o.replanning.livelock_window);
+        o.replanning.spacetime_horizon =
+            declare_parameter<double>("spacetime_horizon", o.replanning.spacetime_horizon);
+        const std::string planner = declare_parameter<std::string>("dynamic_planner", "reactive");
+        if (planner != "reactive" && planner != "space-time") {
+            throw std::runtime_error("dynamic_planner must be reactive or space-time");
+        }
+        o.replanning.planner = planner == "reactive" ? amr::DynamicPlanner::Reactive : amr::DynamicPlanner::SpaceTime;
         const std::string perception = declare_parameter<std::string>("obstacle_perception", "lidar");
         if (perception != "lidar" && perception != "oracle") {
             throw std::runtime_error("obstacle_perception must be lidar or oracle");

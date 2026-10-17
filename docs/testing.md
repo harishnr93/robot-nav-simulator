@@ -41,6 +41,7 @@ values are compared with explicit tolerances.
 | `test_localization` | particle filter (global start, kidnapping, matching places), localizability, localization-aware planning, steering by the estimate |
 | `test_obstacle_tracking` | moving obstacles from the LiDAR alone: map subtraction, disc fitting, fragment merging, tracking through reversals, learned turning points, two-point start, negative evidence and coasting, LiDAR perception in the simulator, occlusion awareness |
 | `test_dynamic` | moving obstacles and replanning: motion model, exact contact, loading, visibility, waiting, detours, retreats, invariants |
+| `test_planning` | planning with moving obstacles: space-time (SIPP) and turn-aware planning, the steppable navigator, the livelock switch, staying off walls when off the path, several robots that all replan |
 | `test_ghost_cells` | minimum ghost cells: covers vs. inflation, exact solver vs. brute force (count, every optimal set, weighted), overlapping footprints, statuses |
 | `test_ghost_perception` | perception loop: beam and ghost model, occupancy update, ghost evidence, recovery strategies on a doorway |
 | `test_alignment` | grid alignment: geometry, rasterization rules, placement, exact LiDAR, point evidence, the alignment-robust planner, ground truth, artifact vs. ghost recovery |
@@ -65,7 +66,13 @@ values are compared with explicit tolerances.
 | `cli_ekf_localization` | obstacles map, differential drive, 72 beams, `--ekf`: expects EKF position error RMS 0.004 m and dead reckoning 0.533 m |
 | `cli_ekf_requires_diff_drive` | `--ekf` with the point robot: expects a clear error |
 | `cli_rejects_bad_ekf_settings` | `--ekf-range-sigma 0`: expects "invalid EKF parameters" |
-| `cli_dynamic_replanning` | obstacles map with `maps/obstacles_dynamic.csv`: expects `GOAL_REACHED` and 3 replans |
+| `cli_dynamic_replanning` | obstacles map with `maps/obstacles_dynamic.csv`: expects `GOAL_REACHED` and 2 replans |
+| `cli_dynamic_spacetime` | the same with the differential drive, `--dynamic-planner space-time --livelock-window 15`: expects `GOAL_REACHED` and the planner line |
+| `cli_turn_aware` | obstacles map, differential drive, `--turn-aware`: expects travel time 37.00 s with 2 turns in place (38.50 s and 3 turns without) |
+| `cli_turn_aware_requires_diff_drive` | `--turn-aware` with the point robot: expects a clear error |
+| `cli_rejects_bad_dynamic_planner` | `--dynamic-planner sideways`: expects "--dynamic-planner must be reactive or space-time" |
+| `cli_rejects_bad_spacetime_horizon` | `--spacetime-horizon 0`: expects "invalid replanning parameters: space-time horizon" |
+| `planning_experiment_turns` | `planning_experiment turns --runs 20` runs and reports the time saved |
 | `cli_rejects_bad_dynamic_obstacles` | a route through a wall (`tests/data/bad_dynamic_obstacles.csv`): expects the line and the reason |
 | `cli_rejects_bad_replanning_settings` | `--sensing-range 0`: expects "invalid replanning parameters" |
 | `ghost_experiment_example` | the documented example map: expects a 2-cell explanation with 8 optimal alternatives |
@@ -173,6 +180,27 @@ Also in CTest: the CLI's `--particle-filter` finds the robot on the first scan;
 `--steer-by-estimate` with `--plan-for-localization 1` reaches the goal in the hall
 with no safety margin (the shortest route collides); `--plan-for-localization`
 requires `--connectivity 8`.
+
+## Planning-with-moving-obstacles tests (`test_planning.cpp`)
+
+| Test | What is checked |
+|---|---|
+| No obstacles is A* | space-time planning without obstacles or turn costs gives the A* path length, arrives at length / speed, never waits, and every move is allowed; an unreachable goal fails; start = goal is a one-waypoint plan |
+| Turn-aware | on an open map the fastest path to a diagonal goal is an L (one turn) arriving at exactly 11.4 s (10 moves + one 90° turn of 1.4 s); facing away costs the turn round; on the obstacles map the turn-aware path never drives slower than the shortest one, and its planned arrival is within 5 % of the simulated one |
+| Times a crossing | an obstacle patrols across the only corridor: following the timed plan keeps clear of it at every 20 ms (the blind straight run would hit it) |
+| Waits in place | an obstacle stands in a corridor, then leaves: the plan waits (arrival later than 8 s) and visits no cell twice |
+| Start reached later | `start_time` shifts the whole plan; a start that is unsafe on arrival cannot be planned from |
+| Navigator equals simulatePath | stepping a `Navigator` by hand gives the same status, steps, trajectory length, replans and distance as `simulatePath`, both robot models |
+| Space-time in the simulator | `obstacles_dynamic.csv`, both models, perceived and perfect predictions: goal reached, clearance > 0, never slower than the reactive robot |
+| Livelock switch | a benchmark scenario where the reactive robot with the earlier settings times out: with the switch it reaches the goal after at least one switch; with nothing moving, no switch |
+| Off the path, no wall | a fast-obstacle benchmark scenario where the differential drive, off its path after evasive steps, used to drive into a wall: goal reached, every step in free space |
+| Configuration validation | space-time horizon 0 or NaN, a negative replanning period: rejected |
+| Symmetric swaps | in an open room, two robots head-on and four through the middle: plain reactive robots deadlock; with the switch but equal windows, two mirrored robots switch at the same instant (one escape each) and stay stuck; staggered windows get everyone through; space-time planning too, both models; centers never closer than 0.4 m |
+| Multi-robot bookkeeping | robots that start in contact collide at once with each other's ids; an impossible task runs nothing |
+
+Also in `test_obstacle_tracking.cpp`: **turning points stay put as the history
+slides** (250 s of patrolling at 0.13, 0.2 and 0.45 m/s: a learned end never moves
+inwards by more than 3 cm; before the fix it drifted 0.25–0.40 m).
 
 ## Moving-obstacle perception tests (`test_obstacle_tracking.cpp`)
 
