@@ -3,7 +3,7 @@
 A lightweight 2D autonomous mobile robot navigation simulator built with C++17 and Python,
 featuring A* path planning, occupancy-grid mapping, collision detection, trajectory
 visualization, and performance analysis. Runs on an ordinary laptop: no robot hardware,
-no ROS, no GPU.
+no ROS, no GPU. An optional ROS 2 package publishes the same simulation to RViz2.
 
 ![Animated robot navigation on the obstacles map](docs/images/navigation_obstacles.gif)
 
@@ -65,6 +65,10 @@ comes from a reproducible benchmark.
   the reused planner, plus waiting, backing off and a look-ahead gate. The robot
   reaches the goal in 98 % of 500 random scenarios, against 71 % without reacting.
   Collisions are exact, including contact between two samples.
+- Planning with moving obstacles: safe interval path planning over space and time
+  (`--dynamic-planner space-time`), turn-aware planning for the differential drive
+  (`--turn-aware`), livelock detection with a strategy switch (`--livelock-window`), and
+  several robots that all replan (`multi_robot.hpp`), measured in `planning_experiment`.
 - "Why NO_PATH?" (`ghost_experiment`): an exact solver for the smallest or most likely
   set of "ghost" cells (false obstacles) whose removal would let the disc robot reach
   its goal, plus a perception loop that re-senses only those cells. It recovered all
@@ -122,7 +126,11 @@ comes from a reproducible benchmark.
 ```
 
 The C++ planner is the single authoritative planning implementation; Python only
-generates maps and visualizes results. Details: [docs/architecture.md](docs/architecture.md).
+generates maps and visualizes results. The optional ROS 2 package
+(`ros2/robot_nav_sim_ros`) compiles the same C++ sources into two nodes. A
+`map_server_node` publishes `/map`, and a `simulator_node` runs the same pipeline and
+publishes the plan, the robot's pose, the LiDAR, the EKF and the moving obstacles for
+RViz2. Details: [docs/architecture.md](docs/architecture.md).
 
 ### Coordinate conventions
 
@@ -167,6 +175,21 @@ ctest --test-dir build --output-on-failure
 Or use the helper scripts: `scripts/build.sh` and `scripts/test.sh`. The Python tests are
 registered automatically when `.venv/` exists (or when the Python found by CMake has
 NumPy, Matplotlib and Pillow); otherwise CMake prints that they were skipped.
+
+### Docker
+
+Everything (the standalone simulator, the Python tools, and the ROS 2 package with RViz2)
+also comes as one image, so nothing but Docker is needed on the host:
+
+```bash
+docker compose build
+docker compose run --rm test     # all tests: 63 CTest entries + 21 ROS 2 tests
+docker compose run --rm demo     # results, figures and navigation.gif in ./results
+docker compose up sim            # ROS 2 nodes + RViz2 (WSLg or a Linux X11 desktop)
+docker compose up headless       # ROS 2 nodes only
+```
+
+Display setup, build arguments and more examples: [docs/docker.md](docs/docker.md).
 
 ## Quick demo
 
@@ -236,9 +259,13 @@ and no timeout.
 | `--ekf-gate N` | reject beams whose innovation exceeds N standard deviations | `3` |
 | `--dynamic-obstacles FILE` | moving obstacles (see [File formats](#file-formats)); the robot replans around them | none |
 | `--sensing-range M` | moving obstacles are seen within M (to their edge), in line of sight | `3` |
-| `--replan-margin M` | extra clearance around a seen obstacle when replanning | `0.25` |
-| `--prediction-horizon S` | avoid where a seen obstacle will be within S seconds (estimated velocity) | `2` |
+| `--replan-margin M` | extra clearance around a seen obstacle when replanning | `0.15` |
+| `--prediction-horizon S` | avoid where a seen obstacle will be within S seconds (estimated velocity) | `1` |
 | `--replan-patience S` | wait up to S seconds for a blocked path to clear before a detour | `6` |
+| `--dynamic-planner P` | `reactive` (replan around seen obstacles) or `space-time` (timed plans over predicted motion, SIPP) | `reactive` |
+| `--spacetime-horizon S` | space-time planner: seconds of predicted obstacle motion planned against | `20` |
+| `--livelock-window S` | switch planner (reactive ↔ space-time) for S seconds when the robot has not got closer to the goal for S seconds (`0` = off) | `15` |
+| `--turn-aware` | differential drive: plan the fastest path counting the time spent turning, not the shortest | off |
 | `--reference-bfs` | also run the reference search (BFS, or exact Dijkstra for 8-connectivity) and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
@@ -302,7 +329,8 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 `--lidar-noise`, `--lidar-seed`, `--ekf`, `--odom-noise-dist`, `--odom-noise-turn`,
 `--odom-noise-drift`, `--odom-seed`, `--ekf-range-sigma`, `--ekf-gate`,
 `--dynamic-obstacles`, `--sensing-range`, `--replan-margin`, `--prediction-horizon`,
-`--replan-patience`, `--resolution`, `--output`), the animation options `--animate`,
+`--replan-patience`, `--dynamic-planner`, `--livelock-window`, `--turn-aware`,
+`--resolution`, `--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
 Its exit code is the simulator's (for example `4` when there is no path).
@@ -316,6 +344,10 @@ Its exit code is the simulator's (for example `4` when there is no path).
 | `maps/corridor.csv` | `1 1` → `18 18` |
 | `maps/maze.csv` | `1 1` → `19 19` |
 | `maps/obstacles_fine.csv` | `20 2` → `20 37` with `--resolution 0.25` (footprint demo) |
+| `maps/hall.csv` | `6 8` → `38 22` (a hall whose middle a 3 m LiDAR cannot see; localization-aware planning) |
+| `maps/twin_rooms.csv`, `twin_rooms_marked.csv`, `twin_rooms_different.csv` | two identical rooms; one block apart; furnished differently (matching places) |
+| `maps/point_symmetric.csv` | a room that looks the same after a half turn |
+| `maps/pillar_corridor.csv`, `pillar_corridor_irregular.csv` | pillars every 2 m (matching places 2 m apart); irregular pillars |
 
 The first four maps have one-cell (0.5 m) gaps and are meant for a point robot. Use
 `maps/obstacles_fine.csv` for a robot footprint: it has the same layout at 0.25 m cells.
@@ -356,9 +388,10 @@ python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
 ```
 
 ```text
-EKF estimate:   position error RMS 0.005 m, max 0.019 m, final 0.000 m; heading RMS 0.11 deg
+EKF estimate:   position error RMS 0.004 m, max 0.020 m, final 0.000 m; heading RMS 0.10 deg
 Dead reckoning: position error RMS 0.580 m, max 1.359 m, final 1.359 m; heading RMS 6.96 deg
-EKF updates:    12647 beams fused, 36 rejected by the 3.0-sigma gate, mean NEES 0.58 (3 = consistent)
+EKF updates:    12927 beams fused, 36 rejected by the 3.0-sigma gate, mean NEES 0.61 (3 = consistent)
+EKF model:      grid faces, grazing beams modeled
 ```
 
 ![EKF estimate vs. dead reckoning in the animation](docs/images/navigation_ekf.gif)
@@ -377,11 +410,82 @@ within 2 cm of the truth.
 
 The filter is checked for honesty, not just accuracy. Over many runs its normalized
 estimation error squared (NEES) averages 3.2 without the LiDAR and 3.2 with 5 cm range
-noise; 3 is ideal. The 0.58 above is cautious on purpose, because the filter assumes
+noise; 3 is ideal. The 0.61 above is cautious on purpose, because the filter assumes
 5 cm range noise and the default LiDAR is exact (set `--ekf-range-sigma` to the actual
 noise). Getting there exposed a subtle modelling error, described with the method in
 [docs/algorithms.md](docs/algorithms.md#13-ekf-localization---ekf). The EKF costs about
 0.1 µs per beam. The robot is still steered by its true pose, so the EKF only observes.
+
+### Correlated LiDAR errors, real walls and grazing beams
+
+The EKF above assumes every beam's error is independent. That holds in this
+simulator's own world, but two common errors are shared between beams:
+
+- **A range bias:** calibration or temperature shortens every beam of a scan alike.
+- **A rasterized map:** a real wall that the map put half a cell off shortens every
+  beam that hits it, scan after scan.
+
+Fusing such beams as if they were independent counts the same error dozens of times,
+and the filter becomes overconfident. The fix makes the shared error part of the
+state:
+
+```bash
+# A 3 cm LiDAR bias: the classic filter's mean NEES is 56; with a bias state, 3.6.
+./build/robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18 --robot-model diff-drive \
+    --lidar-beams 72 --lidar-noise 0.02 --lidar-bias 0.03 --ekf --ekf-range-sigma 0.02 --ekf-bias-sigma 0.03
+# A map rasterized from real walls (0.1 m cells): wall lines and per-wall error states.
+./build/robot_simulator ... --ekf --ekf-surface lines --ekf-map-sigma 0.029
+```
+
+| 40 random routes, 72 beams, 2 cm noise | Mean NEES (3 = honest) | Position RMS |
+|---|---|---|
+| 3 cm LiDAR bias: independent beams | 741 | 2.4 cm |
+| 3 cm LiDAR bias: **bias state** | **3.95** | **0.4 cm** |
+| Rasterized walls (0.1 m, up to 6° rotated): independent beams | 3295 | 3.3 cm |
+| … inflated noise / every 6th beam (usual workarounds) | 927 / 125 | 3.0 / 3.1 cm |
+| … **wall lines + wall states** | **6.9** | **2.3 cm** |
+
+- `--ekf-surface lines` recovers sub-cell walls from the grid: staircases of a
+  slanted wall become one fitted line. On a 6° wall the range error drops from 30 mm
+  to under 4 mm, and the range derivatives no longer jump at every cell edge.
+- Grazing beams are now kept and weighted by their own linearization variance
+  (`--ekf-grazing model`, the default). Beams whose hit could slide off the end of a
+  wall are dropped. This replaces the fixed 78° cutoff, which in the experiment was
+  neither the most accurate nor the most consistent choice on any map tested.
+
+Measurements, method and limits:
+[docs/algorithms.md](docs/algorithms.md#17-correlated-range-errors-sub-cell-walls-and-grazing-beams-perception_experiment).
+
+### Global localization, matching places, localization-aware planning, steering by the estimate
+
+```bash
+# Find the robot from scratch (and again after it is carried away) with a particle filter.
+./build/robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18 --robot-model diff-drive \
+    --lidar-beams 72 --ekf --particle-filter
+# Prefer routes the LiDAR can localize on, and drive by the estimate instead of the truth.
+./build/robot_simulator --map maps/hall.csv --start 6 8 --goal 38 22 --robot-model diff-drive \
+    --robot-radius 0.25 --lidar-beams 72 --lidar-range 3 --ekf --connectivity 8 \
+    --plan-for-localization 1 --steer-by-estimate
+```
+
+- **Particle filter:**
+  - finds the robot from no prior knowledge in 100 % of runs, usually on the first scan;
+  - recovers a kidnapped robot in a median 1.2 s (p90 1.7 s), where the EKF never does;
+  - on a map with two identical places, keeps both at about 50/50 instead of picking
+    one, and decides correctly once anything differs.
+- **The EKF on a corridor with pillars every 2 m** locks onto the wrong pillar in 18 %
+  of runs once its prior is uncertain by 1 m, and claims centimetres of uncertainty
+  while doing so.
+- **Localization-aware routes** (`--plan-for-localization`) in a hall whose middle the
+  3 m LiDAR cannot see: 17 % longer, with the worst localization error 27 → 4.6 cm and
+  runs worse than 0.5 m 13 % → 0.
+- **Steering by the estimate** (`--steer-by-estimate`, `--safety-margin`): a path
+  planned with exactly the robot's radius has no slack once the estimate steers. While
+  the LiDAR bounds the error, a margin about the error's size removes collisions (13 cm
+  of error: 8.3 % collisions at 0, none at 10 cm). With dead reckoning, no margin is
+  enough.
+
+Details: [docs/algorithms.md](docs/algorithms.md#19-global-localization-matching-places-planning-for-localization-steering-by-the-estimate-localization_experiment).
 
 ### Dynamic obstacles and replanning
 
@@ -392,7 +496,8 @@ python3 python/run_demo.py --map maps/obstacles.csv --start 1 1 --goal 18 18 \
 
 ```text
 Navigation:     GOAL_REACHED
-Dynamic:        3 moving obstacle(s), sensing range 3.00 m; 3 replan(s) in 0.009 ms, 9.5 s waiting, closest gap 0.486 m
+Dynamic:        3 moving obstacle(s), sensing range 3.00 m; 2 replan(s) in 0.008 ms, 11.9 s waiting, closest gap 0.200 m
+                planner reactive, livelock switch after 15.0 s: 0 switch(es)
 ```
 
 ![Moving obstacles and replanning in the animation](docs/images/navigation_dynamic.gif)
@@ -400,19 +505,81 @@ Dynamic:        3 moving obstacle(s), sensing range 3.00 m; 3 replan(s) in 0.009
 ![Replans and clearance over time](docs/images/replanning.png)
 
 Three obstacles move back and forth: one crosses the top corridor, one dawdles across
-the corner, and one patrols the right-hand lane. The robot only sees them within 3 m
-and in line of sight. It estimates their velocities and treats the cells they are about
-to sweep as blocked. When its path is blocked it waits up to 6 s for the way to clear,
-then replans with A*. The same `AStarPlanner` object serves every replan, reusing its
-buffers. Before each step it checks that it will not meet an obstacle within the next
-2 s, so it crosses behind a moving obstacle rather than in front of it.
+the corner, and one patrols the right-hand lane.
 
-On 500 random scenarios with three moving obstacles each, the robot reaches the goal in
-98.2 % (point) and 98.8 % (differential drive) of the runs, against 71 % for a robot that
-does not react. The point robot never collided; the differential drive collided in
-2 runs. Most of the remaining runs time out safely, waiting for a passage an obstacle
-keeps blocking. Each rule of the method came from a failure found in testing; see
-[docs/algorithms.md](docs/algorithms.md#14-dynamic-obstacles-and-replanning---dynamic-obstacles-file).
+- **Seeing them:** the robot uses its own LiDAR. Returns that the known map does not
+  explain are clustered into discs and tracked by Kalman filters. A track survives
+  short occlusions (it coasts) and is dropped when the LiDAR sees through where it
+  should be.
+- **Predicting them:** each track learns where its obstacle turns round, so its
+  predicted path bounces between those points instead of running straight on.
+- **Avoiding them:** the cells an obstacle is about to sweep count as blocked. When
+  its path is blocked, the robot waits up to 6 s for the way to clear, then replans
+  with A*. The same `AStarPlanner` object serves every replan, reusing its buffers.
+  Before each step it checks that it will not meet an obstacle within the next 1 s, so
+  it crosses behind a moving obstacle rather than in front of it.
+
+On 500 random scenarios with three moving obstacles each (current defaults):
+
+| | Reached (point / diff-drive) | Collisions | Shuttling reversals per run |
+|---|---|---|---|
+| Robot that does not react | 65 % / 61 % | 174 / 195 | – |
+| Handed the true positions (the original shortcut) | 100 % / 98.0 % | 0 / 10 | 0.65 / 0.62 |
+| **Own LiDAR, tracking, learned reversals** | **99.8 % / 98.6 %** | **1 / 6** | **0.61 / 0.70** |
+
+With faster obstacles (0.6–1.0 m/s) the gap widens: 100 % / 97.3 % against
+98.3 % / 94.0 % for the true positions. `--obstacle-perception oracle` restores the original shortcut.
+`--occlusion-aware` treats space hidden behind walls as possibly occupied; it is
+measured but off by default, because it made things worse. Details:
+[docs/algorithms.md](docs/algorithms.md#18-moving-obstacles-from-the-lidar-alone-tracking-reversals-occlusion---obstacle-perception)
+(and [section 14](docs/algorithms.md#14-dynamic-obstacles-and-replanning---dynamic-obstacles-file)
+for the replanning rules).
+
+### Planning with moving obstacles: space and time, turns, livelock, several robots
+
+```bash
+# Timed plans around the predicted obstacles (safe interval path planning).
+./build/robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18 --robot-model diff-drive \
+    --dynamic-obstacles maps/obstacles_dynamic.csv --dynamic-planner space-time
+# The fastest path for the differential drive, turns included.
+./build/robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18 --robot-model diff-drive --turn-aware
+# The benchmarks: reactive vs. space-time, margins x horizons, 2-6 robots, turns.
+./build/planning_experiment spacetime --runs 500
+./build/planning_experiment robots --runs 100
+```
+
+- **Space-time planning** (`--dynamic-planner space-time`, SIPP): each cell's safe
+  intervals come from the obstacles' predicted motion over 20 s; the robot waits where
+  the plan says, and crosses when the plan says. With perfect predictions it all but
+  solves the benchmark, and is the fastest (34 s against 49 s). With the LiDAR's
+  predictions it is as good as the reactive robot for the point robot at normal speeds,
+  10 % faster, but worse for the differential drive among fast obstacles. On the
+  sample scenario the differential drive arrives in 37.0 s without waiting (63.2 s
+  reactive).
+- **Turn-aware planning** (`--turn-aware`): A* over (cell, heading) with the turning
+  time as cost. On the obstacles map, 2.8 → 1.7 turns and 21.5 → 19.8 s per route, never
+  slower.
+- **Livelock switch** (`--livelock-window`, on by default): when the robot has not got
+  closer to the goal for 15 s, it switches to the other strategy for 15 s, once per
+  stuck place.
+- **Margin and look-ahead:** swept over 300 scenarios; 0.15 m and 1 s are the new
+  defaults (were 0.25 m and 2 s): fewer timeouts, less waiting, no more collisions.
+- **Several robots** (`multi_robot.hpp`): 2–6 robots, each perceiving the others like
+  moving obstacles, no coordination. No contact in 4000 runs; identical robots in
+  mirror-image situations deadlock, and staggered livelock windows break the symmetry.
+
+The benchmark of section 18, with the previous settings as the baseline:
+
+| 500 scenarios, 0.2–0.5 m/s | Reached (point / diff-drive) | Travel time |
+|---|---|---|
+| Reactive, previous settings | 97.8 % / 96.0 % | 48.7 / 58.6 s |
+| **Reactive + livelock switch, new margins (default)** | **100 % / 99.2 %** | **39.8 / 46.7 s** |
+| Space-time + livelock switch | 100 % / 98.2 % | 36.1 / 40.2 s |
+| Space-time, perfect prediction | 100 % / 99.8 % | 34.2 / 37.5 s |
+
+With fast obstacles (0.6–1.0 m/s) the default goes from 96.3 % / 95.3 % to
+99.3 % / 99.0 %. Details:
+[docs/algorithms.md](docs/algorithms.md#20-planning-with-moving-obstacles-space-and-time-turns-livelock-margins-several-robots-planning_experiment).
 
 ### Why NO_PATH? Minimum ghost cells
 
@@ -636,6 +803,27 @@ goal, the result is `START_TOO_CLOSE_TO_OBSTACLE` / `GOAL_TOO_CLOSE_TO_OBSTACLE`
 including why inflation is safe and when it is conservative:
 [docs/algorithms.md](docs/algorithms.md#8-robot-footprint-and-obstacle-inflation).
 
+### ROS 2 and RViz2
+
+The simulator also runs as ROS 2 nodes (tested on Humble). The standalone build
+doesn't need ROS. The ROS 2 package builds into its own `build_ros2/` and
+`install_ros2/` directories.
+
+```bash
+source /opt/ros/humble/setup.bash
+scripts/build_ros2.sh --test
+source install_ros2/setup.bash
+ros2 launch robot_nav_sim_ros sim.launch.py robot_model:=diff-drive lidar_beams:=36 ekf:=true
+```
+
+RViz2 opens with the map, the inflated map, the plan, the trajectory, the odometry, the
+scan, the EKF estimate with its covariance, and the moving obstacles. **2D Goal Pose**
+sends a new goal and the robot replans from where it is. **2D Pose Estimate** moves the
+robot. Frames follow REP 103 (`y` up, counter-clockwise yaw). The simulator's `y`-down
+grid is converted at the boundary.
+
+Topics, parameters, frame conversions and tests: [docs/ros2.md](docs/ros2.md).
+
 ### Generate maps
 
 ```bash
@@ -770,8 +958,12 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 50 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 63 CTest entries: C++ suites, CLI checks, Python suite
 ```
+
+The ROS 2 package has 21 more tests (frame conversions, missions against the
+standalone pipeline, and a launch test of both nodes). Run them with
+`scripts/build_ros2.sh --test`.
 
 [docs/testing.md](docs/testing.md) lists every test case and what it checks, plus the
 mutation checks (deliberately broken code that the tests must catch) and the sanitizer
@@ -793,8 +985,12 @@ robot-nav-simulator/
 │                           plot_ghost_experiment, plot_alignment_experiment
 ├── maps/                   sample maps (empty, obstacles, corridor, maze, obstacles_fine) and
 │                           moving obstacles for the obstacles map (obstacles_dynamic)
-├── scripts/                build.sh, test.sh, run.sh
-├── docs/                   architecture, algorithms, testing, performance,
+├── ros2/robot_nav_sim_ros/ optional ROS 2 package: map_server_node, simulator_node,
+│                           frame conversions, launch file, RViz2 config, tests
+├── cmake/                  amr_core_sources.cmake (core sources shared with the ROS 2 build)
+├── scripts/                build.sh, test.sh, run.sh, build_ros2.sh
+├── Dockerfile, docker-compose.yml, docker/   one image with everything; entrypoint and test runner
+├── docs/                   architecture, algorithms, testing, performance, ros2, docker,
 │                           benchmark data and images
 └── results/                generated outputs (git-ignored)
 ```
@@ -802,8 +998,10 @@ robot-nav-simulator/
 ## Known limitations
 
 - The differential-drive model has turn-rate but no acceleration limits, and it stops to
-  turn at every corner. The planner minimises path length, not travel time including
-  turns.
+  turn at every corner. The planner minimises path length unless `--turn-aware` asks for
+  the fastest path, turns included.
+- Robots do not coordinate: in one-cell corridors, robots that meet head-on, or one
+  parked on its goal, can block each other until the timeout (section 20).
 - The footprint is a disc (no rectangular or oriented robots). Inflation is
   evaluated at cell centers, so on a coarse grid it can reject a passage the robot would
   physically fit through (safe, but conservative). Measured: with 0.1 m cells, doors up
@@ -817,6 +1015,9 @@ robot-nav-simulator/
 - Moving obstacles are avoided reactively, with constant-velocity prediction: obstacles
   that reverse, close in from two sides, or keep blocking the only passage can still
   cause a collision or a timeout (about 2 % of random scenarios).
+- The ROS 2 simulator plays back precomputed missions. A new goal restarts from the
+  center of the robot's current cell. It does not take `/cmd_vel` commands
+  ([docs/ros2.md](docs/ros2.md#limitations)).
 - GIF export of the default ~200-frame animation takes about 9 s, most of it Pillow's GIF
   encoding. Lower `--fps` or `--dpi` for faster exports.
 
@@ -829,6 +1030,9 @@ robot-nav-simulator/
 | CMake says "Python tests skipped" | create `.venv` and install `requirements.txt`, then re-run `cmake -S . -B build` |
 | `--show` / `--animate` opens no window | no display is available (e.g. SSH); use `--save-gif` instead |
 | `MP4 export needs FFmpeg` | `sudo apt install ffmpeg`, or use GIF export |
+| `docker compose up sim`: RViz2 says `could not connect to display` | Linux: `xhost +local:docker`; WSL2: check that `echo $DISPLAY` is set ([docs/docker.md](docs/docker.md#rviz2-display)) |
+| `ROS 2 is not sourced` from `scripts/build_ros2.sh` | `source /opt/ros/<distro>/setup.bash` first |
+| RViz2 shows no scan | the scan uses sensor-data (best-effort) QoS; set the LaserScan display's reliability to Best Effort (the bundled config does) |
 | `results were produced for a ... map` / `path crosses obstacles` | the CSV files in `results/` belong to another map; re-run the simulator with this map |
 
 ## Roadmap
@@ -853,16 +1057,22 @@ robot-nav-simulator/
   time and control effort (`heading_experiment`).
 - **Realistic actuator in navigation:** use the lagged, disturbed heading plant and the
   PID controller inside the navigation simulator (with path-tracking error as a metric).
-- **Turn-aware planning:** charge for turns so a differential-drive robot gets the
-  fastest route, not just the shortest.
+- ✅ **Turn-aware planning:** charge for turns so a differential-drive robot gets the
+  fastest route, not just the shortest (`--turn-aware`).
 - ✅ **Simulated 2D LiDAR:** exact ray casting, scans every timestep, rays in the
   animation (`--lidar-beams`).
 - ✅ **EKF localization:** noisy odometry, an EKF corrected by the LiDAR, estimated vs.
   true trajectory with error plots (`--ekf`).
 - ✅ **Dynamic obstacles:** moving obstacles, blocked-path detection and replanning
   with the reused `AStarPlanner` (`--dynamic-obstacles`).
-- **ROS 2 integration:** publishing the map, path and robot state for RViz2, keeping the
-  standalone simulator.
+- ✅ **Planning with moving obstacles:** space-time planning (SIPP), livelock detection
+  with a strategy switch, tuned margins, several robots (`planning_experiment`). Open:
+  coordination between robots (who yields in a one-cell corridor), and planning
+  against sets of possible futures rather than one prediction.
+- ✅ **ROS 2 integration:** `map_server_node` and `simulator_node` publish the map,
+  plan, pose, scan, EKF estimate and moving obstacles for RViz2, which can set goals and
+  poses; the standalone simulator is unchanged ([docs/ros2.md](docs/ros2.md)). Open:
+  `/cmd_vel` control so Nav2 can drive the robot.
 - ✅ **Why NO_PATH?** the minimum ghost-cell explanation of a planning failure, and
   re-sensing only those cells (`ghost_experiment`). Open: the complexity of the lattice
   problem, and using the explanation live in `robot_simulator`.

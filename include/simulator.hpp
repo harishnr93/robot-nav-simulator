@@ -21,22 +21,32 @@
 // independent verification of the planned path.
 //
 // Dynamic obstacles and replanning (optional DynamicScenario, dynamic_obstacles.hpp):
-//   * Each step the robot looks for obstacles within its sensing range and line of
-//     sight. An obstacle seen in two consecutive steps gets a velocity estimate (its
-//     displacement / dt). Planning-map cells whose centers are closer than obstacle
-//     radius + robot radius + margin to the obstacle's predicted sweep (from its
-//     current position to where it will be after the prediction horizon, at the
-//     estimated velocity) count as blocked.
+//   * Each step the robot perceives the obstacles: by default with its own LiDAR
+//     (a scan of the map and the obstacles; returns the map does not explain are
+//     clustered into discs and tracked, obstacle_tracking.hpp), whose tracks give each
+//     obstacle's predicted path over the prediction horizon (straight on, or bouncing
+//     at the turning points learned so far) and its uncertainty. With the oracle, an
+//     obstacle within sensing range and line of sight is seen at its true position,
+//     with velocity = displacement / dt from two consecutive sightings, and predicted
+//     straight on. Planning-map cells whose centers are closer than obstacle
+//     radius + robot radius + margin to the predicted sweep count as blocked.
 //   * If a blocked cell lies on the rest of the path, the robot replans to the goal
 //     with the same AStarPlanner object (its buffers are reused): from its current
 //     cell when it stands on a waypoint, from the waypoint it is driving to
 //     otherwise, or, if that one is blocked, from the waypoint it came from (it
-//     drives back first). If there is no path yet, it keeps following the old path
+//     drives back first, unless backing up is itself predicted to end in contact:
+//     then it heads for whichever end of its segment keeps the larger predicted gap).
+//     If there is no path yet, it keeps following the old path
 //     while its next waypoint is free, backs off to the previous waypoint if the one
 //     ahead is blocked, waits on a waypoint whose successor is blocked, and tries
 //     again next step.
-//   * A safety stop: the robot also waits instead of taking a step that would bring
-//     it within contact distance of a seen obstacle moving at its estimated velocity.
+//   * A look-ahead gate: the robot also waits instead of following the path when that
+//     would come within the margin of a seen obstacle within the prediction horizon
+//     (each tracked obstacle inflated by its prediction uncertainty) and standing is
+//     safer. After waiting out the patience the margin is waived: any contact-free
+//     motion is taken (an obstacle patrolling right next to the path never leaves).
+//   * Optionally (PerceptionConfig::occlusion_aware) space hidden behind walls counts
+//     as possibly occupied: the robot creeps round blind corners.
 //   * Obstacles do not avoid the robot. Collisions with them are checked exactly
 //     against their true motion during every step (moving, turning or waiting).
 //
@@ -53,12 +63,15 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "dynamic_obstacles.hpp"
 #include "grid_map.hpp"
+#include "lidar_config.hpp"
 #include "robot.hpp"
+#include "tracking_config.hpp"
 #include "types.hpp"
 
 namespace amr {
@@ -96,12 +109,77 @@ struct TrajectorySample {
     double angular_velocity = 0.0;  ///< rad/s
 };
 
+/// Planner for moving obstacles.
+enum class DynamicPlanner {
+    /// Replan shortest paths on the planning map with the cells about to be swept
+    /// blocked; wait, retreat and gate (the rules below).
+    Reactive,
+    /// Plan over space and time (spacetime_planner.hpp) against the predicted motion of
+    /// every perceived obstacle, waiting where the plan says; replan on every cell and
+    /// at least every spacetime_period. Reactive rules take over when no timed plan
+    /// is found; the look-ahead gate stays as a safety net.
+    SpaceTime,
+};
+
 /// Sensing and replanning parameters for dynamic obstacles.
 struct ReplanningConfig {
     double sensing_range = 3.0;  ///< obstacles are seen within this distance (to their edge), m
-    double margin = 0.25;        ///< extra clearance around a seen obstacle when planning, m
-    double prediction_horizon = 2.0;  ///< seconds of estimated obstacle motion blocked, s
+    double margin = 0.15;        ///< extra clearance around a seen obstacle when planning, m
+    double prediction_horizon = 1.0;  ///< seconds of estimated obstacle motion blocked, s
     double patience = 6.0;       ///< how long the path may stay blocked before a detour, s
+    /// When backing up to the previous waypoint would itself end in contact, head for
+    /// whichever end of the current segment keeps the larger predicted gap.
+    bool choose_retreat = true;
+    /// How the robot plans around moving obstacles.
+    DynamicPlanner planner = DynamicPlanner::Reactive;
+    double spacetime_horizon = 20.0;  ///< SpaceTime: seconds of predicted motion planned against
+    double spacetime_period = 0.0;    ///< SpaceTime: replan at least this often (on a cell), s (0: every step)
+    /// SpaceTime: plan against the obstacles' true future motion (an omniscient upper
+    /// bound for benchmarks), instead of the perceived and predicted one.
+    bool perfect_prediction = false;
+    /// Livelock detection: if the robot's remaining distance to the goal (along the
+    /// static planning map) has not improved for this long, it is stuck, shuttling
+    /// (livelock) or waiting (deadlock), and switches strategy: reactive <->
+    /// space-time. The new strategy gets a full window before the next switch.
+    /// 0 disables the detector.
+    double livelock_window = 15.0;
+};
+
+/// How the robot perceives moving obstacles.
+enum class ObstaclePerception {
+    /// Their true positions when within sensing range and in line of sight of their
+    /// centers; velocity from two consecutive sightings (the original shortcut).
+    Oracle,
+    /// Its own LiDAR only: returns the map does not explain are clustered into discs
+    /// and tracked (obstacle_tracking.hpp).
+    Lidar,
+};
+
+/// Perception of moving obstacles (default: the robot's own LiDAR).
+struct PerceptionConfig {
+    ObstaclePerception mode = ObstaclePerception::Lidar;
+    /// Lidar mode. With beams = 0: 360 beams over a full circle, range = sensing range.
+    LidarConfig lidar;
+    DetectionConfig detection;
+    TrackerConfig tracker;
+    /// Radius added to a tracked obstacle for its prediction uncertainty (2 sigma),
+    /// at most this much, m.
+    double max_inflation = 0.1;
+    /// Also inflate the cells blocked for replanning (not only the look-ahead gate).
+    bool inflate_planning = false;
+    /// Occluded space as possibly occupied: free space hidden behind walls may hold an
+    /// obstacle ("phantom") that moves at up to phantom_speed. Before each step, the
+    /// robot looks from where the step would take it: if a phantom emerging from the
+    /// space still hidden from there could reach it within phantom_reaction, the step
+    /// waits (the robot creeps round corners, seeing more with every step). Space
+    /// beyond the sensing range does not count: obstacles coming from there are seen
+    /// in time. After waiting out the patience the robot commits and ignores phantoms
+    /// for phantom_commit meters.
+    bool occlusion_aware = false;
+    double phantom_speed = 1.0;      ///< assumed top speed of unseen obstacles, m/s
+    double phantom_radius = 0.3;     ///< m
+    double phantom_reaction = 0.5;   ///< time the robot needs to react once one appears, s
+    double phantom_commit = 1.5;     ///< m driven ignoring phantoms after the patience
 };
 
 /// Optional dynamic-obstacle scenario for simulatePath().
@@ -109,6 +187,7 @@ struct DynamicScenario {
     const GridMap* planning_map = nullptr;  ///< map A* replans on (the inflated map)
     std::vector<DynamicObstacle> obstacles;
     ReplanningConfig replanning;
+    PerceptionConfig perception;
 };
 
 /// One replanning attempt.
@@ -126,6 +205,8 @@ struct ReplanEvent {
 /// Upper bound on validated replanning parameters.
 constexpr double kMaxSensingRange = 1000.0;
 constexpr double kMaxPredictionHorizon = 100.0;
+/// Upper bound accepted for ReplanningConfig::livelock_window, s.
+constexpr double kMaxLivelockWindow = 3600.0;
 
 /// Empty string if the replanning parameters are valid, otherwise the reason.
 std::string validateReplanningConfig(const ReplanningConfig& config);
@@ -147,6 +228,9 @@ struct SimulationResult {
     std::vector<ReplanEvent> replans;     ///< every replanning attempt, in time order
     std::size_t wait_steps = 0;           ///< steps spent waiting for a blocked path
     int collided_obstacle = -1;           ///< index of the obstacle hit, -1 if none
+    std::size_t tracks_created = 0;       ///< Lidar perception: tracks started over the run
+    int strategy_switches = 0;            ///< livelocks detected (strategy switched)
+    int collided_robot = -1;              ///< multi_robot: id of the robot hit, -1 if none
     double min_dynamic_clearance = 0.0;   ///< closest gap to any obstacle edge over the run, m
 
     bool success() const { return status == NavigationStatus::GoalReached; }
@@ -171,5 +255,43 @@ SimulationResult simulatePath(const GridMap& map, const std::vector<GridCoord>& 
                               const MotionConfig& config,
                               Connectivity connectivity = Connectivity::Four,
                               const DynamicScenario* dynamic = nullptr);
+
+/// Another robot, as the others see it: where it is now (multi_robot.hpp).
+struct MovingDisc {
+    int id = 0;
+    WorldPoint center;
+    double radius = 0.0;
+};
+
+class NavigatorState;
+
+/// One robot's navigation, one timestep at a time: simulatePath runs a navigator to
+/// the end; several navigators stepped together are robots that see each other
+/// (multi_robot.hpp). The map, path and scenario must outlive the navigator.
+class Navigator {
+public:
+    Navigator(const GridMap& map, const std::vector<GridCoord>& path, const MotionConfig& config,
+              Connectivity connectivity = Connectivity::Four, const DynamicScenario* dynamic = nullptr);
+    ~Navigator();
+    Navigator(Navigator&&) noexcept;
+    Navigator& operator=(Navigator&&) noexcept;
+
+    /// True once the run ended (goal, collision, timeout or an invalid request).
+    bool finished() const;
+    /// Decide and take one timestep. `others` (other robots, perceived like moving
+    /// obstacles) are where they are at the start of the step; contact with them is
+    /// not checked here (the caller knows how everyone moved).
+    void step(const std::vector<MovingDisc>& others = {});
+    /// End the run with a collision with another robot (`other` = its id).
+    void collideWithRobot(int other);
+    /// Where the robot is (center) and was at the start of the last step.
+    WorldPoint position() const;
+    WorldPoint previousPosition() const;
+    /// The result so far (complete once finished()).
+    const SimulationResult& result() const;
+
+private:
+    std::unique_ptr<NavigatorState> state_;
+};
 
 }  // namespace amr

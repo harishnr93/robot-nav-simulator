@@ -750,14 +750,17 @@ horizontal face:  H = [  0,        −1/sin φ,   −r / tan φ ]
 ```
 
 (The tests check it against finite differences of the ray caster at 500 random poses.)
-Beams are skipped where this linearization is poor: a predicted corner hit, a grazing
-beam (incidence above about 78°, where `1/cos φ` explodes) and beams without a measured
-or predicted return. A beam whose innovation `ν = z − r̂` is larger than `--ekf-gate`
+Beams are skipped where there is nothing to linearize: a predicted corner hit, and beams
+without a measured or predicted return. Grazing beams (where `1/cos φ` explodes) are
+kept and weighted by their own linearization variance, by default (`--ekf-grazing
+model`, section 17); the classic rule dropped every beam beyond 78.46°
+(`--ekf-grazing cutoff`). A beam whose innovation `ν = z − r̂` is larger than `--ekf-gate`
 (default 3) standard deviations `√(H P Hᵀ + R)` is rejected as an outlier. Typically the
 real beam passed an obstacle edge that the predicted one hit, or the other way round.
 About 0.25 % of the beams are rejected on the demo route.
 
-The accepted beams are fused in one batch update in **information form**:
+With the classic model, the accepted beams are fused in one batch update in
+**information form**:
 
 ```text
 P⁺ = (P⁻¹ + Σ Hᵢᵀ Hᵢ / R)⁻¹,     x⁺ = x + P⁺ Σ Hᵢᵀ νᵢ / R,     R = --ekf-range-sigma² (0.05 m)
@@ -765,7 +768,8 @@ P⁺ = (P⁻¹ + Σ Hᵢᵀ Hᵢ / R)⁻¹,     x⁺ = x + P⁺ Σ Hᵢᵀ νᵢ
 
 This is the standard Kalman update of all the beams stacked (tested against
 `K = P Hᵀ / (H P Hᵀ + R)` for one beam), but it only inverts 3 × 3 matrices, however
-many beams there are.
+many beams there are. The other models (section 17) fuse the beams one at a time, all
+linearized at the prior; without extra states that equals the batch update to 1e-9.
 
 **Starting pose.** The filter, and dead reckoning, start from the true start pose plus
 an error drawn from the initial uncertainty (1 cm, 0.01 rad). Starting exactly at the
@@ -781,16 +785,17 @@ on the obstacles route:
 |---|---|
 | Prediction only, 200 runs | 3.19 |
 | 72 beams, 5 cm range noise, `--ekf-range-sigma 0.05`, 100 runs | 3.16 |
-| 72 beams, exact ranges, default sigma 0.05 m (one run) | 0.49 |
+| 72 beams, exact ranges, default sigma 0.05 m (one run) | 0.67 |
 
 The last line is cautious on purpose: the default assumes 5 cm of range noise, while
 the default LiDAR is exact. Set `--ekf-range-sigma` to the actual noise for a consistent
 filter.
 
-**Results** (obstacles map, 72 beams, defaults, one run): position error RMS 4 mm and
-at most 1.5 cm, against 0.53 m RMS and 1.14 m at the end for dead reckoning; heading
-RMS 0.06° against 4.8°. Over odometry seeds 0–5, the EKF stays at 3–4 mm RMS (at most
-1.7 cm) while dead reckoning ranges from 0.16 to 0.94 m RMS.
+**Results** (obstacles map, 72 beams, defaults, one run): position error RMS 3 mm and
+at most 1.4 cm, against 0.53 m RMS and 1.14 m at the end for dead reckoning; heading
+RMS 0.05° against 4.8°. Over odometry seeds 0–5, the EKF stays at 3 mm RMS (at most
+2 cm) while dead reckoning ranges from 0.16 to 0.94 m RMS. (With the classic 78.46°
+cutoff: 4 mm and 0.06°.)
 
 **Cost.** About 0.1 µs per beam (a ray cast plus a rank-one information update): 7.5 µs
 per timestep with 72 beams, 2.9 ms for the whole run.
@@ -809,9 +814,10 @@ per timestep with 72 beams, 2.9 ms for the whole run.
 **Limitations.**
 
 - The map is known and static. This is localization, not SLAM.
-- Range measurements of one scan are treated as independent. Map discretization makes
-  neighbouring beams' errors correlated, which a real implementation would model or
-  avoid by subsampling beams.
+- By default, range measurements of one scan are treated as independent, which is
+  right for this simulator's own world (the map is the truth, and the LiDAR noise is
+  white). Correlated errors (a LiDAR bias, or a map that is a rasterization of the real
+  walls) are modeled by the measurement models of section 17.
 - Requires the differential drive (`--robot-model diff-drive`): the odometry model
   measures turns and distances driven.
 - The estimate does not feed back into the control. Closing that loop is part of the
@@ -1273,6 +1279,730 @@ Grid NO_PATH cases from noisy LiDAR maps (720 beams, misses and spurious returns
 - **Recall depends on coverage.** The unobserved-space rule makes the planner wait for
   observations rather than guess, so it is cautious where mapping was sparse.
 
+## 17. Correlated range errors, sub-cell walls and grazing beams (`perception_experiment`)
+
+**Why:** the EKF of section 13 treats the beams of a scan as independent. That is true
+in this simulator's own world, where the map is the truth and the LiDAR noise is white.
+It is false for two common errors that many beams share:
+
+- **A range bias** common to a whole scan (calibration, temperature).
+- **A map that is a rasterization of the real walls.** A wall that the map put 4 cm
+  behind its true position shortens every beam that hits it, in every scan.
+
+Fusing 60 beams that share one error as if they were independent shrinks the
+covariance as if 60 errors had averaged out. The filter becomes confident, wrong, and
+deaf to later corrections.
+
+**Measuring it.** `perception_experiment ekf` runs random routes (differential drive,
+72 beams, 2 cm white noise, 40 routes per row) and measures the NEES (3 = honest, as in
+section 13) and the position RMS. It uses two worlds:
+
+- **grid:** the map is the truth, plus an optional LiDAR bias (`--lidar-bias`, a
+  Gauss–Markov process: constant, or drifting with `--lidar-bias-time`).
+- **continuous:** the obstacles map's blocks as polygons. Each block is shifted by up
+  to 0.45 cells and rotated by up to 6°; the outer walls are shifted and tilted by up
+  to 1°. The LiDAR sees the polygons. The robot's map is their rasterization (majority
+  rule), as good as a grid of that size can be.
+
+**Fix 1: shared errors as states.** The exact treatment of coloured noise is to put
+the shared error into the state (`AugmentedEkf`):
+
+- **Bias state** `b` (`--ekf-bias-sigma`, `--ekf-bias-time`): every beam reads
+  `h(pose) + b`.
+- **Wall states** (`--ekf-map-sigma`, `--ekf-map-tilt`): each wall the beams hit gets
+  an offset `a` and a tilt `t`. Its true surface lies `a + t (s − s₀)` behind the
+  mapped one at position `s` along it, so a beam at incidence `α` reads
+  `h + (a + t (s − s₀)) / cos α`. On the line surface (fix 2), a wall is one fitted
+  segment. On the grid, hits within 10° and half a cell of each other belong to one
+  wall.
+
+The structure was measured first (`perception_experiment maperror`). Fitting one offset
+and tilt per wall leaves 8 mm of the 35 mm RMS map error at 0.1 m cells, and 2.6 cm of
+14 cm at 0.5 m; about 0.5 % of beams are gross (> 0.5 m). A first version used a
+Gaussian process with distance-based correlation along surfaces. It correlated walls
+that merely faced the same way and missed that one wall's error is shared along its
+whole length, and its NEES stayed at about 180.
+
+With these states the remaining noise is white, and the beams are fused one at a time,
+all linearized at the prior. Without extra states this equals the information-form
+batch update to 1e-9 (tested).
+
+**Fix 2: sub-cell walls (`--ekf-surface lines`).** A rasterized slanted wall is a
+staircase. On the grid, every step has its own axis-aligned normal, so the range
+derivative jumps at every cell edge (`∂r/∂y` alternates between `−1/sin φ` and 0). A
+small pose change moves the hit to another step, where the range jumps too. The line
+surface recovers the walls from the grid:
+
+1. **Trace:** trace every obstacle boundary as a closed chain of cell faces, and merge
+   collinear faces into the exact axis-aligned outline.
+2. **Detect staircases:** a straight wall rasterized off-axis turns alternately left
+   and right, with one-face risers and treads whose lengths differ by at most one. A
+   real corner repeats a turn; a longer run in the riser direction is a jog or a
+   corner side and stays exact.
+3. **Fit:** each staircase gets one line, a total-least-squares fit through its face
+   midpoints. It is rejected if any midpoint lies more than 0.75 cells off.
+   Neighbouring lines are intersected near their shared vertex; elsewhere a short
+   connector joins them.
+
+| 0.1 m cells, beams at 20° to the normal | Range RMS vs. truth | Largest jump of `∂r/∂y` along the wall |
+|---|---|---|
+| Grid, 3° / 6° / 17° / 33° walls | 31 / 30 / 29 / 29 mm | 1.06 |
+| Lines, same walls | 0.08 / 3.7 / 0.5 / 1.1 mm | 0 |
+
+Axis-aligned maps come out exactly as the grid (tested on the obstacles map: identical
+ranges and normals). A C1 bicubic interpolation of the occupancy was tried first and
+dropped. Interpolation keeps the staircase (normals spread by 14° on a 6° wall, some by
+up to 68°), and straightening it would need a kernel as wide as a step, about 10 cells.
+
+**Results** (mean NEES, its median over runs, the share of samples within the 95 %
+bound, and position RMS):
+
+| Model | Bias 3 cm (grid) | Rasterized 0.1 m, rotated | 0.1 m, axis-aligned | 0.05 m, rotated | 0.25 m, rotated |
+|---|---|---|---|---|---|
+| Independent beams (classic) | 741 / 237 / 18 % / 2.4 cm | 3295 / 2790 / 0 % / 3.3 cm | 4099 / 3780 / 0 % / 3.7 cm | 906 / 782 / 5 % / 1.8 cm | 21627 / 18099 / 0 % / 9.8 cm |
+| Noise inflated to cover the error | 143 / 72 / 29 % / 2.1 cm | 927 / 840 / 3 % / 3.0 cm | 1225 / 873 / 0 % / 3.4 cm | 585 / 476 / 8 % / 1.8 cm | 1420 / 1375 / 0 % / 7.5 cm |
+| … and every 6th beam only | 27 / 12 / 48 % / 2.2 cm | 125 / 98 / 9 % / 3.1 cm | 171 / 139 / 5 % / 3.4 cm | 82 / 74 / 23 % / 1.9 cm | 201 / 194 / 4 % / 7.4 cm |
+| Bias state | **3.95 / 3.96 / 90 % / 0.4 cm** | – | – | – | – |
+| Wall states, grid surface | – | 20 / 9.9 / 48 % / 3.5 cm | 5.1 / 4.0 / 82 % / 2.0 cm | 23 / 13 / 40 % / 1.9 cm | 38 / 11 / 46 % / 9.2 cm |
+| **Wall states, line surface** | – | **6.9 / 4.4 / 76 % / 2.3 cm** | **4.3 / 3.1 / 89 % / 2.0 cm** | **7.0 / 5.7 / 70 % / 1.2 cm** | **19 / 8.6 / 56 % / 6.1 cm** |
+
+- The usual workarounds (inflating `R`, subsampling beams) reduce the overconfidence
+  10–100×, but it stays 10–400× too large. The error is shared, not just large, so no
+  per-beam variance can describe it.
+- The bias state is honest and six times more accurate: it estimates the bias to
+  0.2 mm.
+- Wall states on the line surface bring rasterized maps from NEES 900–22000 to 4–19,
+  and halve the position error at 0.05–0.1 m cells.
+- Residual states per cell-sized patch (`--ekf-map-residual`) help little and cost
+  20× more.
+- The wall-state prior was swept (`--sweep`): an offset std of `res/√12` and a tilt
+  std of 0.02 rad are best. Larger priors are *worse* on both counts. When every wall
+  is free to move, the pose is less constrained, and the EKF's linearization at
+  changing estimates (the known EKF-SLAM inconsistency) grows.
+
+**Fix 3: grazing beams (`--ekf-grazing model`, now the default).** The classic rule
+dropped every beam beyond 78.46° incidence. `perception_experiment grazing` swept that
+cutoff from 45° to 89° and compared it with a model that keeps every beam, weighted
+by what it is worth:
+
+- **Linearization variance** `½ tr(G P G P)`, where `G` is the range Hessian of a flat
+  surface (in closed form, tested against finite differences). This is the exact
+  variance of the second-order term for a Gaussian pose error, and it grows without
+  bound towards 90°. Only `|cos α| < 0.02` is skipped, for numerical safety.
+- **Map error along the normal**, magnified by `1/cos α`: the wall states, plus what
+  they leave (0.3 of the offset std, measured).
+- **Sliding off the end of a wall:** at grazing incidence a normal error moves the hit
+  along the wall by `(normal error) × tan α`. When that slide (2σ) could carry the
+  hit past the end of the wall, the real beam may hit something else, so it is
+  skipped. This is a topological risk, not a variance.
+
+| | Grid world (exact map) | Rasterized, 0.1 m | Rasterized, 0.05 m |
+|---|---|---|---|
+| Cutoff 45° | 3.21 / 0.46 cm / 0.19° | 4.47 / 2.25 cm | 4.57 / 1.34 cm |
+| Cutoff 60° | 3.19 / 0.42 cm / 0.11° | 4.80 / 2.17 cm | 4.71 / 1.18 cm |
+| Cutoff 78.46° (classic) | 4.14 / 0.39 cm / 0.06° | 6.91 / 2.29 cm | 6.99 / 1.21 cm |
+| Cutoff 89° | 19.2 / 0.39 cm / 0.08° | 12.1 / 3.25 cm | 10.6 / 1.53 cm |
+| **Model** | **3.76 / 0.38 cm / 0.05°** | **5.01 / 2.18 cm** | **4.53 / 1.09 cm** |
+
+(Mean NEES / position RMS / heading RMS.)
+
+- A fixed cutoff trades consistency against accuracy. Low cutoffs are honest but
+  throw away the beams that fix heading (0.19° heading RMS at 45°). High cutoffs keep
+  them but become overconfident.
+- The model gives the best accuracy on every map and is consistent on the exact one.
+  On rasterized maps it is about as consistent as the best cutoff, with better
+  accuracy. On the CLI's demo route it reaches 3 mm and 0.05° (4 mm and 0.06° with the
+  classic cutoff).
+
+**Cost.** The augmented filter costs `O(n²)` per beam for `n` states: 0.04 ms per
+72-beam scan with wall states (about 30 states), and about 1 ms with residual patches.
+
+**Limitations.**
+
+- The remaining overconfidence on rasterized maps (NEES 4–7 at 0.05–0.1 m cells, 19
+  at 0.25 m) is the EKF's own linearization inconsistency once map states are
+  estimated. Coarse maps also change shape, not just position: blocks one or two cells
+  wide gain or lose a cell, which no Gaussian error model covers. At 0.5 m cells (the
+  CLI's default maps) every model stays far from honest, so localize on a finer map.
+- Wall states are dropped least-recently-used beyond `max_map_states` (200). A wall
+  seen again after that starts from its prior, so its correlation with earlier scans
+  is forgotten.
+- The line surface fits straight walls only. Curved walls stay staircases, or become
+  short segments when their steps are regular.
+
+## 18. Moving obstacles from the LiDAR alone: tracking, reversals, occlusion (`--obstacle-perception`)
+
+**Why:** section 14's robot did not perceive moving obstacles. It was handed their true
+positions whenever they were within 3 m and the line to their centres crossed no wall
+(an "oracle"). It took their velocity from two consecutive sightings and forgot any
+obstacle the moment it went out of sight. This section replaces that shortcut with the
+robot's own LiDAR. It also fixes two weaknesses the shortcut hid:
+
+- **Reversals:** the robot predicted every obstacle straight on, so it could not
+  anticipate a reversal. Each reversal flipped the predicted sweep, and with it the
+  best detour, which caused back-and-forth livelocks.
+- **Forgetting:** an obstacle stopped existing the moment a wall hid it.
+
+**Detection by map subtraction** (`detectMovingObstacles`). Each step the robot scans
+(360 beams over a full circle by default, range = sensing range, 2 cm noise in the
+experiments). Since the map is known, so is every beam's expected range.
+
+- **Foreign returns:** a return more than 10 cm shorter than expected hit something
+  the map does not contain.
+- **Clusters:** consecutive foreign returns closer than 0.3 m form a cluster.
+- **Merge:** clusters whose fitted discs overlap are merged (a wall in front of part of
+  an obstacle splits it).
+- **Minimum size:** clusters need at least 2 points, which drops single stray returns.
+- **Disc fit:** each cluster is fitted by Gauss–Newton to `|p − c| = R`. The robot sees
+  only the near side, so the centre lies behind the hits. The radius is fitted when 3+
+  points span 60°+ of the disc; otherwise it is the 0.3 m prior.
+- **Tested:** on 100 scans of the static map, map subtraction finds nothing. Discs are
+  located to 3 cm, with their radius to 3 cm.
+
+**Tracking** (`ObstacleTracker`). Each track is a constant-velocity Kalman filter
+(0.5 m/s² white acceleration). Each scan:
+
+| Step | Rule | Why (the failure that led to it) |
+|---|---|---|
+| Association | Greedy by Mahalanobis distance within a χ² gate (99.9 %), and 1 m. Confirmed tracks pick before tentative ones. | A stray one-point fragment at a disc's edge started a tentative track that stole the next detection, so the real track starved and never saw the reversal. |
+| Birth | Only from detections that do not overlap a confirmed track's disc. | Same: fragments of a tracked obstacle spawned duplicates. |
+| Two-point start | On a track's second detection, velocity = difference of the two positions, with its covariance. | Starting from velocity 0 ± 1 m/s, a 2 m/s obstacle's estimate pointed the wrong way for the first 0.3 s. |
+| Maneuvers | A normalized innovation above the 99 % gate (one scan), or the last three together above the 6-dof 99 % gate, resets the velocity uncertainty. | A slow obstacle turning round shifts each innovation only a little, but always the same way. |
+| Negative evidence | An undetected track is checked against the scan: if a beam passed through where its disc should be (and the map does not hide it there), that is a miss. 3 misses in a row delete it; a tentative track goes after 1. | – |
+| Coasting | If the disc is hidden (by a wall or another return) or out of range, the track keeps being predicted, with growing uncertainty, for up to 10 s. | The oracle forgot an obstacle the moment it went behind a wall. |
+
+**Predictions that survive reversals** (`predictPath`, item 7). Once a track has moved
+along a straight line (positions within 12 cm RMS of their principal axis), every
+reversal of its velocity along the axis records a turning point. The turning point is
+the farthest position reached before the reversal. The predictor then moves the
+obstacle along the axis and reflects it at the known ends; without a known end in the
+direction of travel it extrapolates. A turning point is learned only from a reversal
+the LiDAR actually watched, with detections less than 0.3 s apart through the turn. An
+obstacle that turns while hidden and reappears says nothing about where it turned;
+learning from it gave turning points far too short. Every predicted position carries
+its standard deviation. The look-ahead gate inflates the obstacle by 2σ (at most
+0.1 m); the planning map is not inflated.
+
+Prediction accuracy (`perception_experiment prediction`; a robot watching one obstacle
+patrol a random lane for 60 s, 300 lanes, after a 10 s warm-up):
+
+| | RMS error 1 s / 2 s ahead | 2 s ahead > 0.5 m off | When a reversal falls within the 2 s: RMS, > 0.5 m off |
+|---|---|---|---|
+| Constant velocity, 0.2–0.5 m/s | 0.48 / 0.87 m | 47 % | 0.98 m, 73 % |
+| **Learned reversals**, 0.2–0.5 m/s | **0.37 / 0.51 m** | **9 %** | **0.38 m, 7 %** |
+| Constant velocity, 0.6–1.0 m/s | 1.27 / 2.23 m | 86 % | 2.26 m, 96 % |
+| **Learned reversals**, 0.6–1.0 m/s | **0.93 / 1.17 m** | **17 %** | **0.97 m, 15 %** |
+
+**Decision rules changed along the way** (they apply to both perceptions):
+
+- **Choosing the retreat.** A robot inside a fast obstacle's predicted sweep used to
+  back up to its previous waypoint by rule, even when that waypoint lay in the middle
+  of the obstacle's lane. When backing up is itself predicted to end in contact, it now
+  heads for whichever end of its segment keeps the larger predicted gap. Over 1000
+  scenarios of the test generator this cut collisions from 26 to 23 (oracle) and from
+  28 to 7 (LiDAR). On blind junctions with 2 m/s cross traffic it took LiDAR tracking
+  from 64 % to 92 %.
+- **Soft margin.** An obstacle patrolling the lane next to the goal (0.23 m away) never
+  leaves; with the full 0.25 m margin the robot waited for it until the timeout. After
+  waiting out the patience (6 s), the gate accepts any contact-free motion.
+
+**Results** (`perception_experiment dynamic`, the obstacles map, start (1, 1), goal
+(18, 18), 3 obstacles on random lanes of 2–8 cells, 600 s limit; reversals = times the
+robot's direction of motion flips by more than 150°, i.e. shuttling):
+
+| 500 scenarios, 0.2–0.5 m/s | Reached | Collisions | Timeouts | Travel vs. oracle | Reversals per run |
+|---|---|---|---|---|---|
+| Point, blind | 64.0 % | 180 | 0 | – | – |
+| Point, oracle (original) | 97.2 % | 3 | 11 | – | 4.1 |
+| Point, LiDAR, constant velocity | 97.8 % | 5 | 6 | +5.7 s | 4.7 |
+| **Point, LiDAR, learned reversals** | **98.8 %** | **3** | **3** | +4.2 s | **2.0** |
+| Differential drive, oracle | 94.8 % | 6 | 20 | – | 5.4 |
+| Differential drive, LiDAR, constant velocity | 97.6 % | 8 | 4 | +4.5 s | 3.6 |
+| **Differential drive, LiDAR, learned reversals** | **98.6 %** | **3** | **4** | +2.3 s | **2.0** |
+
+| 300 scenarios, 0.6–1.0 m/s | Reached | Collisions | Timeouts | Reversals per run |
+|---|---|---|---|---|
+| Point, oracle | 85.7 % | 8 | 35 | 16.5 |
+| Point, LiDAR, constant velocity | 89.7 % | 7 | 24 | 12.6 |
+| **Point, LiDAR, learned reversals** | **94.7 %** | 8 | **8** | **5.1** |
+| Differential drive, oracle | 82.7 % | 9 | 43 | 14.3 |
+| **Differential drive, LiDAR, learned reversals** | **94.7 %** | **4** | **12** | **4.7** |
+
+- The robot that perceives obstacles through its own LiDAR does better than the one
+  handed their true positions. That is because tracks remember (coasting) and predict
+  reversals, not because they are more precise. Learned reversals cut the shuttling by
+  a factor of 2–3 and, with fast obstacles, the timeouts by a factor of 4.
+- **Ablations:** without uncertainty inflation, collisions rise from 3 to 5–6 at
+  normal speeds. Without coasting, collisions rise from 3 to 5–6 at normal speeds and
+  from 8 to 10 with fast obstacles.
+- **Cost:** about 0.13 ms per step with 360 beams (two ray casts per beam, detection,
+  tracking). Travel is 2–4 s longer than with the oracle, because tracks keep blocking
+  where an obstacle may still be.
+
+**Re-measured after section 20** (the turning-point fix, margin 0.15 m, look-ahead 1 s,
+livelock switch; same scenarios):
+
+| | 500 scenarios, 0.2–0.5 m/s: point / diff-drive | 300 scenarios, 0.6–1.0 m/s |
+|---|---|---|
+| Oracle sightings | 100 % / 98.0 % (0 / 10 collisions) | 98.3 % / 94.0 % (3 / 16) |
+| LiDAR, constant velocity | 99.8 % / 97.2 % (1 / 14) | 96.7 % / 92.0 % (8 / 23) |
+| **LiDAR, learned reversals** | **99.8 % / 98.6 % (1 / 6)** | **100 % / 97.3 % (0 / 8)** |
+
+The ordering is unchanged, and learned reversals now matter most with fast obstacles.
+
+**Occluded space (item 8).** Two kinds of hidden obstacle:
+
+1. **Seen, then hidden:** coasting keeps the obstacle, as above. This is the measured
+   gain.
+2. **Never seen** (`--occlusion-aware`): free space hidden behind walls may hold an
+   obstacle moving at up to 1 m/s. Before each step the robot looks from where the
+   step would take it, and holds if something emerging from the space still hidden
+   from there could reach it within 0.5 s. It creeps round blind corners, seeing more
+   with every step. Space beyond the sensing range does not count, since obstacles
+   coming from there are seen in time. After the patience it commits for 1.5 m.
+
+   It was measured on blind junctions (`perception_experiment junction`): a corridor
+   crossed by three side corridors that walls hide until the robot is at the crossing,
+   with cross traffic on long lanes:
+
+   | 200 runs | Cross traffic 0.6–1.2 m/s: reached / collisions | 1.5–2.5 m/s |
+   |---|---|---|
+   | Oracle | 100 % / 0 | 100 % / 0 |
+   | LiDAR tracking | 100 % / 0 (diff-drive 99 % / 2) | 92 % / 16 |
+   | + occlusion-aware | 70 % / 24, 37 timeouts | 0.5 % / 3, 196 timeouts |
+
+   It is off by default because it makes things worse. No collision in any benchmark
+   involved an obstacle in view for less than a second ("seen < 1 s" stays 0): the
+   robot already sees down a side corridor before it enters it. Holding at a blind
+   corner often means holding where cross traffic passes, and waiting gains no
+   information, because what is hidden stays hidden. The remaining junction collisions
+   at 2 m/s (8 %) come from obstacles faster than 3 m of sensing range allows to
+   react to (the oracle avoids them only through its zero latency). They need longer
+   range or speed limits, not occlusion reasoning.
+
+**Limitations.**
+
+- Learned turning points assume straight patrol lanes. Routes with corners fall back
+  to constant velocity.
+- Obstacles are discs. Two obstacles closer than the cluster distance are one cluster.
+- The LiDAR used for obstacles is separate from the EKF's (section 13), which still
+  sees only the static map, and the robot is still steered by its true pose.
+
+## 19. Global localization, matching places, planning for localization, steering by the estimate (`localization_experiment`)
+
+The EKF of section 13 tracks a pose it already roughly knows, and it only observes: the
+robot is steered by its true pose. This section adds four things:
+
+- **Item 9:** finding the robot from scratch, including after it is carried away.
+- **Item 10:** what happens when several places look the same.
+- **Item 11:** choosing routes where localization stays good.
+- **Item 12:** steering by the estimate.
+
+### Particle filter (`particle_filter.hpp`, `--particle-filter`)
+
+Monte Carlo localization uses the existing ray caster as its sensor model. A particle
+is a pose. The motion update applies the measured odometry with the error model of
+section 13, inflated 1.5×. The measurement update scores 36 of the scan's beams with
+the classic mixture: a Gaussian around the expected range, plus uniform random
+readings, plus readings at maximum range. The log-likelihood is divided by 10,
+because a scan's beams are not independent (section 17).
+
+What it took for the filter to work reliably, each step found by a failing measurement:
+
+| Problem measured | Cause | Fix |
+|---|---|---|
+| Global start found the robot in 60 % of runs, after a median 9 s | 5000 particles over 80 m² and 360° average 0.15 per 30 cm × 10° cell; often none starts near the truth | 50 000 particles for the first scan, then KLD-sampling (1 % error) brings them down to a few hundred |
+| Converged estimate 6–8 cm off | A likelihood wide enough for the global search | Annealing: the width follows the particles' spread, from 0.3 m while they are spread out down to 0.05 m once they agree |
+| On a symmetric map the true place died out in half the runs within 4 scans | Coarse clouds: a place's few particles with nearly the right heading decide its score, and resampling starves the loser | Places (connected 0.5 m × 0.5 m × 30° cells) resampled on their own, keeping their weight (a mixture particle filter); each scan first refines coarse places on their own (annealing layers at 0.6, 0.3 and 0.15 m), so places are compared on their best fit; one common likelihood width for all places |
+| Kidnap recovery took a median 9 s, p90 24 s | A few thousand random particles are too sparse to land near the new pose | When the scans fit less than half as well as before, restart global localization |
+| Recovery tail grew to 14 s, and runs took 4× longer | A feedback loop: injected particles kept their parent's weight, held the fit statistic down, and so kept injection going | Kidnap statistic = the best place's fit at the sharp width; injected particles enter with negligible weight; inject only below 90 % of the long-term fit; refine only coarse places |
+
+Results on the obstacles map, routes of 8+ m, 2 cm range noise:
+
+| | Found | Time to find (median / p90) | RMS after | Particles after |
+|---|---|---|---|---|
+| Global, 72 beams, 5 m (50 runs) | 100 % | 0.0 / 0.0 s | 1.0 cm | ~900 |
+| Global, 36 beams, 3 m, 5 cm noise (50 runs) | 100 % | 0.0 / 7.0 s | 1.3 cm | ~960 |
+
+| Kidnapped: carried 3+ m, odometry reports nothing (50 runs) | Recovered | Median / p90 | False restarts before the kidnapping |
+|---|---|---|---|
+| **Particle filter with recovery** | **100 %** | **1.2 / 1.7 s** | 0 |
+| Particle filter without recovery | 4 % | 28 s | 0 |
+| EKF | 0 % | – | 0 |
+
+The filter costs about 10 ms per scan (36 beams × ~900 particles), against 0.04 ms for
+the EKF. The two complement each other: the particle filter finds and re-finds the
+robot, and the EKF tracks it precisely and cheaply (0.3 cm RMS against the particle
+filter's 1 cm).
+
+### Matching places (item 10)
+
+The test maps are:
+
+- **twin rooms** (identical rooms 8.5 m apart), the same with one block of difference,
+  and the same furnished differently;
+- **a room symmetric under a half turn**;
+- **a corridor with pillars every 2 m**, and the same with irregular pillars.
+
+**EKF.** It starts from the true pose plus an error drawn from its own prior (the
+covariance it is given), with heading std 0.1 rad, 40 routes per row. The result is
+counted as wrong place when it ends within 0.3 m and 10° of a matching place:
+
+| Prior std | Pillars every 2 m: correct / **wrong place** / lost | Irregular pillars | Twin rooms (8.5 m) |
+|---|---|---|---|
+| 0.25 m | 90 / **0** / 10 % | 95 / 0 / 5 % | 100 / 0 / 0 % |
+| 0.5 m | 73 / **5** / 23 % | 85 / 0 / 15 % | 90 / 0 / 10 % |
+| 1 m | 45 / **18** / 38 % | 50 / 0 / 50 % | 53 / 0 / 48 % |
+| 1.5 m | 23 / **18** / 60 % | 28 / 5 / 68 % | 18 / 0 / 83 % |
+| 2 m | 18 / **18** / 65 % | 18 / 3 / 80 % | 23 / 0 / 78 % |
+
+- The EKF locks onto the nearest place that fits. With matching places 2 m apart, a
+  prior uncertainty of half that spacing or more sends 18 % of the runs to the wrong
+  pillar, against 0–5 % with irregular pillars.
+- When wrong, it claims 1–10 cm of uncertainty: confidently wrong, with nothing in its
+  covariance to show it.
+- Matching places 8.5 m apart are never reached. The EKF gets lost locally first, just
+  as often as in the differently furnished rooms.
+
+**Particle filter**, global start, 40 runs:
+
+| Map | Ends at the true place | At the matching place | True place ever dropped | Final weight on the true place |
+|---|---|---|---|---|
+| Twin rooms (identical) | 48 % | 53 % | 0 | 54 % |
+| Twin rooms, one block of difference | **100 %** | 0 % | 0 | 100 % |
+| Half-turn symmetric room | 53 % | 48 % | 0 | 52 % |
+
+- Where nothing distinguishes the places, the filter cannot know, and says so: half its
+  weight stays on each, in every run.
+- One difference anywhere in view decides it.
+- Before the mixture resampling and the place refinement, the true place was dropped
+  in 16–20 of 40 runs, and one block of difference decided only 55 % of them.
+
+### Planning for good localization (item 11; `localization_planning.hpp`, `--plan-for-localization W`)
+
+`computeLocalizability` scores each free cell by the scan the robot would take there:
+the information of all beams (exact range Jacobians, section 13), with the heading
+eliminated (Schur complement). The score is the position std in the worst direction.
+It is millimetres next to corners, large along featureless walls, and about 10 m (the
+prior) where nothing is in range. The planner is A* with step cost
+`length × (1 + W × penalty)`, where `penalty = clamp(log2(u / 5 cm), 0, 4)`. With
+W = 0 it gives exactly the shortest path (tested); the octile heuristic stays
+admissible.
+
+Results on the hall (22 m × 15 m, a 3 m LiDAR sees nothing in its middle), 60
+start–goal pairs of 10+ m, EKF along each route:
+
+| W | Path length | Blind distance (u > 0.5 m) | Worst error (mean / p90) | Runs worse than 0.5 m |
+|---|---|---|---|---|
+| 0 (shortest) | 14.9 m | 6.4 m | 27 / 61 cm | 13.3 % |
+| 0.25 | 16.2 m | 1.1 m | 16 / 16 cm | 3.3 % |
+| **0.5** | **17.4 m (+17 %)** | **0.3 m** | **4.6 / 8.5 cm** | **0 %** |
+| 1 | 17.5 m | 0.3 m | 4.6 / 8.5 cm | 0 % |
+| 4 | 17.9 m | 0.2 m | 4.4 / 7.8 cm | 0 % |
+
+17 % more path cuts the worst localization error six-fold and removes the failures.
+Beyond W = 0.5 there is little left to gain.
+
+### Steering by the estimate (item 12; `closed_loop.hpp`, `--steer-by-estimate`, `--safety-margin`)
+
+The controller knows only the EKF estimate:
+
+- **Control:** it turns towards the next waypoint as the estimate sees it, then drives
+  with small heading corrections.
+- **Truth:** the true robot moves exactly as commanded.
+- **Sensing:** odometry and the LiDAR measure the true motion and pose.
+- **Collisions:** the true disc is checked against the map.
+
+The planner inflates obstacles by robot radius + margin. Results on the obstacles map
+at 0.1 m cells (so that centimetre margins are not lost to the inflation's
+quantization), robot radius 0.2 m, 60 routes:
+
+| Localization | Max true error | Collisions at margin 0 / 5 cm / 10 cm / 30 cm |
+|---|---|---|
+| True pose (exact odometry) | 0.4 cm | 0 / 0 / 0 / 0 % |
+| EKF, 72 beams, 5 m | 1.9 cm | 0 / 0 / 0 / 0 % |
+| EKF, 18 beams, 2 m | 13 cm | **8.3 / 1.7 / 0 / 0 %** |
+| EKF, 18 beams, 2 m, odometry 3× worse | 37–42 cm | 5 / 0 / 0 / 0 % |
+| Dead reckoning (no LiDAR) | 40–59 cm | 63 / 62 / 50 / 55 % |
+
+- With the estimate steering, a path planned with exactly the robot's radius has no
+  slack: the hall's pillars are spaced so that a 0.03 mm deviation touches one (the
+  CLI demo below). The margin is what the localization error may use up.
+- While the LiDAR keeps the error bounded, a margin of about the error's size removes
+  the collisions: 10 cm for 13 cm of error. The error is mostly along the path, which
+  the margin does not need to cover.
+- Dead reckoning's error grows without bound, and no fixed margin helps (50–63 %).
+- **A covariance-aware hold** (`safety_sigmas`) does not help either. Holding when the
+  estimate's 3σ disc touches an obstacle, for up to 3 s, then committing for 1 m, gave
+  10 % collisions instead of 5 % with the poor LiDAR, and no gain for dead reckoning.
+  Most of the error is odometry drift accumulated while driving, and standing still
+  does not remove it. It stays an option, off by default.
+
+**Items 11 and 12 together** (the hall, 72 beams with 5 m range, 40 routes):
+
+| Route | Max true error | Collisions (margins 0–20 cm) |
+|---|---|---|
+| Shortest (across the blind middle) | 6.6–12.6 cm | 0–2.5 % |
+| Localization-aware (W = 1) | 2.4–5.6 cm | 0 % |
+
+The CLI shows it on one route (`--start 6 8 --goal 38 22`, 3 m range):
+
+- **Shortest route, no margin:** it collides after a 16 cm error.
+- **Shortest route, 10 cm margin:** it reaches the goal.
+- **Localization-aware route, no margin:** it reaches the goal, its error never above
+  6 cm.
+
+With a weak LiDAR (18 beams, 2 m) no route in that hall keeps the error small (about
+60 cm on either). Localization-aware routes then run along walls, with less clearance
+(24 cm against 80 cm), for no safety gain: route choice can only use what the sensor
+can see.
+
+**Limitations.**
+
+- The particle filter costs about 250× the EKF per scan. Run it to find the robot, and
+  the EKF to track it.
+- Localizability is evaluated per cell, from one scan. It ignores how long the robot
+  stays in poorly observable places (only distance through them is charged) and how
+  heading error builds up.
+- Steering assumes no actuation error (the robot does exactly what it is commanded) and
+  an EKF motion model of "turn, then drive". With heading corrections while driving,
+  that model is slightly wrong: 0.4 cm of error even with exact odometry.
+
+## 20. Planning with moving obstacles: space and time, turns, livelock, margins, several robots (`planning_experiment`)
+
+Sections 14 and 18 react: they block where a seen obstacle is about to be, wait, detour,
+and hold before a step that would meet it. This section plans with the obstacles'
+predicted motion (item 13), plans for the differential drive's turns (item 14), detects
+when the robot is stuck (item 15), measures how much margin and look-ahead are needed
+(item 16), and lets several such robots meet (item 17). The benchmark is section 18's:
+the obstacles map, start (1, 1), goal (18, 18), three obstacles on random 2–8-cell
+lanes, 500 scenarios at 0.2–0.5 m/s and 300 at 0.6–1.0 m/s, LiDAR perception, 600 s
+limit. "Previous settings" below is the reactive robot as it stood before this section
+(margin 0.25 m, look-ahead 2 s): it failed in 2.2 % (point) and 4 % (diff-drive) of the
+normal-speed runs.
+
+### Planning over space and time (item 13; `spacetime_planner.hpp`, `--dynamic-planner space-time`)
+
+Safe interval path planning (SIPP, Phillips & Likhachev 2011) on the grid:
+
+- **Predictions** cover `--spacetime-horizon` (20 s) at the simulation step: each LiDAR
+  track's predicted path (bouncing at learned turning points, section 18), inflated by
+  its 2σ uncertainty. Beyond the horizon everything counts as safe.
+- **Safe intervals:** a cell is unsafe at step k when a predicted obstacle centre is
+  closer to the cell centre than obstacle radius + inflation + robot radius + margin +
+  half the obstacle's displacement over one step. A cell's safe intervals are the
+  maximal runs of safe steps.
+- **Search** over (cell, safe interval, heading), cost = arrival time. From a state the
+  robot may wait in its cell (to the end of the interval) and turn, then move to a
+  neighbour; the earliest arrival in each of the neighbour's safe intervals is kept,
+  after checking the robot's positions along the move at every step (it moves between
+  cells too). The heuristic (straight-line distance / speed) is admissible.
+- **In the simulator** the robot follows the timed plan: it holds at a cell until the
+  planned departure, turning towards the next cell meanwhile. Every step it checks the
+  plan's own motion, waits included, against the current predictions over the 1 s
+  look-ahead (for contact; the plan already kept the margin). A plan that fails is
+  replanned: from the robot's cell, or, between cells, from whichever end of the
+  segment gives the earlier arrival (the planner's start is then reached later, after
+  a drive that must itself be free of walls and obstacles). The reactive rules take
+  over only while no plan exists.
+
+What it took, each step found by a failing benchmark run:
+
+1. **The gate and the plan disagreed.** The look-ahead gate predicted the robot driving
+   on without stopping, but the plan waits at cells, so the gate vetoed plans that were
+   safe: 5000 replans on the spot. The plan's motion is now checked as planned.
+2. **Crossing after the horizon.** When no crossing fits inside the horizon with the
+   margin, the best plan crosses just after it, where everything counts as safe, and
+   every replan pushes the crossing out again. Like the gate after its patience, the
+   planner then settles for a contact-free plan.
+3. **Phantom obstacles** with perfect prediction: the LiDAR tracks of the scripted
+   obstacles were added as well, extrapolated straight on.
+4. **Held between cells**, head-on with an obstacle that had turned round: hence the
+   replanning from either end of the segment.
+5. **A tracker bug.** Turning points were stored relative to the lane centre, which is
+   refit from a sliding window of positions, so they drifted with it: 0.9 m in one run.
+   They are now carried over as the world points they are. This also helps the
+   reactive robot; a test checks that a learned end never moves inwards.
+6. **Route flapping.** Replanning at every cell flipped between two routes of about the
+   same arrival as the predictions' phase shifted. A routine replan now keeps the plan
+   while it stays contact-free over the whole horizon, unless the new one arrives at
+   least 1 s earlier.
+7. **Following an obstacle into its lane.** With its turning point ahead not yet seen,
+   the prediction ran straight on, through walls, and the plan followed it into its
+   lane until it came back. Such a track is now planned against two hypotheses: it
+   turns at the wall ahead, or it turns now.
+
+**Results** (fixes / breaks: failures of the previous settings solved / their successes
+lost):
+
+| 500 scenarios, 0.2–0.5 m/s | Point: reached, collisions, timeouts, travel | Diff-drive | Fixes / breaks |
+|---|---|---|---|
+| Reactive, previous settings | 97.8 %, 2, 9, 48.7 s | 96.0 %, 10, 10, 58.6 s | – |
+| **Reactive + livelock switch (default)** | **100 %, 0, 0, 39.8 s** | **99.2 %, 4, 0, 46.7 s** | 11/0, 20/4 |
+| Space-time | 100 %, 0, 0, 36.1 s | 97.4 %, 3, 10, 40.0 s | 11/0, 19/12 |
+| Space-time + livelock switch | 100 %, 0, 0, 36.1 s | 98.2 %, 4, 5, 40.2 s | 11/0, 19/8 |
+| Space-time, perfect prediction | 100 %, 0, 0, 34.2 s | 99.8 %, 0, 1, 37.5 s | 11/0, 20/1 |
+
+| 300 scenarios, 0.6–1.0 m/s | Point | Diff-drive |
+|---|---|---|
+| Reactive, previous settings | 96.3 %, 3, 8, 58.1 s | 95.3 %, 5, 9, 74.9 s |
+| **Reactive + livelock switch (default)** | **99.3 %, 2, 0, 41.3 s** | **99.0 %, 3, 0, 49.7 s** |
+| Space-time + livelock switch | 98.0 %, 6, 0, 36.9 s | 94.7 %, 2, 14, 41.6 s |
+| Space-time, perfect prediction | 100 %, 0, 0, 34.2 s | 99.3 %, 0, 2, 38.0 s |
+
+- **With perfect predictions, planning over space and time all but solves the
+  benchmark,** and is the fastest: 34 s against 49 s for the previous reactive robot.
+  Its remaining failures are the planner's; there are almost none.
+- **With predictions from the LiDAR, it is only as good as 20 s of prediction.** At
+  normal speeds the point robot reaches the goal every time, 10 % faster than the
+  reactive one. The differential drive, which needs longer to get out of the way, and
+  fast obstacles, whose predictions go wrong sooner, expose the gap: 94.7 % with fast
+  obstacles against 99 % for the reactive robot.
+- So the reactive robot stays the default, and space-time planning is what it switches
+  to when it is stuck (item 15) and an option (`--dynamic-planner space-time`) for
+  well-predicted environments. Planning takes 0.4–0.7 ms per plan (1–1.7 ms with the
+  denser perfect predictions).
+
+### Turn-aware planning (item 14; `--turn-aware`)
+
+The same search with no obstacles and turn costs is A* over (cell, heading): every
+change of heading costs ceil((angle / max angular speed + 0.3 s) / dt) steps of turning
+in place (the turn-then-drive controller of section 10). It finds the path that is
+fastest to drive, not the shortest (`planning_experiment turns`, 200 random routes,
+differential drive):
+
+| Map | Shortest: length, turns, travel | Turn-aware | Time saved per route: median, best |
+|---|---|---|---|
+| Obstacles, 4-connected | 7.95 m, 2.8, 21.45 s | 8.00 m, 1.7, 19.81 s | 1.0 s, 11.4 s |
+| Obstacles, 8-connected | 7.07 m, 3.0, 19.02 s | 7.11 m, 2.1, 18.12 s | 0.5 s, 5.5 s |
+| Hall | 11.99 m, 1.7, 27.95 s | 11.99 m, 1.1, 26.99 s | 0.1 s, 7.0 s |
+| Maze | 26.35 m, 12.9, 73.53 s | identical | 0 |
+
+It is never slower, and its planned arrival is within 1–2 % of the simulated one (the
+controller's last few degrees of each turn). In a maze every turn is forced. On the CLI's
+obstacles route: 3 → 2 turns, 38.5 → 37.0 s. With moving obstacles, the space-time
+planner is turn-aware for the differential drive.
+
+### Detecting livelock and switching strategy (item 15; `--livelock-window`, default 15 s)
+
+- **Detection:** a Dijkstra pass from the goal over the static planning map gives every
+  cell's remaining distance. If the robot's best remaining distance has not improved
+  for the window, it is stuck: shuttling (livelock) or waiting (deadlock), it does not
+  matter which.
+- **Switch:** it changes strategy (reactive ↔ space-time) for one window, an escape,
+  then returns to its usual one.
+- **Once per place:** the switch re-arms only when the robot is 1 m closer to the goal
+  than where it got stuck. Without that, a robot blocked by another robot parked on its
+  goal in a corridor flipped between the two strategies' routes every window until the
+  timeout (2–3 % of the 3–4-robot runs).
+
+On the benchmark (with the new margin and look-ahead, below, in both columns):
+
+| | Without the switch: reached, wait, travel | With it (default) |
+|---|---|---|
+| Point, 0.2–0.5 m/s | 99.8 %, 5.5 s, 40.4 s | 100 %, 3.8 s, 39.8 s |
+| Diff-drive, 0.2–0.5 m/s | 99.4 %, 5.2 s, 48.4 s | 99.2 %, 4.1 s, 46.7 s |
+| Point, 0.6–1.0 m/s | 99.3 %, 7.5 s, 45.0 s | 99.3 %, 4.4 s, 41.3 s |
+| Diff-drive, 0.6–1.0 m/s | 98.7 %, 7.9 s, 53.8 s | 99.0 %, 4.7 s, 49.7 s |
+
+Most of the previous settings' timeouts went with the smaller margin and look-ahead
+(item 16). The switch takes the last one, cuts waiting by 20–40 % and travel by up to
+4 s; it fires 45–76 times in 500 runs. Together, they solve all 11 (point) and 20
+(diff-drive) failures of the previous settings; 4 diff-drive runs that those settings
+completed collide instead (3 without the switch).
+
+### Smallest safe margin and prediction horizon (item 16; `planning_experiment margins`)
+
+The margin (`--replan-margin`) is clearance added around a seen obstacle; the
+horizon is how far ahead the look-ahead gate (`--prediction-horizon`) or the
+space-time planner (`--spacetime-horizon`) looks. Swept over 300 scenarios each, with
+the livelock switch:
+
+| Reactive, margin / look-ahead | 0.2–0.5 m/s: point, diff-drive (collisions) | Travel (point, diff) |
+|---|---|---|
+| 0 m / 1 s | 99.0 % (3), 96.3 % (11) | 36.5, 43.2 s |
+| 0.05 m / 1 s | 99.7 % (1), 98.3 % (5) | 36.9, 44.3 s |
+| 0.1 m / 1 s | 100 % (0), 98.3 % (5) | 38.9, 45.9 s |
+| **0.15 m / 1 s** | **100 % (0), 99.0 % (3)** | **39.8, 46.9 s** |
+| 0.15 m / 0.5 s | 100 % (0), 99.3 % (2) | 38.0, 45.0 s |
+| 0.15 m / 2 s | 100 % (0), 99.7 % (1) | 42.3, 50.1 s |
+| 0.25 m / 2 s (previous) | 99.7 % (1), 99.0 % (3) | 44.3, 52.6 s |
+| 0.35 m / 2 s | 99.7 % (1), 98.7 % (4) | 44.6, 54.8 s |
+
+With fast obstacles (0.6–1.0 m/s, 300 scenarios), point / diff-drive reached (collisions):
+0 m / 1 s: 99.7 % (1), 97.3 % (8); 0.1 m / 1 s: 99.3 % (2), 97.0 % (9);
+**0.15 m / 1 s: 99.3 % (2), 99.0 % (3)**; 0.15 m / 0.5 s: 98.7 % (4), 95.7 % (13);
+0.15 m / 2 s: 98.7 % (4), 99.0 % (3); 0.25 m / 2 s (previous): 98.3 % (4), 96.3 % (7);
+0.35 m / 2 s: 98.7 % (2), 95.3 % (10).
+
+- **The margin:** below 0.1 m, collisions climb steeply (11 for the diff-drive at 0).
+  Above 0.25 m they do not fall further, while the robot travels longer and waits
+  inside sweeps it cannot leave. **0.1–0.15 m is the smallest safe margin.**
+- **The look-ahead:** 0.5 s misses fast obstacles; 3 s blocks so much that the robot
+  waits and is caught inside sweeps. **About 1 s**, roughly the time to get out of an
+  obstacle's way, is best.
+- **The space-time planner** barely depends on the margin (it waives it when no crossing
+  fits), but needs **at least 10 s** of prediction: with 2–5 s, plans are myopic (91–98 %
+  for the diff-drive).
+- No setting gives zero collisions for every model and speed. The defaults are now
+  margin 0.15 m and look-ahead 1 s (were 0.25 m and 2 s).
+
+### Several robots that all replan (item 17; `multi_robot.hpp`, `planning_experiment robots`)
+
+`simulateRobots` steps one `Navigator` per robot together (the simulation loop of
+`simulatePath`, one step at a time). Each robot decides from where the others are at
+the start of the step and perceives them like moving obstacles: discs in its LiDAR
+scans that it tracks, or oracle sightings. Then all move, and two robots whose centres
+come closer than the sum of their radii during the step (closest approach of the two
+linear motions) both stop in a collision. A robot that has arrived stays where it is,
+a disc in everyone's way. Nobody coordinates: no shared plans, priorities or messages.
+
+**Symmetry.** In an open room, two identical reactive robots swapping places head-on
+mirror each other exactly and wait for each other forever; four swapping corners do the
+same. The livelock switch alone does not help two mirrored point robots: both detect the
+livelock at the same instant, switch together and stay mirrored. Staggered windows
+(robot i waits (1 + 0.25 i) times the window, the default) break the symmetry:
+
+| Open-room swap | Reactive, no switch | Switch, equal windows | **Switch, staggered** | Space-time + switch |
+|---|---|---|---|---|
+| 2 point robots head-on | stuck | stuck | **33.3 s** | 29.5 s |
+| 4 point robots, corners | stuck | 56.8 s | **55.1 s** | 23.9 s |
+| 2 diff-drive head-on | stuck | 127.1 s | **40.2 s** | 30.6 s |
+| 4 diff-drive, corners | 2 of 4 stuck | 54.4 s | **61.3 s** | 67.3 s |
+
+**Random tasks** (100 sets per robot count on the obstacles map, radius 0.2 m, starts and
+goals at least 1 m apart, 300 s limit; all = every robot arrived):
+
+| Robots | Reactive, no switch: all, makespan | **Reactive + switch (default)** | Space-time + switch |
+|---|---|---|---|
+| 2 (point / diff-drive) | 100 / 100 %, 25 / 32 s | **100 / 100 %, 24 / 32 s** | 100 / 98 %, 24 / 28 s |
+| 3 | 100 / 100 %, 32 / 42 s | **100 / 100 %, 32 / 42 s** | 98 / 97 %, 27 / 34 s |
+| 4 | 98 / 100 %, 38 / 50 s | **99 / 100 %, 36 / 49 s** | 98 / 97 %, 30 / 37 s |
+| 6 | 93 / 96 %, 50 / 68 s | **94 / 96 %, 50 / 68 s** | 97 / 94 %, 37 / 46 s |
+
+- **No robot ever touched another** in the 4000 multi-robot runs.
+- The failures are timeouts in the map's one-cell corridors: a robot parks on its goal
+  in a corridor another one needs, or two meet head-on where neither can let the other
+  pass. Without coordination, someone has to give way, and the rules only make that
+  likely, not certain.
+- Space-time planning finishes sooner (by 16–32 % with three or more robots: it times
+  crossings instead of waiting for a clear path), and with six point robots it is the
+  most reliable. With the slower-turning diff-drive, its constant-velocity
+  predictions of robots that themselves replan go wrong more often.
+- On random tasks the staggering changes little (exact mirror images are rare), but it
+  is what resolves the mirrored ones above.
+
+**Limitations.**
+
+- Predictions are per obstacle and deterministic (one path, or two hypotheses for an
+  unseen turning point). Planning against distributions or sets of futures, and
+  replanning on a moving start (now the ends of a segment), are left out.
+- Other robots are predicted like obstacles, at constant velocity: no reasoning about
+  their plans or about who yields (no reciprocal avoidance, priorities or reservation).
+- The livelock detector measures progress on the static map: a robot that must take a
+  long detour around a parked one makes "no progress" for a while and may switch for
+  nothing.
+
 ## Limitations
 
 - The footprint is a disc (no rectangular or oriented robots). Inflation is evaluated at
@@ -1281,7 +2011,8 @@ Grid NO_PATH cases from noisy LiDAR maps (720 beams, misses and spurious returns
 - The point robot has no orientation and changes direction instantly. The
   differential-drive model (section 10) adds heading and turn-rate limits, but no
   acceleration limits or dynamics: velocities change instantly. It stops to turn at every
-  corner, and the planner minimises path length, not travel time including turns.
+  corner; the planner minimises path length unless `--turn-aware` (section 20) asks for
+  the fastest path, turns included.
 - Paths are optimal on the grid graph (4- or 8-connected), not in continuous space: they
   turn only at cell centers and in 45° steps. Any-angle planning (e.g. Theta*) or path
   smoothing could shorten them further.

@@ -17,6 +17,9 @@ Each test executable can also be run directly for a per-case report:
 .venv/bin/python tests/test_python_visualization.py
 ```
 
+The ROS 2 package has its own 21 tests (gtest and launch_testing), run with
+`scripts/build_ros2.sh --test`. They are listed in [ros2.md](ros2.md#tests).
+
 The tests use a small assertion framework in `tests/test_framework.hpp` (`CHECK`,
 `CHECK_EQ`, `CHECK_NEAR`, `REQUIRE`) with no external dependencies. Floating-point
 values are compared with explicit tolerances.
@@ -34,7 +37,11 @@ values are compared with explicit tolerances.
 | `test_heading_control` | P vs. PID study: heading plant, controllers, metrics |
 | `test_lidar` | simulated LiDAR: exact ray casting, beam layout, noise, scans along a trajectory |
 | `test_ekf` | EKF localization: odometry model, Jacobians, Kalman update, gate, convergence, NEES consistency |
+| `test_correlated_errors` | correlated range errors: LiDAR bias process, augmented EKF (bias and wall states), wall-line surface, grazing-beam model |
+| `test_localization` | particle filter (global start, kidnapping, matching places), localizability, localization-aware planning, steering by the estimate |
+| `test_obstacle_tracking` | moving obstacles from the LiDAR alone: map subtraction, disc fitting, fragment merging, tracking through reversals, learned turning points, two-point start, negative evidence and coasting, LiDAR perception in the simulator, occlusion awareness |
 | `test_dynamic` | moving obstacles and replanning: motion model, exact contact, loading, visibility, waiting, detours, retreats, invariants |
+| `test_planning` | planning with moving obstacles: space-time (SIPP) and turn-aware planning, the steppable navigator, the livelock switch, staying off walls when off the path, several robots that all replan |
 | `test_ghost_cells` | minimum ghost cells: covers vs. inflation, exact solver vs. brute force (count, every optimal set, weighted), overlapping footprints, statuses |
 | `test_ghost_perception` | perception loop: beam and ghost model, occupancy update, ghost evidence, recovery strategies on a doorway |
 | `test_alignment` | grid alignment: geometry, rasterization rules, placement, exact LiDAR, point evidence, the alignment-robust planner, ground truth, artifact vs. ghost recovery |
@@ -59,7 +66,13 @@ values are compared with explicit tolerances.
 | `cli_ekf_localization` | obstacles map, differential drive, 72 beams, `--ekf`: expects EKF position error RMS 0.004 m and dead reckoning 0.533 m |
 | `cli_ekf_requires_diff_drive` | `--ekf` with the point robot: expects a clear error |
 | `cli_rejects_bad_ekf_settings` | `--ekf-range-sigma 0`: expects "invalid EKF parameters" |
-| `cli_dynamic_replanning` | obstacles map with `maps/obstacles_dynamic.csv`: expects `GOAL_REACHED` and 3 replans |
+| `cli_dynamic_replanning` | obstacles map with `maps/obstacles_dynamic.csv`: expects `GOAL_REACHED` and 2 replans |
+| `cli_dynamic_spacetime` | the same with the differential drive, `--dynamic-planner space-time --livelock-window 15`: expects `GOAL_REACHED` and the planner line |
+| `cli_turn_aware` | obstacles map, differential drive, `--turn-aware`: expects travel time 37.00 s with 2 turns in place (38.50 s and 3 turns without) |
+| `cli_turn_aware_requires_diff_drive` | `--turn-aware` with the point robot: expects a clear error |
+| `cli_rejects_bad_dynamic_planner` | `--dynamic-planner sideways`: expects "--dynamic-planner must be reactive or space-time" |
+| `cli_rejects_bad_spacetime_horizon` | `--spacetime-horizon 0`: expects "invalid replanning parameters: space-time horizon" |
+| `planning_experiment_turns` | `planning_experiment turns --runs 20` runs and reports the time saved |
 | `cli_rejects_bad_dynamic_obstacles` | a route through a wall (`tests/data/bad_dynamic_obstacles.csv`): expects the line and the reason |
 | `cli_rejects_bad_replanning_settings` | `--sensing-range 0`: expects "invalid replanning parameters" |
 | `ghost_experiment_example` | the documented example map: expects a 2-cell explanation with 8 optimal alternatives |
@@ -134,7 +147,7 @@ byte-identical.
 | Convergence | from 0.3 m and 6° off, repeated exact scans bring the estimate within 1 mm and 1 mrad of the true pose |
 | Along a trajectory | one sample per trajectory sample; same seed, same odometry with or without the LiDAR; without the LiDAR the estimate equals dead reckoning and the uncertainty never shrinks; with it, the error stays under 3 cm while dead reckoning drifts over 10 cm; determinism and seeds |
 | Noise-free odometry | dead reckoning follows the truth to 1e-9 |
-| Consistency | mean NEES over 200 prediction-only runs and 40 runs with a noisy 36-beam LiDAR is within [2.5, 3.5] and [2.4, 3.8] (measured 3.21 and 3.15) |
+| Consistency | mean NEES over 200 prediction-only runs and 40 runs with a noisy 36-beam LiDAR is within [2.5, 3.5] and [2.4, 3.8] (measured 3.21 and 3.28 with the default grazing model) |
 | Heading wrap | driving west (heading ±180°), where the estimate flips between +π and −π, errors and NEES stay small |
 | Initial error | over 2000 seeds the initial estimate's error has zero mean and the stated standard deviation; dead reckoning starts from the same pose |
 | Validation | noise, range sigma, gate and initial-uncertainty limits |
@@ -150,6 +163,82 @@ because the process noise was evaluated at the measured increments. See
 identical output files and console summaries on 400 random maps (about half with the
 LiDAR on, which also covers the ray caster's new hit-face output), and the Python
 figures and GIFs of three scenarios are byte-identical.
+
+## Localization tests (`test_localization.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Global localization | from 50 000 particles over the whole obstacles map: within 15 cm of the truth after 1 s and to the end, under 3 cm RMS, more than 90 % of the weight on the estimate, at most 2000 particles once converged, no global restart, deterministic |
+| Kidnapped robot | carried from the top corridor to the far corner with no odometry: the recovering filter is within 15 cm again 3 s later and stays; without recovery, and the EKF, end more than 1 m off |
+| Symmetric room | 4 runs on the point-symmetric room from a global start: all weight on the true place and its mirror, the true place never dropped, mean final weight on it between 0.2 and 0.8 (measured 0.61) |
+| One difference decides | twin rooms that differ by one block: 3 runs end at the true place |
+| Localizability | a hall corner pins the position below 5 cm, its blind middle leaves more than 5 m, walls are infinite; more range never makes a cell worse |
+| Localization-aware planning | weight 0 gives exactly the 8-connected shortest path; weight 1 cuts the blind distance to under a quarter (measured 12.4 m to 0) for a longer path; the penalty formula |
+| Steering by the estimate | exact odometry follows the plan to the goal (error under 1 cm); the LiDAR EKF reaches the goal within 8 cm; dead reckoning ends more than 20 cm off or collides; a collision ends at contact |
+
+Also in CTest: the CLI's `--particle-filter` finds the robot on the first scan;
+`--steer-by-estimate` with `--plan-for-localization 1` reaches the goal in the hall
+with no safety margin (the shortest route collides); `--plan-for-localization`
+requires `--connectivity 8`.
+
+## Planning-with-moving-obstacles tests (`test_planning.cpp`)
+
+| Test | What is checked |
+|---|---|
+| No obstacles is A* | space-time planning without obstacles or turn costs gives the A* path length, arrives at length / speed, never waits, and every move is allowed; an unreachable goal fails; start = goal is a one-waypoint plan |
+| Turn-aware | on an open map the fastest path to a diagonal goal is an L (one turn) arriving at exactly 11.4 s (10 moves + one 90° turn of 1.4 s); facing away costs the turn round; on the obstacles map the turn-aware path never drives slower than the shortest one, and its planned arrival is within 5 % of the simulated one |
+| Times a crossing | an obstacle patrols across the only corridor: following the timed plan keeps clear of it at every 20 ms (the blind straight run would hit it) |
+| Waits in place | an obstacle stands in a corridor, then leaves: the plan waits (arrival later than 8 s) and visits no cell twice |
+| Start reached later | `start_time` shifts the whole plan; a start that is unsafe on arrival cannot be planned from |
+| Navigator equals simulatePath | stepping a `Navigator` by hand gives the same status, steps, trajectory length, replans and distance as `simulatePath`, both robot models |
+| Space-time in the simulator | `obstacles_dynamic.csv`, both models, perceived and perfect predictions: goal reached, clearance > 0, never slower than the reactive robot |
+| Livelock switch | a benchmark scenario where the reactive robot with the earlier settings times out: with the switch it reaches the goal after at least one switch; with nothing moving, no switch |
+| Off the path, no wall | a fast-obstacle benchmark scenario where the differential drive, off its path after evasive steps, used to drive into a wall: goal reached, every step in free space |
+| Configuration validation | space-time horizon 0 or NaN, a negative replanning period: rejected |
+| Symmetric swaps | in an open room, two robots head-on and four through the middle: plain reactive robots deadlock; with the switch but equal windows, two mirrored robots switch at the same instant (one escape each) and stay stuck; staggered windows get everyone through; space-time planning too, both models; centers never closer than 0.4 m |
+| Multi-robot bookkeeping | robots that start in contact collide at once with each other's ids; an impossible task runs nothing |
+
+Also in `test_obstacle_tracking.cpp`: **turning points stay put as the history
+slides** (250 s of patrolling at 0.13, 0.2 and 0.45 m/s: a learned end never moves
+inwards by more than 3 cm; before the fix it drifted 0.25–0.40 m).
+
+## Moving-obstacle perception tests (`test_obstacle_tracking.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Static world | 100 scans with 2 cm noise from random free cells of the obstacles map: map subtraction leaves no detection |
+| Disc detection | discs of radius 0.2, 0.3, 0.45 m 1.4 m away (360 beams): one detection each, center and radius within 3 cm; with 72 beams the center is still within 8 cm |
+| Disc fit on an arc | points on the near side of a circle give its center and radius to 1e-6 |
+| Fragments merged | a post in front of a disc splits its returns into two clusters: one detection, center within 6 cm |
+| Patrol through reversals | 50 s of an obstacle patrolling a 2.5 m lane: one track throughout; 1.5 s after every reversal the velocity is within 0.15 m/s; both turning points learned (lane length within 15 cm); predictions 10 s ahead stay between them and are within 25 cm of the truth over the next 2 s |
+| Unwatched reversal | an obstacle turning round out of sight (a corridor seen through a gap): no turning point is learned |
+| Two-point start | a 2 m/s obstacle: on its second detection the track is confirmed with the velocity within 0.25 m/s |
+| Negative evidence and coasting | an obstacle vanishing in plain view is dropped within 4 scans; one walking behind a wall is kept (coasting) |
+| Simulator with LiDAR perception | the sample scenario (`obstacles_dynamic.csv`), point and differential drive: goal reached, clearance > 0, all three obstacles tracked, deterministic |
+| Occlusion awareness | an L-shaped corridor with nothing in it: the occlusion-aware robot holds at the blind corner (more wait steps) and still reaches the goal |
+
+The decision rules in `test_dynamic.cpp` are tested with oracle perception (ideal
+sightings). Its random-scenario guard allows 5 collisions in 120: over 1000 scenarios
+of that generator the oracle collides in 2.3 % (and LiDAR tracking in 0.7 %).
+
+## Correlated-error tests (`test_correlated_errors.cpp`)
+
+| Test | What is checked |
+|---|---|
+| Bias process | a constant bias is the same in every scan; over 4000 seeds its std is the configured 3 cm (±1.5 mm); a Gauss–Markov bias has the stationary std and the lag-one correlation `exp(−dt/τ)` (40 000 scans) |
+| Bias shifts every beam alike | with noise off, every beam with a return of a scan is shifted by the same amount; misses keep `max_range`; the shift drifts between scans |
+| Without a bias the scans are unchanged | ranges equal the original model (one generator, white noise per beam with a return, clamped) bit for bit |
+| Augmented EKF without extra states | equals the classic batch filter along a whole run: estimates to 1e-9, covariance to 1e-12, identical used/rejected counts |
+| Bias state | 16 runs with a 3 cm bias: independent beams' mean NEES > 20 (measured ~810), bias state within [2.4, 4.5] (measured 3.76), bias estimated to 0.2 mm |
+| Wall states on a rasterized world | 6 continuous worlds rasterized at 0.1 m: independent beams' mean NEES > 100 (measured ~2260), wall states on the line surface < 8 (measured 4.8), smaller position RMS |
+| Validation | the new bias, map-error and incidence limits; LiDAR bias limits |
+| Boundary chains | an 8 × 6 map with a 2 × 3 block and a diagonal pair: 3 chains with 28, 10 and 8 faces (the diagonal pair is one obstacle) |
+| Axis-aligned walls are exact | on the obstacles map, 2000+ random beams: the line surface's ranges and normals equal the grid's to 1e-9 |
+| Slanted walls are recovered | walls at 3°, 6°, 17°, 33° rasterized at 0.1 m: line range RMS below 6 mm and below 0.3× the grid's; along the wall the line surface's `∂r/∂y` never jumps, the grid's jumps by > 0.5 |
+| Surface Jacobians | both surfaces' analytic Jacobians match finite differences of their own ray casts (600+ beams, incidence below 73°) |
+| Range Hessian | the closed-form second derivatives match finite differences of the Jacobian, up to 83° incidence |
+| Grazing model | 12 runs on the exact world: the model keeps more beams than the 78.46° cutoff with mean NEES in [2.4, 5]; an 89° cutoff without modeling is > 3× more overconfident |
+| Grazing near a wall end | a 70° grazing beam hitting 0.1 m from a wall's end is skipped (slide 2σ tan α = 0.28 m); the same beam mid-wall is fused |
 
 ## Grid-alignment tests (`test_alignment.cpp`)
 
