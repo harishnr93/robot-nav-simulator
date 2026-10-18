@@ -22,22 +22,8 @@ set(AMR_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
 # ---------------------------------------------------------------------------
 # Core library: map loading, A* planning, motion simulation, CSV export
 # ---------------------------------------------------------------------------
-add_library(amr_core STATIC
-    src/grid_map.cpp
-    src/astar.cpp
-    src/robot.cpp
-    src/simulator.cpp
-    src/footprint.cpp
-    src/diff_drive.cpp
-    src/heading_control.cpp
-    src/lidar.cpp
-    src/ekf.cpp
-    src/dynamic_obstacles.cpp
-    src/ghost_cells.cpp
-    src/ghost_perception.cpp
-    src/geometry2d.cpp
-    src/alignment.cpp
-    src/csv_writer.cpp)
+include(cmake/amr_core_sources.cmake)  # AMR_CORE_SOURCES, shared with the ROS 2 package
+add_library(amr_core STATIC ${AMR_CORE_SOURCES})
 target_include_directories(amr_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(amr_core PRIVATE ${AMR_WARNING_FLAGS})
 
@@ -60,6 +46,22 @@ add_executable(alignment_experiment src/alignment_experiment.cpp)
 target_link_libraries(alignment_experiment PRIVATE amr_core)
 target_compile_options(alignment_experiment PRIVATE ${AMR_WARNING_FLAGS})
 
+# LiDAR perception experiments (run with: ./build/perception_experiment ekf|grazing|dynamic)
+add_executable(perception_experiment src/perception_experiment.cpp)
+target_link_libraries(perception_experiment PRIVATE amr_core)
+target_compile_options(perception_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
+# Localization experiments (run with: ./build/localization_experiment global|kidnap|...)
+add_executable(localization_experiment src/localization_experiment.cpp)
+target_link_libraries(localization_experiment PRIVATE amr_core)
+target_compile_options(localization_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
+# Planning with moving obstacles (run with: ./build/planning_experiment turns|spacetime|margins|robots)
+find_package(Threads REQUIRED)
+add_executable(planning_experiment src/planning_experiment.cpp)
+target_link_libraries(planning_experiment PRIVATE amr_core Threads::Threads)
+target_compile_options(planning_experiment PRIVATE ${AMR_WARNING_FLAGS})
+
 # "Why NO_PATH?" experiments (run with: ./build/ghost_experiment recovery|scaling)
 add_executable(ghost_experiment src/ghost_experiment.cpp)
 target_link_libraries(ghost_experiment PRIVATE amr_core)
@@ -81,7 +83,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_dynamic test_ghost_cells test_ghost_perception test_alignment)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_localization test_dynamic test_ghost_cells test_ghost_perception test_alignment test_planning)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -224,7 +226,7 @@ if(AMR_BUILD_TESTS)
                 --start 1 1 --goal 18 18 --robot-model diff-drive --lidar-beams 72 --ekf
                 --output ${CLI_OUT}/ekf)
     set_tests_properties(cli_ekf_localization PROPERTIES
-        PASS_REGULAR_EXPRESSION "EKF estimate: +position error RMS 0.004 m.*Dead reckoning: +position error RMS 0.533 m")
+        PASS_REGULAR_EXPRESSION "EKF estimate: +position error RMS 0.003 m.*Dead reckoning: +position error RMS 0.533 m")
 
     add_test(NAME cli_ekf_requires_diff_drive
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
@@ -238,13 +240,33 @@ if(AMR_BUILD_TESTS)
     set_tests_properties(cli_rejects_bad_ekf_settings PROPERTIES
         PASS_REGULAR_EXPRESSION "invalid EKF parameters: EKF range sigma")
 
+    add_test(NAME cli_particle_filter_global
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --lidar-beams 72 --ekf
+                --particle-filter --output ${CLI_OUT}/particle_filter)
+    set_tests_properties(cli_particle_filter_global PROPERTIES
+        PASS_REGULAR_EXPRESSION "Particle filter: found the robot after 0.0 s")
+
+    add_test(NAME cli_steer_by_estimate_with_localization_planning
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/hall.csv
+                --start 6 8 --goal 38 22 --robot-model diff-drive --robot-radius 0.25
+                --lidar-beams 72 --lidar-range 3 --ekf --connectivity 8
+                --plan-for-localization 1 --steer-by-estimate --output ${CLI_OUT}/steering)
+    set_tests_properties(cli_steer_by_estimate_with_localization_planning PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED")
+
+    add_test(NAME cli_plan_for_localization_requires_8
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/hall.csv
+                --start 6 8 --goal 38 22 --plan-for-localization 1)
+    set_tests_properties(cli_plan_for_localization_requires_8 PROPERTIES WILL_FAIL TRUE)
+
     add_test(NAME cli_dynamic_replanning
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
                 --start 1 1 --goal 18 18
                 --dynamic-obstacles ${PROJECT_SOURCE_DIR}/maps/obstacles_dynamic.csv
                 --output ${CLI_OUT}/dynamic)
     set_tests_properties(cli_dynamic_replanning PROPERTIES
-        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Dynamic: +3 moving obstacle\\(s\\), sensing range 3.00 m. 3 replan\\(s\\)")
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Dynamic: +3 moving obstacle\\(s\\), sensing range 3.00 m. 2 replan\\(s\\)")
 
     add_test(NAME cli_rejects_bad_dynamic_obstacles
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
@@ -252,6 +274,45 @@ if(AMR_BUILD_TESTS)
                 --dynamic-obstacles ${PROJECT_SOURCE_DIR}/tests/data/bad_dynamic_obstacles.csv)
     set_tests_properties(cli_rejects_bad_dynamic_obstacles PROPERTIES
         PASS_REGULAR_EXPRESSION "line 2: route segment 0-1 crosses a static obstacle")
+
+    add_test(NAME cli_dynamic_spacetime
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive
+                --dynamic-obstacles ${PROJECT_SOURCE_DIR}/maps/obstacles_dynamic.csv
+                --dynamic-planner space-time --livelock-window 15 --output ${CLI_OUT}/dynamic_spacetime)
+    set_tests_properties(cli_dynamic_spacetime PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*planner space-time, livelock switch after 15.0 s: 0 switch")
+
+    add_test(NAME cli_turn_aware
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --turn-aware
+                --output ${CLI_OUT}/turn_aware)
+    set_tests_properties(cli_turn_aware PROPERTIES
+        PASS_REGULAR_EXPRESSION "travel time 37.00 s.*2 turns in place")
+
+    add_test(NAME cli_turn_aware_requires_diff_drive
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --turn-aware)
+    set_tests_properties(cli_turn_aware_requires_diff_drive PROPERTIES
+        PASS_REGULAR_EXPRESSION "--turn-aware requires --robot-model diff-drive")
+
+    add_test(NAME cli_rejects_bad_dynamic_planner
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --dynamic-planner sideways)
+    set_tests_properties(cli_rejects_bad_dynamic_planner PROPERTIES
+        PASS_REGULAR_EXPRESSION "--dynamic-planner must be reactive or space-time")
+
+    add_test(NAME cli_rejects_bad_spacetime_horizon
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv
+                --start 1 1 --goal 2 2 --spacetime-horizon 0)
+    set_tests_properties(cli_rejects_bad_spacetime_horizon PROPERTIES
+        PASS_REGULAR_EXPRESSION "invalid replanning parameters: space-time horizon")
+
+    add_test(NAME planning_experiment_turns
+        COMMAND planning_experiment turns --runs 20 --output ${CLI_OUT}/planning_turns)
+    set_tests_properties(planning_experiment_turns PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        PASS_REGULAR_EXPRESSION "time saved per route")
 
     add_test(NAME cli_rejects_bad_replanning_settings
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv

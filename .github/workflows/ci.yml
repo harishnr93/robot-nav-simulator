@@ -43,3 +43,21 @@ jobs:
         with:
           name: demo-results
           path: results/
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image (standalone simulator, Python tools, ROS 2 package)
+        run: docker build --build-arg INSTALL_RVIZ=false -t robot-nav-sim .
+
+      - name: All tests inside the image (CTest + ROS 2)
+        run: docker run --rm robot-nav-sim test
+
+      - name: Standalone CLI and demo inside the image
+        run: |
+          docker run --rm robot-nav-sim robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18
+          mkdir -p docker-results
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/docker-results:/ws/results" robot-nav-sim demo
+          test -s docker-results/navigation.gif

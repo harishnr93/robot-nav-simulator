@@ -15,12 +15,16 @@
 
 #include "astar.hpp"
 #include "csv_writer.hpp"
+#include "closed_loop.hpp"
 #include "ekf.hpp"
+#include "localization_planning.hpp"
+#include "particle_filter.hpp"
 #include "footprint.hpp"
 #include "lidar.hpp"
 #include "grid_map.hpp"
 #include "robot.hpp"
 #include "simulator.hpp"
+#include "spacetime_planner.hpp"
 #include "types.hpp"
 
 namespace {
@@ -51,11 +55,17 @@ struct CliOptions {
     amr::LidarConfig lidar;
     amr::EkfConfig ekf;
     std::string dynamic_file;           ///< --dynamic-obstacles (empty: static world)
+    amr::PerceptionConfig perception;   ///< --obstacle-perception, --obstacle-prediction
     amr::ReplanningConfig replanning;
     std::filesystem::path output_dir = "results";
     bool reference_bfs = false;
     amr::Connectivity connectivity = amr::Connectivity::Four;
     bool show_help = false;
+    double localization_weight = -1.0;  ///< --plan-for-localization (< 0: shortest path)
+    bool steer_by_estimate = false;     ///< --steer-by-estimate
+    double safety_margin = 0.0;         ///< --safety-margin (extra inflation), m
+    bool turn_aware = false;            ///< --turn-aware (fastest path with turns, diff-drive)
+    bool particle_filter = false;       ///< --particle-filter
 };
 
 /// Result of the optional optimality check against the reference BFS.
@@ -94,6 +104,9 @@ void printUsage(std::ostream& os) {
           "  --lidar-range M       LiDAR maximum range in m (default 5)\n"
           "  --lidar-noise SIGMA   Gaussian range noise in m (default 0)\n"
           "  --lidar-seed N        Seed of the range noise (default 0)\n"
+          "  --lidar-bias SIGMA    Range bias shared by all beams of a scan, std in m\n"
+          "                        (default 0); a correlated error\n"
+          "  --lidar-bias-time S   Bias correlation time in s (default 0 = constant)\n"
           "  --ekf                 EKF localization (differential drive): noisy wheel\n"
           "                        odometry, corrected by the LiDAR scans if enabled\n"
           "  --odom-noise-dist K   Odometry distance error, m per sqrt(m) driven (0.05)\n"
@@ -102,23 +115,61 @@ void printUsage(std::ostream& os) {
           "  --odom-seed N         Seed of the odometry noise (default 0)\n"
           "  --ekf-range-sigma M   LiDAR range std assumed by the EKF in m (default 0.05)\n"
           "  --ekf-gate N          Reject beams whose innovation exceeds N std (default 3)\n"
+          "  --ekf-bias-sigma M    EKF range-bias state with this std in m (default 0 =\n"
+          "                        none); models a LiDAR bias shared by all beams\n"
+          "  --ekf-bias-time S     Correlation time of the bias state in s (0 = constant)\n"
+          "  --ekf-map-sigma M     EKF map-error states: offset std of each wall in m\n"
+          "                        (default 0 = none; res/sqrt(12) for a rasterized map)\n"
+          "  --ekf-map-tilt RAD    Tilt std of each wall's map error (default 0.02)\n"
+          "  --ekf-map-residual M  Residual map-error std per cell-sized patch (default 0)\n"
+          "  --ekf-surface S       Ranges predicted on the grid's faces (grid, default) or\n"
+          "                        on wall lines fitted to the grid (lines)\n"
+          "  --ekf-grazing P       Grazing beams: model (default; kept, weighted by their\n"
+          "                        linearization and map-error variance) or cutoff\n"
+          "  --ekf-max-incidence DEG  Cutoff policy: drop beams beyond DEG (default 78.46)\n"
           "  --dynamic-obstacles FILE  Moving obstacles (one per line: radius_m,speed_mps,\n"
           "                        x0,y0,x1,y1,... cells; back and forth); the robot\n"
           "                        replans when one blocks its path\n"
           "  --sensing-range M     Dynamic obstacles are seen within M meters, in line\n"
           "                        of sight (default 3)\n"
           "  --replan-margin M     Extra clearance around a seen obstacle when\n"
-          "                        replanning, m (default 0.25)\n"
+          "                        replanning, m (default 0.15)\n"
           "  --prediction-horizon S  Block where a seen obstacle will be within S seconds\n"
-          "                        at its estimated velocity (default 2; 0 = where it is)\n"
+          "                        at its estimated velocity (default 1; 0 = where it is)\n"
           "  --replan-patience S   Wait up to S seconds for a blocked path to clear before\n"
           "                        replanning a detour (default 6; 0 = replan at once)\n"
+          "  --dynamic-planner P   reactive (default; replan around seen obstacles) or\n"
+          "                        space-time (safe interval planning over predicted\n"
+          "                        motion: timed plans that wait or detour)\n"
+          "  --spacetime-horizon S  Space-time planner: seconds of predicted obstacle\n"
+          "                        motion planned against (default 20)\n"
+          "  --livelock-window S   Switch planner (reactive <-> space-time) when the robot\n"
+          "                        has not got closer to the goal for S seconds\n"
+          "                        (default 15; 0 = off)\n"
+          "  --obstacle-perception P  How moving obstacles are seen: lidar (default; the\n"
+          "                        robot's own LiDAR, map subtraction and tracking) or\n"
+          "                        oracle (true positions in line of sight)\n"
+          "  --occlusion-aware     Also treat space hidden behind walls as possibly\n"
+          "                        occupied (creep round blind corners)\n"
+          "  --obstacle-prediction P  Lidar perception: reversals (default; learns where an\n"
+          "                        obstacle turns round) or constant-velocity\n"
 
           "  --robot-radius M      Robot footprint radius in m; obstacles are inflated\n"
           "                        by it for planning (default 0 = point robot)\n"
           "  --output DIR          Output directory (default results/)\n"
           "  --connectivity 4|8    Grid moves: 4 = straight only (default), 8 = also\n"
           "                        diagonal (cost sqrt(2), no cutting obstacle corners)\n"
+          "  --plan-for-localization W  Prefer routes where the LiDAR localizes well: each\n"
+          "                        step costs its length x (1 + W x penalty), the penalty\n"
+          "                        growing with the cell's position uncertainty after one\n"
+          "                        scan (needs --connectivity 8; 0 = shortest path)\n"
+          "  --safety-margin M     Extra inflation beyond the robot radius for planning, m\n"
+          "  --turn-aware          Differential drive: plan the fastest path counting the\n"
+          "                        time spent turning in place, not the shortest\n"
+          "  --steer-by-estimate   Drive by the EKF estimate instead of the true pose\n"
+          "                        (needs --ekf; not with --dynamic-obstacles)\n"
+          "  --particle-filter     Also localize globally with a particle filter (no prior\n"
+          "                        knowledge of the start) and report when it found the robot\n"
           "  --reference-bfs       Also run the reference search (BFS for 4-connected,\n"
           "                        exact Dijkstra for 8-connected) and check A* optimality\n"
           "  -h, --help            Show this help and exit\n"
@@ -266,6 +317,93 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
                 ok = false;
             }
             options.lidar.seed = static_cast<std::uint32_t>(seed);
+        } else if (arg == "--lidar-bias") {
+            ok = parseNumber(options.lidar.bias_stddev);
+        } else if (arg == "--lidar-bias-time") {
+            ok = parseNumber(options.lidar.bias_time);
+        } else if (arg == "--ekf-bias-sigma") {
+            ok = parseNumber(options.ekf.model.bias_sigma);
+        } else if (arg == "--ekf-bias-time") {
+            ok = parseNumber(options.ekf.model.bias_time);
+        } else if (arg == "--ekf-map-sigma") {
+            ok = parseNumber(options.ekf.model.map_sigma);
+        } else if (arg == "--ekf-map-tilt") {
+            ok = parseNumber(options.ekf.model.map_tilt);
+        } else if (arg == "--ekf-map-residual") {
+            ok = parseNumber(options.ekf.model.map_residual);
+        } else if (arg == "--ekf-surface") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "grid" || value == "lines") {
+                    options.ekf.model.surface =
+                        value == "grid" ? amr::SurfaceKind::Grid : amr::SurfaceKind::Lines;
+                } else {
+                    error = "--ekf-surface must be grid or lines";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--plan-for-localization") {
+            ok = parseNumber(options.localization_weight);
+            if (ok && options.localization_weight < 0.0) {
+                error = "--plan-for-localization must be a non-negative weight";
+                ok = false;
+            }
+        } else if (arg == "--safety-margin") {
+            ok = parseNumber(options.safety_margin);
+            if (ok && (options.safety_margin < 0.0 || options.safety_margin > amr::kMaxRobotRadius)) {
+                error = "--safety-margin must be between 0 and 100 m";
+                ok = false;
+            }
+        } else if (arg == "--steer-by-estimate") {
+            options.steer_by_estimate = true;
+        } else if (arg == "--turn-aware") {
+            options.turn_aware = true;
+        } else if (arg == "--particle-filter") {
+            options.particle_filter = true;
+        } else if (arg == "--obstacle-perception") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "oracle" || value == "lidar") {
+                    options.perception.mode = value == "oracle" ? amr::ObstaclePerception::Oracle
+                                                                : amr::ObstaclePerception::Lidar;
+                } else {
+                    error = "--obstacle-perception must be oracle or lidar";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--occlusion-aware") {
+            options.perception.occlusion_aware = true;
+        } else if (arg == "--obstacle-prediction") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "reversals" || value == "constant-velocity") {
+                    options.perception.tracker.prediction = value == "reversals"
+                                                                ? amr::MotionPrediction::LearnedReversals
+                                                                : amr::MotionPrediction::ConstantVelocity;
+                } else {
+                    error = "--obstacle-prediction must be reversals or constant-velocity";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--ekf-grazing") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string value = argv[++i];
+                if (value == "model" || value == "cutoff") {
+                    options.ekf.model.grazing =
+                        value == "model" ? amr::GrazingPolicy::Model : amr::GrazingPolicy::Cutoff;
+                } else {
+                    error = "--ekf-grazing must be model or cutoff";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--ekf-max-incidence") {
+            double degrees = 0.0;
+            ok = parseNumber(degrees);
+            options.ekf.model.max_incidence = degrees * kRadiansPerDegree;
         } else if (arg == "--dynamic-obstacles") {
             ok = requireValues(1);
             if (ok) {
@@ -279,6 +417,22 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             ok = parseNumber(options.replanning.patience);
         } else if (arg == "--prediction-horizon") {
             ok = parseNumber(options.replanning.prediction_horizon);
+        } else if (arg == "--dynamic-planner") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string text = argv[++i];
+                if (text == "reactive" || text == "space-time") {
+                    options.replanning.planner =
+                        text == "reactive" ? amr::DynamicPlanner::Reactive : amr::DynamicPlanner::SpaceTime;
+                } else {
+                    error = "--dynamic-planner must be reactive or space-time, got '" + text + "'";
+                    ok = false;
+                }
+            }
+        } else if (arg == "--spacetime-horizon") {
+            ok = parseNumber(options.replanning.spacetime_horizon);
+        } else if (arg == "--livelock-window") {
+            ok = parseNumber(options.replanning.livelock_window);
         } else if (arg == "--ekf") {
             options.ekf.enabled = true;
         } else if (arg == "--odom-noise-dist") {
@@ -355,6 +509,19 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
         } else if (options.ekf.enabled && options.motion.model != amr::RobotModel::DiffDrive) {
             error = "--ekf requires --robot-model diff-drive (the odometry measures turns "
                     "and distances driven)";
+        } else if (options.localization_weight >= 0.0 && options.connectivity != amr::Connectivity::Eight) {
+            error = "--plan-for-localization requires --connectivity 8";
+        } else if (options.turn_aware && options.motion.model != amr::RobotModel::DiffDrive) {
+            error = "--turn-aware requires --robot-model diff-drive (a point robot turns for free)";
+        } else if (options.turn_aware && options.localization_weight >= 0.0) {
+            error = "--turn-aware cannot be combined with --plan-for-localization";
+        } else if (options.steer_by_estimate && !options.ekf.enabled) {
+            error = "--steer-by-estimate requires --ekf (it drives by the EKF estimate)";
+        } else if (options.steer_by_estimate && !options.dynamic_file.empty()) {
+            error = "--steer-by-estimate does not support --dynamic-obstacles";
+        } else if (options.particle_filter &&
+                   (!options.lidar.enabled() || options.motion.model != amr::RobotModel::DiffDrive)) {
+            error = "--particle-filter requires --lidar-beams and --robot-model diff-drive";
         }
     }
     if (!error.empty()) {
@@ -504,6 +671,13 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
                   << std::setprecision(1) << static_cast<double>(sim.wait_steps) * options.motion.dt
                   << " s waiting, closest gap " << std::setprecision(3)
                   << sim.min_dynamic_clearance << " m\n";
+        std::cout << "                planner "
+                  << (options.replanning.planner == amr::DynamicPlanner::SpaceTime ? "space-time" : "reactive");
+        if (options.replanning.livelock_window > 0.0) {
+            std::cout << ", livelock switch after " << std::setprecision(1) << options.replanning.livelock_window
+                      << " s: " << sim.strategy_switches << " switch(es)";
+        }
+        std::cout << '\n';
         if (sim.collided_obstacle >= 0) {
             std::cout << "                hit by moving obstacle " << sim.collided_obstacle
                       << '\n';
@@ -531,6 +705,21 @@ void printSummary(const CliOptions& options, const amr::GridMap& map,
         }
         std::cout << ", mean NEES " << std::setprecision(2) << summary.mean_nees
                   << " (3 = consistent)\n";
+        const amr::MeasurementModelConfig& model = options.ekf.model;
+        if (!model.classic()) {
+            std::cout << "EKF model:      "
+                      << (model.surface == amr::SurfaceKind::Lines ? "wall lines" : "grid faces")
+                      << (model.grazing == amr::GrazingPolicy::Model ? ", grazing beams modeled"
+                                                                     : ", grazing cutoff");
+            if (model.bias_sigma > 0.0) {
+                std::cout << ", range bias estimated " << std::setprecision(3)
+                          << localization.back().bias << " m";
+            }
+            if (model.map_sigma > 0.0 || model.map_residual > 0.0) {
+                std::cout << ", " << localization.back().map_states << " map-error states";
+            }
+            std::cout << '\n';
+        }
     }
     std::cout << "Results:        " << options.output_dir.string() << '\n';
 }
@@ -620,6 +809,42 @@ bool writeResults(const CliOptions& options, const amr::GridMap& map,
                                           options.motion, sim, error);
 }
 
+/// Turn-aware planning for the differential drive: space-time planning with no
+/// moving obstacles is A* over (cell, heading) with the turning time as cost.
+amr::PlanResult planTurnAware(const amr::GridMap& map, const amr::GridMap& planning_map, const CliOptions& options) {
+    amr::PlanResult plan;
+    plan.status = amr::validatePlanRequest(map, options.start, options.goal);
+    if (plan.status == amr::PlanStatus::Success && !planning_map.isFree(options.start)) {
+        plan.status = amr::PlanStatus::StartOccupied;
+    } else if (plan.status == amr::PlanStatus::Success && !planning_map.isFree(options.goal)) {
+        plan.status = amr::PlanStatus::GoalOccupied;
+    }
+    if (plan.status != amr::PlanStatus::Success) {
+        return plan;
+    }
+    amr::SpaceTimeConfig config;
+    config.dt = options.motion.dt;
+    config.speed = options.motion.speed;
+    config.connectivity = options.connectivity;
+    config.turn_aware = true;
+    config.max_angular_speed = options.motion.max_angular_speed;
+    config.max_expansions = 4000000;
+    const amr::SpaceTimePlan timed =
+        amr::planSpaceTime(planning_map, options.start, options.motion.initial_heading, options.goal, {}, config);
+    plan.status = timed.success ? amr::PlanStatus::Success : amr::PlanStatus::NoPath;
+    plan.expanded_nodes = timed.expanded;
+    plan.planning_time_ms = timed.planning_time_ms;
+    if (timed.success) {
+        plan.path = amr::planCells(timed);
+        for (std::size_t i = 1; i < plan.path.size(); ++i) {
+            const bool diagonal = plan.path[i].x != plan.path[i - 1].x && plan.path[i].y != plan.path[i - 1].y;
+            plan.diagonal_moves += diagonal ? 1 : 0;
+        }
+        plan.path_cost = static_cast<int>(plan.path.size()) - 1;
+    }
+    return plan;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -644,10 +869,24 @@ int main(int argc, char** argv) {
 
     // Plan on the inflated map (identical to `map` for a point robot). Inflation is
     // timed separately and is not part of the planning time.
-    const Inflation inflation = inflate(map, options.motion.robot_radius);
-    const amr::PlanResult plan =
-        amr::planWithFootprint(map, inflation.planning_map, options.start, options.goal,
-                               options.connectivity);
+    const Inflation inflation = inflate(map, options.motion.robot_radius + options.safety_margin);
+    amr::PlanResult plan;
+    if (options.localization_weight >= 0.0) {
+        // Localization-aware planning: the localizability of every cell for this LiDAR.
+        amr::LocalizabilityConfig lc;
+        lc.beams = options.lidar.enabled() ? options.lidar.beams : 72;
+        lc.max_range = options.lidar.max_range;
+        lc.range_sigma = options.ekf.range_sigma;
+        amr::LocalizationPlanConfig pc;
+        pc.weight = options.localization_weight;
+        plan = amr::planForLocalization(inflation.planning_map, options.start, options.goal,
+                                        amr::computeLocalizability(map, lc), pc);
+    } else if (options.turn_aware) {
+        plan = planTurnAware(map, inflation.planning_map, options);
+    } else {
+        plan = amr::planWithFootprint(map, inflation.planning_map, options.start, options.goal,
+                                      options.connectivity);
+    }
     // The BFS check runs after planning, on the same planning map.
     const ReferenceCheck reference = options.reference_bfs
                                          ? checkAgainstBfs(inflation.planning_map, options, plan)
@@ -666,20 +905,41 @@ int main(int argc, char** argv) {
         dynamic->planning_map = &inflation.planning_map;
         dynamic->obstacles = std::move(obstacles.obstacles);
         dynamic->replanning = options.replanning;
+        dynamic->perception = options.perception;
     }
     const amr::DynamicScenario* scenario = dynamic ? &*dynamic : nullptr;
     amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed
-    if (plan.success()) {
+    std::vector<amr::LocalizationSample> closed_loop_localization;
+    if (plan.success() && options.steer_by_estimate) {
+        // Closed loop: the controller only knows the EKF estimate.
+        amr::ClosedLoopConfig config;
+        config.motion = options.motion;
+        config.lidar = options.lidar;
+        config.ekf = options.ekf;
+        amr::ClosedLoopResult loop = amr::simulateWithEstimate(map, plan.path, config, options.connectivity);
+        sim.status = loop.status;
+        sim.trajectory = std::move(loop.trajectory);
+        sim.steps = sim.trajectory.empty() ? 0 : sim.trajectory.size() - 1;
+        sim.collision_count = loop.status == amr::NavigationStatus::Collision ? 1 : 0;
+        for (std::size_t k = 1; k < sim.trajectory.size(); ++k) {
+            sim.distance_traveled += std::hypot(sim.trajectory[k].state.x - sim.trajectory[k - 1].state.x,
+                                                sim.trajectory[k].state.y - sim.trajectory[k - 1].state.y);
+        }
+        sim.final_goal_error = loop.final_goal_error;
+        closed_loop_localization = std::move(loop.localization);
+    } else if (plan.success()) {
         sim = amr::simulatePath(map, plan.path, options.motion, options.connectivity, scenario);
     }
     // The LiDAR observes the real map from every trajectory sample; it does not
-    // influence the motion.
+    // influence the motion (except through the estimate, with --steer-by-estimate).
     const std::vector<amr::LidarScan> scans =
         amr::scanTrajectory(map, sim.trajectory, options.lidar);
     // The EKF runs alongside as well: it estimates the pose from noisy odometry and
-    // the scans, but the robot is controlled with its true pose.
+    // the scans, but the robot is controlled with its true pose (unless it steers by
+    // the estimate, then that run's estimates are reported).
     const std::vector<amr::LocalizationSample> localization =
-        amr::runLocalization(map, sim.trajectory, scans, options.lidar, options.ekf);
+        options.steer_by_estimate ? closed_loop_localization
+                                  : amr::runLocalization(map, sim.trajectory, scans, options.lidar, options.ekf);
 
     std::error_code ec;
     std::filesystem::create_directories(options.output_dir, ec);
@@ -695,6 +955,41 @@ int main(int argc, char** argv) {
     }
 
     printSummary(options, map, inflation, plan, reference, sim, scans, localization, scenario);
+    if (options.particle_filter && !sim.trajectory.empty()) {
+        // Global localization: the particle filter starts knowing nothing.
+        amr::ParticleFilterConfig pf;
+        pf.seed = options.ekf.odometry.seed;
+        const auto samples = amr::runParticleFilter(map, sim.trajectory, scans, options.lidar,
+                                                    options.ekf.odometry, pf, true);
+        double found = -1.0, sq = 0.0, n = 0.0;
+        for (const auto& s : samples) {
+            const double e = std::hypot(s.truth.x - s.estimate.pose.x, s.truth.y - s.estimate.pose.y);
+            if (e < 0.3) {
+                if (found < 0.0) {
+                    found = s.time;
+                }
+            } else {
+                found = -1.0;
+            }
+        }
+        for (const auto& s : samples) {
+            if (found >= 0.0 && s.time >= found) {
+                sq += std::pow(s.truth.x - s.estimate.pose.x, 2) + std::pow(s.truth.y - s.estimate.pose.y, 2);
+                n += 1.0;
+            }
+        }
+        std::cout << "Particle filter: ";
+        if (found >= 0.0) {
+            std::cout << "found the robot after " << std::setprecision(1) << found << " s (global start), "
+                      << "position error RMS " << std::setprecision(3) << std::sqrt(sq / n) << " m after; "
+                      << samples.back().particles << " particles, "
+                      << std::setprecision(0) << 100.0 * samples.back().estimate.share << " % on the estimate\n";
+        } else {
+            std::cout << "did not settle on the robot (the map may have several matching places: "
+                      << std::setprecision(0) << 100.0 * samples.back().estimate.share
+                      << " % on the best one)\n";
+        }
+    }
     if (!reference.agrees) {
         std::cerr << "Error: A* result disagrees with the reference BFS\n";
         return kExitReferenceMismatch;

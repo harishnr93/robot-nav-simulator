@@ -38,6 +38,13 @@ std::string validateLidarConfig(const LidarConfig& config) {
     if (!std::isfinite(config.noise_stddev) || config.noise_stddev < 0.0) {
         return "LiDAR noise must be a non-negative finite number";
     }
+    if (!std::isfinite(config.bias_stddev) || config.bias_stddev < 0.0 ||
+        config.bias_stddev > config.max_range) {
+        return "LiDAR bias must be between 0 and the LiDAR range";
+    }
+    if (!std::isfinite(config.bias_time) || config.bias_time < 0.0) {
+        return "LiDAR bias correlation time must be a non-negative number of seconds";
+    }
     return {};
 }
 
@@ -111,36 +118,42 @@ std::vector<double> beamOffsets(const LidarConfig& config) {
     return offsets;
 }
 
+RangeErrorModel::RangeErrorModel(const LidarConfig& config)
+    : config_(config), rng_(config.seed), noise_(0.0, config.noise_stddev),
+      // A separate stream, so adding a bias leaves the white noise unchanged.
+      bias_rng_(config.seed ^ 0x9e3779b9u) {}
+
+void RangeErrorModel::nextScan(double time) {
+    if (config_.bias_stddev <= 0.0) {
+        return;
+    }
+    if (first_) {
+        bias_ = config_.bias_stddev * unit_(bias_rng_);
+    } else if (config_.bias_time > 0.0) {
+        const double a = std::exp(-std::max(time - last_time_, 0.0) / config_.bias_time);
+        bias_ = a * bias_ + std::sqrt(1.0 - a * a) * config_.bias_stddev * unit_(bias_rng_);
+    }
+    first_ = false;
+    last_time_ = time;
+}
+
+double RangeErrorModel::measure(double exact) {
+    double range = exact + bias_;
+    if (config_.noise_stddev > 0.0) {
+        range += noise_(rng_);
+    }
+    return range == exact ? exact : std::clamp(range, 0.0, config_.max_range);
+}
+
 std::vector<LidarScan> scanTrajectory(const GridMap& map,
                                       const std::vector<TrajectorySample>& trajectory,
                                       const LidarConfig& config) {
-    std::vector<LidarScan> scans;
-    if (!config.enabled()) {
-        return scans;
-    }
-    const std::vector<double> offsets = beamOffsets(config);
-    std::mt19937 rng(config.seed);
-    std::normal_distribution<double> noise(0.0, config.noise_stddev);
-    scans.reserve(trajectory.size());
-    for (const TrajectorySample& sample : trajectory) {
-        LidarScan scan;
-        scan.time = sample.state.time;
-        scan.origin = {sample.state.x, sample.state.y};
-        scan.heading = sample.state.theta;
-        for (const double offset : offsets) {
-            const double angle = scan.heading + offset;
-            const RayHit ray = castRay(map, scan.origin, angle, config.max_range);
-            double range = ray.range;
-            if (ray.hit && config.noise_stddev > 0.0) {
-                range = std::clamp(range + noise(rng), 0.0, config.max_range);
-            }
-            scan.angles.push_back(angle);
-            scan.ranges.push_back(range);
-            scan.hits.push_back(ray.hit);
-        }
-        scans.push_back(std::move(scan));
-    }
-    return scans;
+    return scanTrajectoryWith(
+        [&map](WorldPoint origin, double angle, double max_range, double /*time*/) {
+            const RayHit ray = castRay(map, origin, angle, max_range);
+            return BeamRange{ray.hit, ray.range};
+        },
+        trajectory, config);
 }
 
 }  // namespace amr
