@@ -6,6 +6,10 @@
 //                                            the livelock switch) among moving obstacles
 //   planning_experiment margins [options]    margin x prediction horizon sweep
 //   planning_experiment robots [options]     2-6 robots that all replan (--map)
+//   planning_experiment search [options]     failure search vs. random sampling
+//                                            (--runs = simulation budget per seed)
+//   planning_experiment actuators [options]  realistic actuators: tracking error and
+//                                            the planning margin that covers it
 //
 // Options: --runs N, --seed N, --map FILE, --connectivity 4|8, --speeds MIN,MAX
 //          (obstacle speeds, m/s), --livelock S (margins: livelock window of every
@@ -21,17 +25,20 @@
 #include <iostream>
 #include <limits>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "astar.hpp"
+#include "closed_loop.hpp"
 #include "diff_drive.hpp"
 #include "dynamic_obstacles.hpp"
 #include "footprint.hpp"
 #include "grid_map.hpp"
 #include "multi_robot.hpp"
+#include "scenario_search.hpp"
 #include "simulator.hpp"
 #include "spacetime_planner.hpp"
 
@@ -292,11 +299,13 @@ std::vector<std::vector<Score>> evaluate(const amr::GridMap& map, const std::vec
 std::vector<Variant> plannerVariants() {
     std::vector<Variant> v;
     // The comparison base: the reactive robot as it was (LiDAR perception, learned
-    // reversals, margin 0.25 m, look-ahead 2 s, no livelock switch).
+    // reversals, margin 0.25 m, look-ahead 2 s, no livelock switch, no turning
+    // hypotheses).
     amr::DynamicScenario previous;
     previous.replanning.margin = 0.25;
     previous.replanning.prediction_horizon = 2.0;
     previous.replanning.livelock_window = 0.0;
+    previous.perception.turning_hypotheses = false;
     v.push_back({"reactive, previous settings", previous});
     amr::DynamicScenario reactive;  // the defaults: margin 0.15 m, 1 s, switch after 15 s
     reactive.replanning.livelock_window = 0.0;
@@ -550,6 +559,293 @@ int modeRobots(const Options& o) {
     return 0;
 }
 
+/// Item 18: optimized obstacle routes against random sampling, with the same budget.
+amr::BatchEvaluator parallelEvaluator(const amr::GridMap& map, const std::vector<amr::GridCoord>& path,
+                                      const amr::ScenarioSearchConfig& search, amr::RobotModel model,
+                                      const amr::DynamicScenario& base) {
+    return [&map, &path, search, model, base](const std::vector<amr::SearchScenario>& batch) {
+        std::vector<amr::Evaluation> out(batch.size());
+        std::atomic<std::size_t> next{0};
+        const auto worker = [&]() {
+            for (std::size_t i = next++; i < batch.size(); i = next++) {
+                amr::DynamicScenario scenario = base;
+                scenario.planning_map = &map;
+                scenario.obstacles = amr::toObstacles(map, batch[i], search.start, search.goal);
+                amr::MotionConfig motion;
+                motion.model = model;
+                motion.max_time = 600.0;
+                const auto sim = amr::simulatePath(map, path, motion, amr::Connectivity::Four, &scenario);
+                out[i] = amr::evaluateRun(map, sim, scenario.obstacles);
+            }
+        };
+        std::vector<std::thread> threads;
+        const unsigned count = std::min<unsigned>(std::max(1u, std::thread::hardware_concurrency()),
+                                                  static_cast<unsigned>(batch.size()));
+        for (unsigned t = 0; t < count; ++t) {
+            threads.emplace_back(worker);
+        }
+        for (std::thread& t : threads) {
+            t.join();
+        }
+        return out;
+    };
+}
+
+int modeSearch(const Options& o) {
+    const amr::MapLoadResult loaded = amr::loadGridMapCsv("maps/obstacles.csv", 0.5);
+    if (!loaded.ok) {
+        std::cerr << loaded.error << " (run from the repository root)\n";
+        return 1;
+    }
+    const amr::GridMap& map = loaded.map;
+    const amr::PlanResult plan = amr::planAStar(map, kStart, kGoal);
+    std::filesystem::create_directories(o.output);
+    std::ofstream csv(o.output / "planning_search.csv");
+    csv << "robot,method,seed,simulations,failures,distinct_places,first_failure_at,collisions,timeouts\n";
+    std::cout << "Failure search (obstacles map, 3 obstacles at " << o.min_speed << "-" << o.max_speed
+              << " m/s, default robot; budget " << o.runs << " simulations per seed; failures = distinct "
+              << "failing scenarios; places = distinct cells where the robot was at the end)\n";
+    for (int model = 0; model < 2; ++model) {
+        const auto robot = model == 0 ? amr::RobotModel::Point : amr::RobotModel::DiffDrive;
+        const std::string name = model == 0 ? "point" : "diff-drive";
+        std::cout << "\n" << name << " robot\n"
+                  << std::left << std::setw(12) << "method" << std::right << std::setw(6) << "seed" << std::setw(11)
+                  << "failures" << std::setw(9) << "places" << std::setw(14) << "first at sim" << std::setw(12)
+                  << "collisions" << std::setw(10) << "timeouts" << "\n";
+        std::vector<amr::FoundFailure> all_found;
+        for (int seed = 1; seed <= 3; ++seed) {
+            for (int method = 0; method < 2; ++method) {
+                amr::ScenarioSearchConfig config;
+                config.start = kStart;
+                config.goal = kGoal;
+                config.min_speed = o.min_speed;
+                config.max_speed = o.max_speed;
+                config.budget = static_cast<std::size_t>(o.runs);
+                config.seed = static_cast<std::uint32_t>(seed);
+                const auto evaluate = parallelEvaluator(map, plan.path, config, robot, amr::DynamicScenario{});
+                const amr::ScenarioSearchResult r = method == 0 ? amr::sampleFailures(map, config, evaluate)
+                                                                : amr::searchFailures(map, config, evaluate);
+                std::set<std::pair<int, int>> places;
+                int collisions = 0, timeouts = 0;
+                for (const auto& f : r.failures) {
+                    places.insert({f.evaluation.where.x, f.evaluation.where.y});
+                    collisions += f.evaluation.status == amr::NavigationStatus::Collision ? 1 : 0;
+                    timeouts += f.evaluation.status == amr::NavigationStatus::Timeout ? 1 : 0;
+                    if (method == 1) {
+                        all_found.push_back(f);
+                    }
+                }
+                const std::string label = method == 0 ? "random" : "search";
+                const long first = r.failures.empty() ? -1 : static_cast<long>(r.failures.front().simulation);
+                std::cout << std::left << std::setw(12) << label << std::right << std::setw(6) << seed
+                          << std::setw(11) << r.failures.size() << std::setw(9) << places.size() << std::setw(14)
+                          << first << std::setw(12) << collisions << std::setw(10) << timeouts << "\n";
+                csv << name << ',' << label << ',' << seed << ',' << r.simulations << ',' << r.failures.size() << ','
+                    << places.size() << ',' << first << ',' << collisions << ',' << timeouts << "\n";
+            }
+        }
+        // Shrink the first few failures the search found into minimal obstacle files.
+        amr::ScenarioSearchConfig config;
+        config.start = kStart;
+        config.goal = kGoal;
+        config.min_speed = o.min_speed;
+        config.max_speed = o.max_speed;
+        const auto evaluate = parallelEvaluator(map, plan.path, config, robot, amr::DynamicScenario{});
+        // One failure per place where it happened, shrunk; duplicates of an earlier
+        // minimal scenario are skipped.
+        std::set<std::pair<int, int>> shrunk_places;
+        std::set<std::string> minimal_files;
+        std::size_t written = 0;
+        for (std::size_t i = 0; i < all_found.size() && written < 6; ++i) {
+            if (!shrunk_places.insert({all_found[i].evaluation.where.x, all_found[i].evaluation.where.y}).second) {
+                continue;
+            }
+            std::size_t sims = 0;
+            const amr::SearchScenario minimal = amr::shrinkFailure(map, config, all_found[i].scenario, evaluate, &sims);
+            if (!minimal_files.insert(amr::toObstacleFile(map, minimal, kStart, kGoal)).second) {
+                continue;
+            }
+            const auto check = evaluate({minimal}).front();
+            ++written;
+            const std::filesystem::path file =
+                o.output / ("failure_" + name + "_" + std::to_string(written) + ".csv");
+            std::ofstream out(file);
+            out << "# " << name << " robot, " << amr::toString(check.status) << " at cell (" << check.where.x << ", "
+                << check.where.y << "); found by planning_experiment search, shrunk in " << sims
+                << " simulations\n"
+                << amr::toObstacleFile(map, minimal, kStart, kGoal);
+            std::cout << "  minimal failure " << written << " (" << minimal.obstacles.size() << " of "
+                      << all_found[i].scenario.obstacles.size() << " obstacles, " << amr::toString(check.status)
+                      << " at (" << check.where.x << ", " << check.where.y << ")): " << file.string() << "\n";
+        }
+    }
+    return 0;
+}
+
+/// Item 20: realistic actuators. How far does the robot leave its planned path, and
+/// how much planning margin covers it?
+amr::GridMap subdivide(const amr::GridMap& map, int k) {
+    amr::GridMap fine(map.width() * k, map.height() * k, map.resolution() / k);
+    for (int y = 0; y < fine.height(); ++y) {
+        for (int x = 0; x < fine.width(); ++x) {
+            fine.setOccupied({x, y}, map.isOccupied({x / k, y / k}));
+        }
+    }
+    return fine;
+}
+
+double percentile(std::vector<double> v, double q) {
+    if (v.empty()) {
+        return 0.0;
+    }
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, static_cast<std::size_t>(q * static_cast<double>(v.size())))];
+}
+
+int modeActuators(const Options& o) {
+    const amr::MapLoadResult loaded = amr::loadGridMapCsv("maps/obstacles.csv", 0.5);
+    if (!loaded.ok) {
+        std::cerr << loaded.error << " (run from the repository root)\n";
+        return 1;
+    }
+    // 0.1 m cells, so that centimetre margins are not lost to the inflation's quantization.
+    const amr::GridMap map = subdivide(loaded.map, 5);
+    constexpr double kRadius = 0.2;
+    const std::vector<double> margins{0.0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3};
+    struct Level {
+        std::string name;
+        amr::ActuatorConfig actuator;
+    };
+    const auto level = [](double lag, double scale, double bias, double noise) {
+        amr::ActuatorConfig a;
+        a.lag = lag;
+        a.speed_scale = scale;
+        a.turn_bias = bias;
+        a.rate_noise = noise;
+        return a;
+    };
+    const std::vector<Level> levels{
+        {"ideal (moves as commanded)", level(0.0, 1.0, 0.0, 0.0)},
+        {"lag 0.2 s", level(0.2, 1.0, 0.0, 0.0)},
+        {"lag 0.2 s, speed -5 %", level(0.2, 0.95, 0.0, 0.0)},
+        {"lag 0.2 s, turn bias 0.05 rad/s", level(0.2, 1.0, 0.05, 0.0)},
+        {"realistic: lag 0.2, -3 %, bias 0.05, noise 0.05", level(0.2, 0.97, 0.05, 0.05)},
+        {"harsh: lag 0.4, -10 %, bias 0.1, noise 0.1", level(0.4, 0.9, 0.1, 0.1)},
+    };
+    // Random routes, at least 6 m apart, plannable with the widest margin.
+    std::mt19937 rng(o.seed);
+    std::uniform_int_distribution<int> xs(0, map.width() - 1), ys(0, map.height() - 1);
+    const amr::GridMap widest = amr::inflateObstacles(map, kRadius + margins.back());
+    struct Route {
+        amr::GridCoord start, goal;
+        double heading;
+        std::uint32_t seed;
+    };
+    std::vector<Route> routes;
+    while (static_cast<int>(routes.size()) < o.runs) {
+        const amr::GridCoord a{xs(rng), ys(rng)}, b{xs(rng), ys(rng)};
+        if (!widest.isFree(a) || !widest.isFree(b)) {
+            continue;
+        }
+        const amr::WorldPoint pa = map.gridToWorld(a), pb = map.gridToWorld(b);
+        if (std::hypot(pa.x - pb.x, pa.y - pb.y) < 6.0 || !amr::planAStar(widest, a, b).success()) {
+            continue;
+        }
+        routes.push_back({a, b, std::uniform_real_distribution<double>(-kPi, kPi)(rng), static_cast<std::uint32_t>(rng())});
+    }
+    std::vector<amr::GridMap> inflated;
+    for (const double margin : margins) {
+        inflated.push_back(amr::inflateObstacles(map, kRadius + margin));
+    }
+    struct Outcome {
+        bool planned = false, reached = false, collided = false;
+        std::vector<double> cross_track;
+    };
+    const std::size_t nl = levels.size(), nm = margins.size(), nr = routes.size();
+    std::vector<Outcome> outcomes(2 * nl * nm * nr);  // [tracker][level][margin][route]
+    std::atomic<std::size_t> next{0};
+    const auto worker = [&]() {
+        for (std::size_t job = next++; job < outcomes.size(); job = next++) {
+            const std::size_t r = job % nr, mi = (job / nr) % nm, li = (job / nr / nm) % nl, ti = job / nr / nm / nl;
+            const Route& route = routes[r];
+            const amr::PlanResult plan = amr::planWithFootprint(map, inflated[mi], route.start, route.goal);
+            Outcome& out = outcomes[job];
+            if (!plan.success()) {
+                continue;
+            }
+            out.planned = true;
+            amr::ClosedLoopConfig config;
+            config.motion.model = amr::RobotModel::DiffDrive;
+            config.motion.robot_radius = kRadius;
+            config.motion.initial_heading = route.heading;
+            config.motion.max_time = 300.0;
+            config.lidar.beams = 0;
+            config.ekf.enabled = true;
+            config.steer_by_truth = true;
+            config.actuator = levels[li].actuator;
+            config.actuator.seed = route.seed;
+            config.tracker = ti == 0 ? amr::PathTracker::TurnThenDrive : amr::PathTracker::LineFollow;
+            const amr::ClosedLoopResult result = amr::simulateWithEstimate(map, plan.path, config);
+            out.reached = result.status == amr::NavigationStatus::GoalReached;
+            out.collided = result.status == amr::NavigationStatus::Collision;
+            out.cross_track = result.cross_track;
+        }
+    };
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < std::max(1u, std::thread::hardware_concurrency()); ++t) {
+        threads.emplace_back(worker);
+    }
+    for (std::thread& t : threads) {
+        t.join();
+    }
+    std::filesystem::create_directories(o.output);
+    std::ofstream csv(o.output / "planning_actuators.csv");
+    csv << "tracker,actuators,margin_m,routes,reached,collisions,cross_track_p50_m,cross_track_p99_m,cross_track_max_m\n";
+    std::cout << "Realistic actuators (obstacles map at 0.1 m cells, radius " << kRadius << " m, " << nr
+              << " random routes, steering by the true pose; cross-track = distance of the true center from the "
+              << "planned path, over all samples of the routes planned with no margin)\n";
+    for (std::size_t ti = 0; ti < 2; ++ti) {
+        std::cout << "\n" << (ti == 0 ? "turn-then-drive (aim at the next waypoint)" : "line follower (PID on the cross-track error)")
+                  << "\n" << std::left << std::setw(48) << "actuators" << std::right << std::setw(10) << "p50 cm"
+                  << std::setw(9) << "p99 cm" << std::setw(9) << "max cm" << "   collisions at margin";
+        for (const double m : margins) {
+            std::cout << std::setw(6) << static_cast<int>(std::lround(m * 100.0));
+        }
+        std::cout << " cm  reached\n";
+        for (std::size_t li = 0; li < nl; ++li) {
+            std::vector<double> errors;
+            std::vector<int> collisions(nm, 0), runs(nm, 0), reached(nm, 0);
+            for (std::size_t mi = 0; mi < nm; ++mi) {
+                for (std::size_t r = 0; r < nr; ++r) {
+                    const Outcome& out = outcomes[((ti * nl + li) * nm + mi) * nr + r];
+                    if (!out.planned) {
+                        continue;
+                    }
+                    ++runs[mi];
+                    collisions[mi] += out.collided ? 1 : 0;
+                    reached[mi] += out.reached ? 1 : 0;
+                    if (mi == 0) {
+                        errors.insert(errors.end(), out.cross_track.begin(), out.cross_track.end());
+                    }
+                }
+            }
+            const double p50 = percentile(errors, 0.5), p99 = percentile(errors, 0.99);
+            const double max = errors.empty() ? 0.0 : *std::max_element(errors.begin(), errors.end());
+            std::cout << std::left << std::setw(48) << levels[li].name << std::right << std::fixed << std::setprecision(1)
+                      << std::setw(10) << 100.0 * p50 << std::setw(9) << 100.0 * p99 << std::setw(9) << 100.0 * max
+                      << "                      ";
+            for (std::size_t mi = 0; mi < nm; ++mi) {
+                std::cout << std::setw(6) << collisions[mi];
+                csv << (ti == 0 ? "turn-then-drive" : "line-follow") << ",\"" << levels[li].name << "\","
+                    << margins[mi] << ',' << runs[mi] << ',' << reached[mi] << ',' << collisions[mi] << ',' << p50
+                    << ',' << p99 << ',' << max << "\n";
+            }
+            std::cout << "    " << std::setprecision(1) << 100.0 * reached[nm - 1] / std::max(1, runs[nm - 1]) << "%\n";
+        }
+    }
+    return 0;
+}
+
 bool parse(int argc, char** argv, Options& o) {
     if (argc < 2) {
         return false;
@@ -589,7 +885,7 @@ bool parse(int argc, char** argv, Options& o) {
 int main(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, o)) {
-        std::cerr << "usage: planning_experiment turns|spacetime|margins|robots [--runs N] [--seed N] [--map FILE] "
+        std::cerr << "usage: planning_experiment turns|spacetime|margins|robots|search|actuators [--runs N] [--seed N] [--map FILE] "
                      "[--connectivity 4|8] [--speeds MIN,MAX] [--output DIR]\n";
         return 2;
     }
@@ -604,6 +900,12 @@ int main(int argc, char** argv) {
     }
     if (o.mode == "robots") {
         return modeRobots(o);
+    }
+    if (o.mode == "search") {
+        return modeSearch(o);
+    }
+    if (o.mode == "actuators") {
+        return modeActuators(o);
     }
     std::cerr << "unknown mode '" << o.mode << "'\n";
     return 2;

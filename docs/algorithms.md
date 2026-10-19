@@ -1539,16 +1539,17 @@ robot's direction of motion flips by more than 150°, i.e. shuttling):
   tracking). Travel is 2–4 s longer than with the oracle, because tracks keep blocking
   where an obstacle may still be.
 
-**Re-measured after section 20** (the turning-point fix, margin 0.15 m, look-ahead 1 s,
-livelock switch; same scenarios):
+**Re-measured after sections 20 and 21** (the turning-point fix, margin 0.15 m,
+look-ahead 1 s, livelock switch, turning hypotheses; same scenarios):
 
 | | 500 scenarios, 0.2–0.5 m/s: point / diff-drive | 300 scenarios, 0.6–1.0 m/s |
 |---|---|---|
 | Oracle sightings | 100 % / 98.0 % (0 / 10 collisions) | 98.3 % / 94.0 % (3 / 16) |
 | LiDAR, constant velocity | 99.8 % / 97.2 % (1 / 14) | 96.7 % / 92.0 % (8 / 23) |
-| **LiDAR, learned reversals** | **99.8 % / 98.6 % (1 / 6)** | **100 % / 97.3 % (0 / 8)** |
+| **LiDAR, learned reversals** | **100 % / 99.8 % (0 / 1)** | **99.7 % / 97.0 % (1 / 9)** |
 
-The ordering is unchanged, and learned reversals now matter most with fast obstacles.
+The ordering is unchanged; learned reversals now beat the true positions at both speeds,
+most clearly with fast obstacles.
 
 **Occluded space (item 8).** Two kinds of hidden obstacle:
 
@@ -1838,26 +1839,26 @@ lost):
 | 500 scenarios, 0.2–0.5 m/s | Point: reached, collisions, timeouts, travel | Diff-drive | Fixes / breaks |
 |---|---|---|---|
 | Reactive, previous settings | 97.8 %, 2, 9, 48.7 s | 96.0 %, 10, 10, 58.6 s | – |
-| **Reactive + livelock switch (default)** | **100 %, 0, 0, 39.8 s** | **99.2 %, 4, 0, 46.7 s** | 11/0, 20/4 |
-| Space-time | 100 %, 0, 0, 36.1 s | 97.4 %, 3, 10, 40.0 s | 11/0, 19/12 |
+| **Reactive + livelock switch (default)** | **99.8 %, 1, 0, 41.0 s** | **99.4 %, 3, 0, 48.3 s** | 11/1, 19/2 |
+| Space-time | 100 %, 0, 0, 36.1 s | 97.4 %, 3, 10, 40.2 s | 11/0, 19/12 |
 | Space-time + livelock switch | 100 %, 0, 0, 36.1 s | 98.2 %, 4, 5, 40.2 s | 11/0, 19/8 |
 | Space-time, perfect prediction | 100 %, 0, 0, 34.2 s | 99.8 %, 0, 1, 37.5 s | 11/0, 20/1 |
 
 | 300 scenarios, 0.6–1.0 m/s | Point | Diff-drive |
 |---|---|---|
 | Reactive, previous settings | 96.3 %, 3, 8, 58.1 s | 95.3 %, 5, 9, 74.9 s |
-| **Reactive + livelock switch (default)** | **99.3 %, 2, 0, 41.3 s** | **99.0 %, 3, 0, 49.7 s** |
-| Space-time + livelock switch | 98.0 %, 6, 0, 36.9 s | 94.7 %, 2, 14, 41.6 s |
+| **Reactive + livelock switch (default)** | **99.7 %, 1, 0, 42.2 s** | **98.7 %, 4, 0, 50.0 s** |
+| Space-time + livelock switch | 98.0 %, 5, 1, 36.8 s | 95.3 %, 2, 12, 41.4 s |
 | Space-time, perfect prediction | 100 %, 0, 0, 34.2 s | 99.3 %, 0, 2, 38.0 s |
 
 - **With perfect predictions, planning over space and time all but solves the
   benchmark,** and is the fastest: 34 s against 49 s for the previous reactive robot.
   Its remaining failures are the planner's; there are almost none.
 - **With predictions from the LiDAR, it is only as good as 20 s of prediction.** At
-  normal speeds the point robot reaches the goal every time, 10 % faster than the
-  reactive one. The differential drive, which needs longer to get out of the way, and
-  fast obstacles, whose predictions go wrong sooner, expose the gap: 94.7 % with fast
-  obstacles against 99 % for the reactive robot.
+  normal speeds the point robot reaches the goal every time, about 12 % faster than
+  the reactive one. The differential drive, which needs longer to get out of the way,
+  and fast obstacles, whose predictions go wrong sooner, expose the gap: 95.3 % with
+  fast obstacles against 98.7 % for the reactive robot.
 - So the reactive robot stays the default, and space-time planning is what it switches
   to when it is stuck (item 15) and an option (`--dynamic-planner space-time`) for
   well-predicted environments. Planning takes 0.4–0.7 ms per plan (1–1.7 ms with the
@@ -1900,16 +1901,17 @@ On the benchmark (with the new margin and look-ahead, below, in both columns):
 
 | | Without the switch: reached, wait, travel | With it (default) |
 |---|---|---|
-| Point, 0.2–0.5 m/s | 99.8 %, 5.5 s, 40.4 s | 100 %, 3.8 s, 39.8 s |
-| Diff-drive, 0.2–0.5 m/s | 99.4 %, 5.2 s, 48.4 s | 99.2 %, 4.1 s, 46.7 s |
-| Point, 0.6–1.0 m/s | 99.3 %, 7.5 s, 45.0 s | 99.3 %, 4.4 s, 41.3 s |
-| Diff-drive, 0.6–1.0 m/s | 98.7 %, 7.9 s, 53.8 s | 99.0 %, 4.7 s, 49.7 s |
+| Point, 0.2–0.5 m/s | 99.6 %, 7.6 s, 42.4 s | 99.8 %, 5.3 s, 41.0 s |
+| Diff-drive, 0.2–0.5 m/s | 99.4 %, 8.1 s, 50.3 s | 99.4 %, 5.5 s, 48.3 s |
+| Point, 0.6–1.0 m/s | 99.3 %, 9.3 s, 46.0 s | 99.7 %, 5.0 s, 42.2 s |
+| Diff-drive, 0.6–1.0 m/s | 98.3 %, 8.6 s, 54.1 s | 98.7 %, 5.2 s, 50.0 s |
 
 Most of the previous settings' timeouts went with the smaller margin and look-ahead
-(item 16). The switch takes the last one, cuts waiting by 20–40 % and travel by up to
-4 s; it fires 45–76 times in 500 runs. Together, they solve all 11 (point) and 20
-(diff-drive) failures of the previous settings; 4 diff-drive runs that those settings
-completed collide instead (3 without the switch).
+(item 16). The switch takes the last ones, cuts waiting by 30–46 % and travel by up
+to 4 s; it fires 58–86 times in 500 runs. Together (with the turning hypotheses of
+section 21), they solve all 11 point and 19 of the 20 diff-drive failures of the
+previous settings; 1 point and 2 diff-drive runs that those settings completed fail
+instead (2 and 1 without the switch).
 
 ### Smallest safe margin and prediction horizon (item 16; `planning_experiment margins`)
 
@@ -1918,34 +1920,34 @@ horizon is how far ahead the look-ahead gate (`--prediction-horizon`) or the
 space-time planner (`--spacetime-horizon`) looks. Swept over 300 scenarios each, with
 the livelock switch:
 
-| Reactive, margin / look-ahead | 0.2–0.5 m/s: point, diff-drive (collisions) | Travel (point, diff) |
-|---|---|---|
-| 0 m / 1 s | 99.0 % (3), 96.3 % (11) | 36.5, 43.2 s |
-| 0.05 m / 1 s | 99.7 % (1), 98.3 % (5) | 36.9, 44.3 s |
-| 0.1 m / 1 s | 100 % (0), 98.3 % (5) | 38.9, 45.9 s |
-| **0.15 m / 1 s** | **100 % (0), 99.0 % (3)** | **39.8, 46.9 s** |
-| 0.15 m / 0.5 s | 100 % (0), 99.3 % (2) | 38.0, 45.0 s |
-| 0.15 m / 2 s | 100 % (0), 99.7 % (1) | 42.3, 50.1 s |
-| 0.25 m / 2 s (previous) | 99.7 % (1), 99.0 % (3) | 44.3, 52.6 s |
-| 0.35 m / 2 s | 99.7 % (1), 98.7 % (4) | 44.6, 54.8 s |
+| Reactive, margin / look-ahead | 0.2–0.5 m/s: point, diff-drive (collisions) | 0.6–1.0 m/s | Travel at 0.2–0.5 m/s |
+|---|---|---|---|
+| 0 m / 1 s | 100 % (0), 98.3 % (5) | 99.7 % (1), 98.7 % (4) | 37.0, 44.0 s |
+| 0.05 m / 1 s | 100 % (0), 98.0 % (6) | 99.7 % (1), 97.7 % (7) | 37.6, 44.7 s |
+| 0.1 m / 1 s | 100 % (0), 99.0 % (3) | 99.7 % (1), 97.0 % (9) | 39.3, 47.0 s |
+| **0.15 m / 1 s (default)** | **99.7 % (1), 99.7 % (1)** | **99.7 % (1), 98.7 % (4)** | **40.9, 48.5 s** |
+| 0.15 m / 0.5 s | 100 % (0), 99.0 % (3) | 99.3 % (2), 95.7 % (13) | 38.3, 45.3 s |
+| 0.15 m / 2 s | 99.7 % (1), 99.0 % (2) | 99.7 % (1), 99.7 % (1) | 45.2, 54.2 s |
+| 0.25 m / 2 s (previous) | 100 % (0), 100 % (0) | 99.0 % (1), 99.7 % (0) | 46.3, 55.3 s |
+| 0.35 m / 2 s | 99.3 % (2), 99.7 % (1) | 98.7 % (1), 97.3 % (5) | 47.0, 55.9 s |
 
-With fast obstacles (0.6–1.0 m/s, 300 scenarios), point / diff-drive reached (collisions):
-0 m / 1 s: 99.7 % (1), 97.3 % (8); 0.1 m / 1 s: 99.3 % (2), 97.0 % (9);
-**0.15 m / 1 s: 99.3 % (2), 99.0 % (3)**; 0.15 m / 0.5 s: 98.7 % (4), 95.7 % (13);
-0.15 m / 2 s: 98.7 % (4), 99.0 % (3); 0.25 m / 2 s (previous): 98.3 % (4), 96.3 % (7);
-0.35 m / 2 s: 98.7 % (2), 95.3 % (10).
+(Each row with the livelock switch and the turning hypotheses of section 21; 300
+scenarios per speed range.)
 
-- **The margin:** below 0.1 m, collisions climb steeply (11 for the diff-drive at 0).
+- **The margin:** below 0.15 m, the diff-drive's collisions climb (5–9 at 0–0.1 m).
   Above 0.25 m they do not fall further, while the robot travels longer and waits
-  inside sweeps it cannot leave. **0.1–0.15 m is the smallest safe margin.**
-- **The look-ahead:** 0.5 s misses fast obstacles; 3 s blocks so much that the robot
-  waits and is caught inside sweeps. **About 1 s**, roughly the time to get out of an
-  obstacle's way, is best.
+  inside sweeps it cannot leave. **0.15 m is the smallest margin that holds up at both
+  speeds.**
+- **The look-ahead:** 0.5 s misses fast obstacles (13 diff-drive collisions); 2 s is as
+  safe as 1 s or safer but 10–20 % slower. **About 1 s**, roughly the time to get out of
+  an obstacle's way, is the best trade-off.
+- With the turning hypotheses, the previous 0.25 m / 2 s is now as reliable as the
+  default, but about 13 % slower; without them (as it was), it failed in 2–5 % of runs.
+  The defaults stay at 0.15 m and 1 s.
 - **The space-time planner** barely depends on the margin (it waives it when no crossing
-  fits), but needs **at least 10 s** of prediction: with 2–5 s, plans are myopic (91–98 %
+  fits), but needs **at least 10 s** of prediction: with 2–5 s, plans are myopic (91–96 %
   for the diff-drive).
-- No setting gives zero collisions for every model and speed. The defaults are now
-  margin 0.15 m and look-ahead 1 s (were 0.25 m and 2 s).
+- No setting gives zero collisions for every model and speed.
 
 ### Several robots that all replan (item 17; `multi_robot.hpp`, `planning_experiment robots`)
 
@@ -1975,10 +1977,10 @@ goals at least 1 m apart, 300 s limit; all = every robot arrived):
 
 | Robots | Reactive, no switch: all, makespan | **Reactive + switch (default)** | Space-time + switch |
 |---|---|---|---|
-| 2 (point / diff-drive) | 100 / 100 %, 25 / 32 s | **100 / 100 %, 24 / 32 s** | 100 / 98 %, 24 / 28 s |
-| 3 | 100 / 100 %, 32 / 42 s | **100 / 100 %, 32 / 42 s** | 98 / 97 %, 27 / 34 s |
-| 4 | 98 / 100 %, 38 / 50 s | **99 / 100 %, 36 / 49 s** | 98 / 97 %, 30 / 37 s |
-| 6 | 93 / 96 %, 50 / 68 s | **94 / 96 %, 50 / 68 s** | 97 / 94 %, 37 / 46 s |
+| 2 (point / diff-drive) | 100 / 100 %, 25 / 32 s | **100 / 100 %, 25 / 32 s** | 100 / 98 %, 24 / 28 s |
+| 3 | 100 / 100 %, 33 / 42 s | **100 / 100 %, 32 / 43 s** | 98 / 97 %, 27 / 34 s |
+| 4 | 98 / 99 %, 38 / 50 s | **99 / 100 %, 36 / 49 s** | 98 / 97 %, 30 / 37 s |
+| 6 | 95 / 98 %, 52 / 68 s | **95 / 97 %, 52 / 65 s** | 97 / 94 %, 38 / 45 s |
 
 - **No robot ever touched another** in the 4000 multi-robot runs.
 - The failures are timeouts in the map's one-cell corridors: a robot parks on its goal
@@ -2002,6 +2004,193 @@ goals at least 1 m apart, 300 s limit; all = every robot arrived):
 - The livelock detector measures progress on the static map: a robot that must take a
   long detour around a parked one makes "no progress" for a while and may switch for
   nothing.
+
+## 21. Verification: searching for failures, bounded claims, real actuators
+
+The benchmarks so far sample scenarios at random and report rates. This section asks
+three harder questions: where are the failures that random sampling rarely hits (item
+18), what do the measured rates actually establish (item 19), and does the planned path
+survive wheels that do not do exactly what they are told (item 20)?
+
+### Searching for failure scenarios (item 18; `scenario_search.hpp`, `planning_experiment search`)
+
+Random scenarios fail in 0.1–1.5 % of runs, so random sampling spends almost all its
+simulations on runs that teach nothing. The search treats a scenario as parameters to
+optimize: three obstacles, each a lane (start cell, direction, 2–8 cells), a speed and
+a radius, as the benchmark draws them.
+
+- **Danger, the objective.** A failed run scores 10. Any other run scores its
+  *exposure*: the time integral of max(0, 0.25 m − gap) over the run, plus a little for
+  waiting. The closest gap alone was useless as an objective: the robot keeps the same
+  small gap in most close encounters, so it gave the search nothing to climb (the first
+  version found no more failures than random sampling).
+- **Is there a slope?** Measured on 1600 random scenarios (diff-drive): mutations of a
+  failing scenario fail 64 % of the time, of the 60 most dangerous non-failing ones
+  2.1 % (twice the base rate), of the 60 least dangerous ones never. Failures cluster,
+  and danger points towards them, weakly.
+- **Search:** an evolution strategy that keeps the most dangerous scenarios of a
+  population of 16 (μ + λ), breeds children from tournament winners by 1–2 mutations
+  (shift or turn a lane, lengthen or shorten it, change a speed or radius, replace an
+  obstacle), and spends a quarter of every batch on fresh random scenarios. A failure
+  is recorded and not kept (its neighbours mostly fail the same way), but a failure in
+  a new place seeds the next generation. Members kept for 8 generations make way.
+  Per-member hill climbing with restarts, tried first, was no better than random
+  sampling: the slope is too weak to climb alone.
+- **Shrinking:** a failure is reduced one change at a time (remove an obstacle, shorten
+  a lane, slow an obstacle by 10 %, shrink it by 2 cm), keeping each change after which
+  the run still fails, and written as an obstacle file to replay.
+
+**Results** (3 seeds × 4096 simulations per robot and speed range; failures = distinct
+failing scenarios, places = distinct cells where the robot was at the end):
+
+| | Random sampling: failures / places | Search: failures / places |
+|---|---|---|
+| Point, 0.2–0.5 m/s | 11 / 11 | 157 / 25 |
+| Diff-drive, 0.2–0.5 m/s | 64 / 51 | 699 / 109 |
+| Point, 0.6–1.0 m/s | 56 / 54 | 354 / 57 |
+| Diff-drive, 0.6–1.0 m/s | 140 / 96 | 443 / 94 |
+
+The search finds 3–14× as many failing scenarios. Where failures are rare (normal
+speeds), it also finds 2–2.5× as many places where they happen. With fast obstacles,
+failures are common enough that random sampling finds as many places.
+
+**What the failures showed, and what was fixed.** The shrunk failures of the robot as
+it was (before this section) were mostly one or two obstacles, and most were one
+mistake: following an obstacle into its lane, or crossing it, before its turning
+point had been seen. The tracker then predicted the obstacle running straight on,
+through the wall at the lane's end, so the gate let the robot in. When the obstacle
+turned round, the robot was trapped in its lane.
+
+- **Turning hypotheses in the reactive robot** (`PerceptionConfig::turning_hypotheses`,
+  on): a lane track whose turning point ahead is unknown is predicted twice, turning at
+  the wall ahead and turning now, as the space-time planner already did (section 20).
+  This fixed 11 of 12 minimal failures at normal speed and 7 of 12 with fast obstacles;
+  12 of them are now regression scenarios (`tests/data/failures/`, replayed by
+  `test_planning`).
+- **On random scenarios** (1000 paired runs per robot and speed range, hypotheses off →
+  on): 999 → 1000 and 990 → 996 reached at normal speed, 993 → 995 and 986 → 989 with
+  fast obstacles; 25 runs fixed, 13 broken, travel 1–2 % longer. Better in every set, but
+  not significant in any one (random failures are rare). On the search's own random
+  samples (same seeds as before the fix), failures fell from 95 to 64 (diff-drive,
+  normal), 68 to 56 and 189 to 140 (fast); the point robot at normal speed stayed at
+  about 0.1 %.
+- **Two tries did not survive measurement.** Backing up several waypoints when both
+  ends of the segment are blocked changed nothing with the defaults and was
+  significantly harmful with wider margins (21–36 runs broken against 2–8 fixed per
+  1000, p ≤ 0.007), and behind it the search found hundreds of new timeouts; it was
+  removed. Planning the livelock escape without the turning hypotheses fixed 2 of 24
+  remaining failures and broke a regression scenario; also removed.
+
+**The search keeps finding failures.** It is adversarial: run against the improved
+robot, it finds the improved robot's failures. All 12 minimal failures it found on the
+final code are passable (the space-time planner with perfect predictions gets
+through every one), and 9 of the 12 pass without the turning hypotheses: each version
+of the robot has its own weak spots. What the search measures is not "no failures
+left" but where they are, how rare they are by chance, and whether a change trades one
+kind for another.
+
+
+### Acceptance tests with confidence bounds (item 19; `statistics.hpp`, `test_acceptance`)
+
+A claim such as "reaches the goal in 99.2 % of runs" is a point estimate from a finite
+sample. The acceptance tests (`ctest -L acceptance`, about a minute on 16 cores) state
+each claim as what its runs establish at 95 % confidence, on runs that are independent:
+
+- **Success rates:** the exact (Clopper–Pearson) lower bound. With no failures in n runs
+  it is (0.05)^(1/n): 300 clean runs establish at least 99.0 %, and 99.9 % would take
+  2995. The Wilson interval is available as the usual approximation.
+- **Before/after comparisons on the same scenarios:** McNemar's exact test on the runs
+  where only one variant failed (a paired test; comparing two rates as if independent
+  wastes the pairing).
+- **NEES:** within one run the samples are correlated in time, so only independent runs
+  count. If the errors have s times the covariance the filter claims, the NEES summed
+  over R runs at one time step is s χ²(3R), which gives a confidence interval for the
+  covariance scale s at that step. Many steps are checked, so the intervals are
+  Bonferroni-corrected (95 % for all of them together).
+
+| Claim | Runs | Result | Established at 95 % |
+|---|---|---|---|
+| A1 moving obstacles, defaults, point | 300 / 1000 | 300 / 999 reached | ≥ 99.0 % / ≥ 99.5 % |
+| A1 moving obstacles, defaults, diff-drive | 300 / 1000 | 298 / 996 reached | ≥ 97.9 % / ≥ 99.1 % |
+| A2 defaults vs. previous settings, point | 1000 paired | 14 fixed, 1 broken | better, p = 0.001 |
+| A2 defaults vs. previous settings, diff-drive | 1000 paired | 25 fixed, 4 broken | better, p = 0.0001 |
+| A3 four robots: runs with contact | 60 per model | 0 | ≤ 4.9 % |
+| A4 EKF covariance scale, prediction only | 100 per step, 37 steps | 0.92–1.25 | within 1.35× at every step |
+| A4 EKF covariance scale, LiDAR (5 cm) | 100 per step, 37 steps | 0.84–1.32 | within 1.35× at every step |
+| A5 particle filter, global localization | 20 | 20 found | ≥ 86 % |
+
+What the bounds changed:
+
+- **"Better than before" needed more runs than expected.** In the first version of
+  this test, on 300 paired scenarios, the gain over the previous settings was not
+  significant (p = 0.25 and 0.29): the difference is 1–2 % of runs, and 300 runs hold
+  only a handful of discordant pairs. 1000 pairs establish it.
+- **"The EKF is consistent" is true to within about 30 %, not exactly.** Strict
+  consistency (s = 1) is rejected at one of the 37 steps with the LiDAR, and the scale
+  reaches 1.25–1.32 where the heading is uncertain (the linearization makes the filter
+  a little overconfident). The earlier statement "mean NEES 3.2" averaged correlated
+  samples and hid that the excess is concentrated in parts of the route.
+- **"100 % of runs" is a sample, not a guarantee.** Twenty global localizations without
+  a failure establish 86 %; the README now says so.
+
+### Realistic actuators in navigation (item 20; `--actuator-lag`, `--turn-bias`, `--speed-error`, `--rate-noise`, `--tracker`)
+
+The differential drive of section 10 does exactly what it is commanded. Real wheels do
+not. `closed_loop.hpp` now models:
+
+- a first-order lag of speed and turn rate (motor and drive);
+- a speed-scale error (wheel radius);
+- a constant turn bias (unequal wheels, a slipping wheel);
+- a correlated turn-rate disturbance (uneven floor; Gauss–Markov, 1 s).
+
+The robot is steered by its true pose, so what remains is tracking error: the distance
+of the true centre from the planned path. Two trackers are compared:
+
+- **Turn-then-drive** (as before): aim at the next waypoint, turn out large heading
+  errors in place.
+- **Line follower:** follow the planned segment with ω = k_ψ·heading error − k_y·cross-track
+  error − k_i·∫cross-track. The integral cancels a constant turn bias. It slows down
+  ahead of corners and the goal (a lagging drive keeps rolling for about its time
+  constant), and aims at the waypoint once past the end of its segment.
+
+`planning_experiment actuators`: 200 random routes on the obstacles map at 0.1 m cells
+(so that centimetre margins are not lost to inflation), radius 0.2 m. Cross-track error
+over all samples; collisions per planning margin (0 / 2–5 / 10–30 cm; at 0.1 m cells, 2 and
+5 cm inflate the same cells):
+
+| Actuators | Turn-then-drive: p99, max | collisions | Line follower: p99, max | collisions |
+|---|---|---|---|---|
+| Ideal | 0.6, 0.8 cm | 0 / 0 / 0 | 2.2, 2.6 cm | 0 / 0 / 0 |
+| Lag 0.2 s | 6.2, 8.0 cm | 119 / 54 / 0 | 4.0, 5.7 cm | 10 / 0 / 0 |
+| Lag 0.2 s, speed −5 % | 5.4, 7.6 cm | 119 / 47 / 0 | 3.4, 4.7 cm | 5 / 0 / 0 |
+| Lag 0.2 s, turn bias 0.05 rad/s | 5.9, 8.0 cm | 112 / 56 / 0 | 3.8, 5.2 cm | 10 / 0 / 0 |
+| Realistic: lag 0.2 s, −3 %, bias 0.05, noise 0.05 rad/s | 5.7, 9.5 cm | 122 / 59 / 0 | 4.0, 6.8 cm | 7 / 2 / 0 |
+| Harsh: lag 0.4 s, −10 %, bias 0.1, noise 0.1 rad/s | 5.1, 15.1 cm | 99 / 39 / 0 | 10.7, 14.4 cm | 118 / 111 / 0 |
+
+- **The lag dominates.** Speed errors and a turn bias add little. A lagging drive keeps
+  rolling into every corner: 8 cm past it at 0.5 m/s with 0.2 s of lag.
+- **The planner's margin must cover the worst tracking error, not the typical one.**
+  The median error is 1–2 cm. Yet without margin 60 % of the turn-then-drive routes
+  touch a wall, at 2–5 cm still a quarter, and at **10 cm none** (0 of 200 at every
+  level: a collision rate of at most 1.5 % at 95 % confidence). The rule: margin ≥ the
+  largest cross-track error near obstacles, here about 10 cm.
+- **Better tracking buys back most of the margin.** Braking before corners and the
+  cross-track PID cut the realistic actuators' collisions without margin from 61 % to
+  3.5 % of routes, and to 1 % at 2–5 cm. The harsh drive (twice the lag) still needs 10 cm.
+- The harsh drive's lag (0.4 s) is longer than the line follower's stop lead (0.3 s),
+  and it needs the full 10 cm again.
+
+On the CLI's fine-map route (`--robot-radius 0.2`, realistic actuators), turn-then-drive
+strays up to 8.4 cm from the plan and the line follower 3.4 cm; both reach the goal.
+
+**Limitations.**
+
+- The failure search optimizes obstacle routes for one robot configuration and start/goal.
+  It finds failure modes; it cannot show that none are left.
+- The bounds assume independent runs from the stated generator; they say nothing about
+  scenarios the generator does not produce.
+- The actuator model is first-order, with no acceleration or torque limits and no wheel
+  slip that depends on the load. The trackers are tuned by hand for 0.5 m/s.
 
 ## Limitations
 

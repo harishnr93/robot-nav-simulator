@@ -1,0 +1,4 @@
+# Found by planning_experiment search (0.2-0.5 m/s), shrunk; obstacles map, start (1, 1), goal (18, 18), diff-drive robot.
+# Collided before the turning hypotheses in the reactive robot's perception (section 21); reaches the goal now.
+0.25348477244757261, 0.38276209650059756, 17, 16, 19, 16
+0.33803434701293833, 0.28012626522850909, 17, 17, 17, 19

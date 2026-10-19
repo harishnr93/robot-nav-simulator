@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# All tests inside the image: 63 CTest entries (C++, CLI checks, Python suite) and the
+# All tests inside the image: 68 CTest entries (C++, CLI checks, Python suite) and the
 # 21 ROS 2 tests. Exits non-zero if any fails.
 set -euo pipefail
 cd "${WS}"

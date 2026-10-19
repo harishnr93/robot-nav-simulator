@@ -33,7 +33,7 @@ and `results/` out of the image.
 | `docker compose up sim` | map server, simulator and RViz2 (needs a display, see below) |
 | `docker compose up headless` | the two ROS 2 nodes without RViz2 |
 | `docker compose run --rm demo` | `run_demo.py --save-gif`: CSV results, figures and `navigation.gif` in `./results` |
-| `docker compose run --rm test` | every test: the 63 CTest entries, then the 21 ROS 2 tests |
+| `docker compose run --rm test` | every test: the 68 CTest entries (with the acceptance tests), then the 21 ROS 2 tests |
 | `docker compose run --rm sim robot_simulator --map maps/obstacles.csv --start 1 1 --goal 18 18` | the standalone CLI |
 | `docker compose run --rm sim bash` | a shell with ROS 2 and the package sourced |
 

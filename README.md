@@ -69,6 +69,11 @@ comes from a reproducible benchmark.
   (`--dynamic-planner space-time`), turn-aware planning for the differential drive
   (`--turn-aware`), livelock detection with a strategy switch (`--livelock-window`), and
   several robots that all replan (`multi_robot.hpp`), measured in `planning_experiment`.
+- Verification: a search that optimizes obstacle routes towards failures and shrinks them
+  to minimal scenarios (`scenario_search.hpp`); acceptance tests that state every
+  headline claim as a 95 % confidence bound (`statistics.hpp`, `ctest -L acceptance`);
+  realistic actuators (lag, speed and turn errors) with a cross-track line follower, and
+  the planning margin they need.
 - "Why NO_PATH?" (`ghost_experiment`): an exact solver for the smallest or most likely
   set of "ghost" cells (false obstacles) whose removal would let the disc robot reach
   its goal, plus a perception loop that re-senses only those cells. It recovered all
@@ -183,7 +188,7 @@ also comes as one image, so nothing but Docker is needed on the host:
 
 ```bash
 docker compose build
-docker compose run --rm test     # all tests: 63 CTest entries + 21 ROS 2 tests
+docker compose run --rm test     # all tests: 68 CTest entries + 21 ROS 2 tests
 docker compose run --rm demo     # results, figures and navigation.gif in ./results
 docker compose up sim            # ROS 2 nodes + RViz2 (WSLg or a Linux X11 desktop)
 docker compose up headless       # ROS 2 nodes only
@@ -266,6 +271,11 @@ and no timeout.
 | `--spacetime-horizon S` | space-time planner: seconds of predicted obstacle motion planned against | `20` |
 | `--livelock-window S` | switch planner (reactive ↔ space-time) for S seconds when the robot has not got closer to the goal for S seconds (`0` = off) | `15` |
 | `--turn-aware` | differential drive: plan the fastest path counting the time spent turning, not the shortest | off |
+| `--actuator-lag S` | differential drive: the wheels follow the commands with a first-order lag of S seconds | `0` |
+| `--speed-error F` | ... and drive (1 + F) × the commanded speed | `0` |
+| `--turn-bias R` | ... and turn R rad/s more than commanded | `0` |
+| `--rate-noise R` | ... with a correlated turn-rate disturbance of std R rad/s | `0` |
+| `--tracker T` | path tracking: `turn-then-drive` (aim at the next waypoint) or `line` (follow the segment, PID on the cross-track error) | `turn-then-drive` |
 | `--reference-bfs` | also run the reference search (BFS, or exact Dijkstra for 8-connectivity) and check that A* is optimal | off |
 | `--output DIR` | output directory | `results` |
 | `-h`, `--help` | show help | |
@@ -330,6 +340,7 @@ scripts/run.sh maps/corridor.csv 1 1 18 18      # same as run_demo.py ... --save
 `--odom-noise-drift`, `--odom-seed`, `--ekf-range-sigma`, `--ekf-gate`,
 `--dynamic-obstacles`, `--sensing-range`, `--replan-margin`, `--prediction-horizon`,
 `--replan-patience`, `--dynamic-planner`, `--livelock-window`, `--turn-aware`,
+`--actuator-lag`, `--speed-error`, `--turn-bias`, `--rate-noise`, `--tracker`,
 `--resolution`, `--output`), the animation options `--animate`,
 `--save-gif`, `--save-mp4`, `--fps` and `--playback-speed`, and `--simulator PATH`. It
 starts the C++ executable with `subprocess` and an argument list, never through a shell.
@@ -410,7 +421,9 @@ within 2 cm of the truth.
 
 The filter is checked for honesty, not just accuracy. Over many runs its normalized
 estimation error squared (NEES) averages 3.2 without the LiDAR and 3.2 with 5 cm range
-noise; 3 is ideal. The 0.61 above is cautious on purpose, because the filter assumes
+noise; 3 is ideal. Tested over 100 independent runs per time step, its covariance is
+honest to within 35 % at every step (a little overconfident where the heading is
+uncertain). The 0.61 above is cautious on purpose, because the filter assumes
 5 cm range noise and the default LiDAR is exact (set `--ekf-range-sigma` to the actual
 noise). Getting there exposed a subtle modelling error, described with the method in
 [docs/algorithms.md](docs/algorithms.md#13-ekf-localization---ekf). The EKF costs about
@@ -469,7 +482,8 @@ Measurements, method and limits:
 ```
 
 - **Particle filter:**
-  - finds the robot from no prior knowledge in 100 % of runs, usually on the first scan;
+  - finds the robot from no prior knowledge, usually on the first scan: in all 20
+    acceptance runs, i.e. at least 86 % of the time at 95 % confidence;
   - recovers a kidnapped robot in a median 1.2 s (p90 1.7 s), where the EKF never does;
   - on a map with two identical places, keeps both at about 50/50 instead of picking
     one, and decides correctly once anything differs.
@@ -525,9 +539,9 @@ On 500 random scenarios with three moving obstacles each (current defaults):
 |---|---|---|---|
 | Robot that does not react | 65 % / 61 % | 174 / 195 | – |
 | Handed the true positions (the original shortcut) | 100 % / 98.0 % | 0 / 10 | 0.65 / 0.62 |
-| **Own LiDAR, tracking, learned reversals** | **99.8 % / 98.6 %** | **1 / 6** | **0.61 / 0.70** |
+| **Own LiDAR, tracking, learned reversals** | **100 % / 99.8 %** | **0 / 1** | **0.57 / 0.61** |
 
-With faster obstacles (0.6–1.0 m/s) the gap widens: 100 % / 97.3 % against
+With faster obstacles (0.6–1.0 m/s) the gap widens: 99.7 % / 97.0 % against
 98.3 % / 94.0 % for the true positions. `--obstacle-perception oracle` restores the original shortcut.
 `--occlusion-aware` treats space hidden behind walls as possibly occupied; it is
 measured but off by default, because it made things worse. Details:
@@ -553,8 +567,8 @@ for the replanning rules).
   the plan says, and crosses when the plan says. With perfect predictions it all but
   solves the benchmark, and is the fastest (34 s against 49 s). With the LiDAR's
   predictions it is as good as the reactive robot for the point robot at normal speeds,
-  10 % faster, but worse for the differential drive among fast obstacles. On the
-  sample scenario the differential drive arrives in 37.0 s without waiting (63.2 s
+  about 12 % faster, but worse for the differential drive among fast obstacles. On the
+  sample scenario the differential drive arrives in 37.0 s without waiting (65.5 s
   reactive).
 - **Turn-aware planning** (`--turn-aware`): A* over (cell, heading) with the turning
   time as cost. On the obstacles map, 2.8 → 1.7 turns and 21.5 → 19.8 s per route, never
@@ -573,13 +587,44 @@ The benchmark of section 18, with the previous settings as the baseline:
 | 500 scenarios, 0.2–0.5 m/s | Reached (point / diff-drive) | Travel time |
 |---|---|---|
 | Reactive, previous settings | 97.8 % / 96.0 % | 48.7 / 58.6 s |
-| **Reactive + livelock switch, new margins (default)** | **100 % / 99.2 %** | **39.8 / 46.7 s** |
+| **Reactive + livelock switch, new margins (default)** | **99.8 % / 99.4 %** | **41.0 / 48.3 s** |
 | Space-time + livelock switch | 100 % / 98.2 % | 36.1 / 40.2 s |
 | Space-time, perfect prediction | 100 % / 99.8 % | 34.2 / 37.5 s |
 
 With fast obstacles (0.6–1.0 m/s) the default goes from 96.3 % / 95.3 % to
-99.3 % / 99.0 %. Details:
+99.7 % / 98.7 %. Details:
 [docs/algorithms.md](docs/algorithms.md#20-planning-with-moving-obstacles-space-and-time-turns-livelock-margins-several-robots-planning_experiment).
+
+### Verification: failure search, bounded claims, real actuators
+
+```bash
+./build/planning_experiment search --runs 4096        # optimized routes vs. random sampling
+ctest --test-dir build -L acceptance                  # claims as 95 % confidence bounds (~1 min)
+./build/planning_experiment actuators --runs 200      # tracking error and the margin it needs
+./build/robot_simulator --map maps/obstacles_fine.csv --resolution 0.25 --start 20 2 --goal 20 37 \
+    --robot-radius 0.2 --robot-model diff-drive --actuator-lag 0.2 --turn-bias 0.05 --tracker line
+```
+
+- **Failure search:** an evolution strategy that mutates obstacle lanes, speeds and
+  radii towards runs that come close, and shrinks every failure to a minimal one (often
+  one or two obstacles), written as an obstacle file to replay.
+  At the same budget it finds 3–14× as many failing scenarios as random sampling. Its
+  failures showed the robot following obstacles into their lanes before their turning
+  points were seen; predicting such an obstacle both turning at the wall and turning
+  now fixed most of them (12 kept as regression scenarios). Run against the improved
+  robot, it finds that robot's weak spots: all passable by a planner that knows the
+  future, none impossible.
+- **Acceptance tests with confidence bounds:** 1000 runs establish that the default robot
+  reaches its goal in at least 99.5 % (point) and 99.1 % (diff-drive) of scenarios, and
+  that it beats the previous settings (McNemar p = 0.001 and 0.0001; with 300 runs the
+  gain was not significant). The EKF's covariance is honest to within 35 % at every
+  time step, not exactly.
+- **Real actuators:** a 0.2 s drive lag carries the robot up to 8–10 cm past corners;
+  with no planning margin 60 % of routes touch a wall, with 10 cm none. A line follower
+  that brakes before corners and integrates the cross-track error stays within 7 cm and
+  cuts the zero-margin collisions to 3.5 %.
+
+Details: [docs/algorithms.md](docs/algorithms.md#21-verification-searching-for-failures-bounded-claims-real-actuators).
 
 ### Why NO_PATH? Minimum ghost cells
 
@@ -958,7 +1003,7 @@ To compare 4- and 8-connectivity on the same maps, run `run_benchmark.py` with e
 ## Testing
 
 ```bash
-ctest --test-dir build --output-on-failure      # 63 CTest entries: C++ suites, CLI checks, Python suite
+ctest --test-dir build --output-on-failure      # 68 CTest entries (one, `-L acceptance`, takes a minute): C++ suites, CLI checks, Python suite
 ```
 
 The ROS 2 package has 21 more tests (frame conversions, missions against the

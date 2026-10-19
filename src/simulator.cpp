@@ -396,7 +396,13 @@ private:
         const double horizon = scenario_.replanning.prediction_horizon;
         const auto steps = static_cast<std::size_t>(std::max(1.0, std::ceil(horizon / dt_ - 1e-9)));
         for (const Track& track : tracker_.tracks()) {
-            const auto predicted = tracker_.predictPath(track, dt_, steps);
+          // A lane track whose turning point ahead is unknown counts twice: turning at
+          // the wall ahead and turning now (turningHypotheses), as the space-time
+          // planner sees it.
+          const std::vector<Track> hypotheses =
+              scenario_.perception.turning_hypotheses ? turningHypotheses(track) : std::vector<Track>{track};
+          for (const Track& hypothesis : hypotheses) {
+            const auto predicted = tracker_.predictPath(hypothesis, dt_, steps);
             Seen seen{track.position(), track.velocity(), track.radius, {}, {}};
             for (const PredictedPosition& p : predicted) {
                 seen.path.push_back(p.center);
@@ -414,6 +420,7 @@ private:
                 block(seen.path[j], seen.path[j + 1], base + (inflate ? seen.inflation[j + 1] : 0.0));
             }
             seen_.push_back(std::move(seen));
+          }
         }
     }
 

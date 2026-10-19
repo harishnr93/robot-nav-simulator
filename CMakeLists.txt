@@ -83,7 +83,7 @@ endif()
 if(AMR_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_localization test_dynamic test_ghost_cells test_ghost_perception test_alignment test_planning)
+    foreach(test_name test_grid_map test_astar test_robot test_footprint test_octile test_diff_drive test_heading_control test_lidar test_ekf test_correlated_errors test_obstacle_tracking test_localization test_dynamic test_ghost_cells test_ghost_perception test_alignment test_planning test_statistics)
         add_executable(${test_name} tests/${test_name}.cpp)
         target_link_libraries(${test_name} PRIVATE amr_core)
         target_compile_options(${test_name} PRIVATE ${AMR_WARNING_FLAGS})
@@ -91,6 +91,15 @@ if(AMR_BUILD_TESTS)
             AMR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
+
+    # Acceptance tests with confidence bounds (statistics.hpp): long-running, on all
+    # cores; label "acceptance" (ctest -L acceptance, or -LE acceptance to skip them).
+    add_executable(test_acceptance tests/test_acceptance.cpp)
+    target_link_libraries(test_acceptance PRIVATE amr_core Threads::Threads)
+    target_compile_options(test_acceptance PRIVATE ${AMR_WARNING_FLAGS})
+    target_compile_definitions(test_acceptance PRIVATE AMR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+    add_test(NAME test_acceptance COMMAND test_acceptance)
+    set_tests_properties(test_acceptance PROPERTIES LABELS acceptance TIMEOUT 3600)
 
     # End-to-end CLI checks.
     set(CLI_OUT ${PROJECT_BINARY_DIR}/test_output)
@@ -313,6 +322,26 @@ if(AMR_BUILD_TESTS)
     set_tests_properties(planning_experiment_turns PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         PASS_REGULAR_EXPRESSION "time saved per route")
+
+    add_test(NAME cli_realistic_actuators
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles_fine.csv --resolution 0.25
+                --start 20 2 --goal 20 37 --robot-radius 0.2 --robot-model diff-drive
+                --actuator-lag 0.2 --turn-bias 0.05 --speed-error -0.03 --rate-noise 0.05 --tracker line
+                --output ${CLI_OUT}/actuators)
+    set_tests_properties(cli_realistic_actuators PROPERTIES
+        PASS_REGULAR_EXPRESSION "Navigation: +GOAL_REACHED.*Tracking: +line follower, real actuators")
+
+    add_test(NAME cli_actuators_require_diff_drive
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --actuator-lag 0.2)
+    set_tests_properties(cli_actuators_require_diff_drive PROPERTIES
+        PASS_REGULAR_EXPRESSION "need --robot-model diff-drive")
+
+    add_test(NAME cli_rejects_bad_tracker
+        COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/obstacles.csv
+                --start 1 1 --goal 18 18 --robot-model diff-drive --tracker wobbly)
+    set_tests_properties(cli_rejects_bad_tracker PROPERTIES
+        PASS_REGULAR_EXPRESSION "--tracker must be turn-then-drive or line")
 
     add_test(NAME cli_rejects_bad_replanning_settings
         COMMAND robot_simulator --map ${PROJECT_SOURCE_DIR}/maps/empty.csv

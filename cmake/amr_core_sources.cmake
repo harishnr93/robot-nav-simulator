@@ -17,6 +17,8 @@ set(AMR_CORE_SOURCES
     src/closed_loop.cpp
     src/spacetime_planner.cpp
     src/multi_robot.cpp
+    src/scenario_search.cpp
+    src/statistics.cpp
     src/dynamic_obstacles.cpp
     src/obstacle_tracking.cpp
     src/ghost_cells.cpp

@@ -167,6 +167,10 @@ struct PerceptionConfig {
     double max_inflation = 0.1;
     /// Also inflate the cells blocked for replanning (not only the look-ahead gate).
     bool inflate_planning = false;
+    /// Lidar mode, learned reversals: a lane track whose turning point ahead has not
+    /// been seen yet is predicted both turning at the wall ahead and turning now,
+    /// instead of running on through walls.
+    bool turning_hypotheses = true;
     /// Occluded space as possibly occupied: free space hidden behind walls may hold an
     /// obstacle ("phantom") that moves at up to phantom_speed. Before each step, the
     /// robot looks from where the step would take it: if a phantom emerging from the
