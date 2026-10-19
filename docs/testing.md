@@ -41,7 +41,9 @@ values are compared with explicit tolerances.
 | `test_localization` | particle filter (global start, kidnapping, matching places), localizability, localization-aware planning, steering by the estimate |
 | `test_obstacle_tracking` | moving obstacles from the LiDAR alone: map subtraction, disc fitting, fragment merging, tracking through reversals, learned turning points, two-point start, negative evidence and coasting, LiDAR perception in the simulator, occlusion awareness |
 | `test_dynamic` | moving obstacles and replanning: motion model, exact contact, loading, visibility, waiting, detours, retreats, invariants |
-| `test_planning` | planning with moving obstacles: space-time (SIPP) and turn-aware planning, the steppable navigator, the livelock switch, staying off walls when off the path, several robots that all replan |
+| `test_planning` | planning with moving obstacles: space-time (SIPP) and turn-aware planning, the steppable navigator, the livelock switch, staying off walls when off the path, several robots that all replan; realistic actuators and the line follower |
+| `test_statistics` | confidence bounds: incomplete beta and gamma functions, chi-square and normal quantiles against closed forms and tables, Clopper-Pearson and Wilson intervals (and their coverage by simulation), the NEES interval, McNemar's exact test |
+| `test_acceptance` | label `acceptance`: the headline claims as 95 % confidence bounds on independent runs (moving obstacles, the gain over the previous settings, robots without contact, EKF consistency, global localization); about a minute on 16 cores |
 | `test_ghost_cells` | minimum ghost cells: covers vs. inflation, exact solver vs. brute force (count, every optimal set, weighted), overlapping footprints, statuses |
 | `test_ghost_perception` | perception loop: beam and ghost model, occupancy update, ghost evidence, recovery strategies on a doorway |
 | `test_alignment` | grid alignment: geometry, rasterization rules, placement, exact LiDAR, point evidence, the alignment-robust planner, ground truth, artifact vs. ghost recovery |
@@ -73,6 +75,9 @@ values are compared with explicit tolerances.
 | `cli_rejects_bad_dynamic_planner` | `--dynamic-planner sideways`: expects "--dynamic-planner must be reactive or space-time" |
 | `cli_rejects_bad_spacetime_horizon` | `--spacetime-horizon 0`: expects "invalid replanning parameters: space-time horizon" |
 | `planning_experiment_turns` | `planning_experiment turns --runs 20` runs and reports the time saved |
+| `cli_realistic_actuators` | fine map, radius 0.2 m, realistic actuators with `--tracker line`: expects `GOAL_REACHED` and the tracking line |
+| `cli_actuators_require_diff_drive` | `--actuator-lag` with the point robot: expects a clear error |
+| `cli_rejects_bad_tracker` | `--tracker wobbly`: expects "--tracker must be turn-then-drive or line" |
 | `cli_rejects_bad_dynamic_obstacles` | a route through a wall (`tests/data/bad_dynamic_obstacles.csv`): expects the line and the reason |
 | `cli_rejects_bad_replanning_settings` | `--sensing-range 0`: expects "invalid replanning parameters" |
 | `ghost_experiment_example` | the documented example map: expects a 2-cell explanation with 8 optimal alternatives |
@@ -194,9 +199,22 @@ requires `--connectivity 8`.
 | Space-time in the simulator | `obstacles_dynamic.csv`, both models, perceived and perfect predictions: goal reached, clearance > 0, never slower than the reactive robot |
 | Livelock switch | a benchmark scenario where the reactive robot with the earlier settings times out: with the switch it reaches the goal after at least one switch; with nothing moving, no switch |
 | Off the path, no wall | a fast-obstacle benchmark scenario where the differential drive, off its path after evasive steps, used to drive into a wall: goal reached, every step in free space |
+| Failures found by the search stay fixed | the 12 minimal failures in `tests/data/failures/` (found by `planning_experiment search`, fixed by the turning hypotheses) reach the goal |
 | Configuration validation | space-time horizon 0 or NaN, a negative replanning period: rejected |
 | Symmetric swaps | in an open room, two robots head-on and four through the middle: plain reactive robots deadlock; with the switch but equal windows, two mirrored robots switch at the same instant (one escape each) and stay stuck; staggered windows get everyone through; space-time planning too, both models; centers never closer than 0.4 m |
 | Multi-robot bookkeeping | robots that start in contact collide at once with each other's ids; an impossible task runs nothing |
+
+Realistic actuators (also in `test_planning.cpp`): on a straight corridor a lag delays
+the arrival by about its time constant, a slower drive takes about 1/scale as long, and
+a turn bias of 0.1 rad/s is cancelled by the line follower's integral (under 1 mm off
+the line mid-corridor, where aiming at waypoints holds 8 mm); seeded noise is
+deterministic. With a 0.2 s lag on the fine map, the line follower stays within 5 cm of
+the path and turn-then-drive strays farther.
+
+Acceptance tests (`test_acceptance.cpp`, see docs/algorithms.md section 21): each claim is
+checked against its bound, for example "at least 98 % success at 95 % confidence" for
+the point robot among moving obstacles, so a regression fails the test even if the
+point estimate looks fine.
 
 Also in `test_obstacle_tracking.cpp`: **turning points stay put as the history
 slides** (250 s of patrolling at 0.13, 0.2 and 0.45 m/s: a learned end never moves

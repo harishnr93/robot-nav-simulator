@@ -98,6 +98,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="switch planner after this long without progress, s (default 15; 0 = off)")
     parser.add_argument("--turn-aware", action="store_true",
                         help="differential drive: plan the fastest path counting turns")
+    parser.add_argument("--actuator-lag", type=float, help="first-order wheel lag, s (default 0)")
+    parser.add_argument("--speed-error", type=float, help="relative speed error, e.g. -0.05 (default 0)")
+    parser.add_argument("--turn-bias", type=float, help="extra turn rate, rad/s (default 0)")
+    parser.add_argument("--rate-noise", type=float, help="correlated turn-rate noise std, rad/s (default 0)")
+    parser.add_argument("--tracker", choices=("turn-then-drive", "line"),
+                        help="path tracking with real actuators (default turn-then-drive)")
     parser.add_argument("--connectivity", type=int, choices=(4, 8),
                         help="grid moves: 4 = straight (default), 8 = also diagonal")
     parser.add_argument("--robot-radius", type=float,
@@ -145,7 +151,9 @@ def simulator_command(args: argparse.Namespace) -> list[str]:
                 ("--sensing-range", args.sensing_range), ("--replan-margin", args.replan_margin),
                 ("--prediction-horizon", args.prediction_horizon),
                 ("--replan-patience", args.replan_patience), ("--dynamic-planner", args.dynamic_planner),
-                ("--livelock-window", args.livelock_window))
+                ("--livelock-window", args.livelock_window), ("--actuator-lag", args.actuator_lag),
+                ("--speed-error", args.speed_error), ("--turn-bias", args.turn_bias),
+                ("--rate-noise", args.rate_noise), ("--tracker", args.tracker))
     for flag, value in optional:
         if value is not None:
             command += [flag, value if isinstance(value, str) else repr(value)]

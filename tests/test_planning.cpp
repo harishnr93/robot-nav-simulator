@@ -3,13 +3,16 @@
 // strategy switch, and several robots that all replan.
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <cstdint>
+#include <filesystem>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "astar.hpp"
+#include "closed_loop.hpp"
 #include "dynamic_obstacles.hpp"
 #include "footprint.hpp"
 #include "grid_map.hpp"
@@ -365,6 +368,115 @@ void testNoWallContactOffThePath() {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Realistic actuators (closed_loop.hpp)
+
+amr::ClosedLoopResult track(const GridMap& map, const std::vector<GridCoord>& path, const amr::ActuatorConfig& actuator,
+                            amr::PathTracker tracker, double radius = 0.0) {
+    amr::ClosedLoopConfig config;
+    config.motion.model = amr::RobotModel::DiffDrive;
+    config.motion.robot_radius = radius;
+    config.motion.max_time = 300.0;
+    config.lidar.beams = 0;
+    config.steer_by_truth = true;
+    config.actuator = actuator;
+    config.tracker = tracker;
+    return amr::simulateWithEstimate(map, path, config);
+}
+
+double travel(const amr::ClosedLoopResult& r) { return r.trajectory.back().state.time; }
+
+/// The actuator model on a straight 10 m corridor: a lag delays the start by about
+/// its time constant; a slower drive takes about 1/scale as long; a turn bias pulls
+/// the robot off the line, which the line follower's integral takes back out.
+void testActuatorModel() {
+    const GridMap map = makeMap({"#######################", ".......................", "#######################"});
+    std::vector<GridCoord> path;
+    for (int x = 1; x <= 21; ++x) {
+        path.push_back({x, 1});
+    }
+    const amr::ActuatorConfig ideal;
+    const auto exact = track(map, path, ideal, amr::PathTracker::TurnThenDrive);
+    REQUIRE(exact.status == NavigationStatus::GoalReached);
+    CHECK_NEAR(travel(exact), 20.0, 0.11);  // 10 m at 0.5 m/s
+    CHECK(exact.max_cross_track < 1e-9);
+    amr::ActuatorConfig lag;
+    lag.lag = 0.3;
+    const auto lagged = track(map, path, lag, amr::PathTracker::TurnThenDrive);
+    CHECK(lagged.status == NavigationStatus::GoalReached);
+    CHECK(travel(lagged) > travel(exact) + 0.2 && travel(lagged) < travel(exact) + 0.8);
+    amr::ActuatorConfig slow;
+    slow.speed_scale = 0.8;
+    const auto slower = track(map, path, slow, amr::PathTracker::TurnThenDrive);
+    CHECK_NEAR(travel(slower), travel(exact) / 0.8, 0.05 * travel(exact) / 0.8);
+    amr::ActuatorConfig bias;
+    bias.turn_bias = 0.1;  // rad/s: about 6 deg/s to the left
+    const auto aimed = track(map, path, bias, amr::PathTracker::TurnThenDrive);
+    const auto followed = track(map, path, bias, amr::PathTracker::LineFollow);
+    CHECK(aimed.status == NavigationStatus::GoalReached && followed.status == NavigationStatus::GoalReached);
+    std::cout << "    turn bias 0.1 rad/s: farthest off the line " << aimed.max_cross_track << " m aiming at waypoints, "
+              << followed.max_cross_track << " m following the line; at the middle " << aimed.cross_track[100]
+              << " / " << followed.cross_track[100] << " m\n";
+    // Once the integral has built up it cancels the bias (aiming one waypoint ahead
+    // holds a steady offset); the peak, before that, is the line follower's larger.
+    CHECK(followed.cross_track[100] < 0.001);
+    CHECK(followed.cross_track[100] < aimed.cross_track[100]);
+    CHECK(followed.max_cross_track < 0.05);
+    // Seeded noise: deterministic.
+    amr::ActuatorConfig noisy;
+    noisy.rate_noise = 0.1;
+    noisy.seed = 4;
+    CHECK_EQ(track(map, path, noisy, amr::PathTracker::LineFollow).max_cross_track,
+             track(map, path, noisy, amr::PathTracker::LineFollow).max_cross_track);
+}
+
+/// With a lagging drive the robot keeps rolling into each corner. The line follower
+/// brakes ahead of corners and stays within 5 cm of the path on the fine obstacles
+/// map; aiming at waypoints at full speed overshoots by more.
+void testLagAtCorners() {
+    const auto loaded = amr::loadGridMapCsv(std::string(AMR_SOURCE_DIR) + "/maps/obstacles_fine.csv", 0.25);
+    REQUIRE(loaded.ok);
+    const GridMap planning = amr::inflateObstacles(loaded.map, 0.2);
+    const auto plan = amr::planWithFootprint(loaded.map, planning, {20, 2}, {20, 37});
+    REQUIRE(plan.success());
+    amr::ActuatorConfig lag;
+    lag.lag = 0.2;
+    const auto aimed = track(loaded.map, plan.path, lag, amr::PathTracker::TurnThenDrive, 0.2);
+    const auto followed = track(loaded.map, plan.path, lag, amr::PathTracker::LineFollow, 0.2);
+    std::cout << "    lag 0.2 s: farthest off the path " << aimed.max_cross_track << " m aiming at waypoints, "
+              << followed.max_cross_track << " m following the line\n";
+    CHECK(followed.status == NavigationStatus::GoalReached);
+    CHECK(followed.max_cross_track < 0.05);
+    CHECK(aimed.max_cross_track > followed.max_cross_track);
+}
+
+/// The minimal failures that planning_experiment search found and that the turning
+/// hypotheses fixed (tests/data/failures): each collided
+/// before, and must reach the goal with the defaults.
+void testSearchedFailuresStayFixed() {
+    const GridMap map = loadMap("obstacles.csv");
+    const auto path = amr::planAStar(map, {1, 1}, {18, 18}).path;
+    int replayed = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(std::string(AMR_SOURCE_DIR) + "/tests/data/failures")) {
+        const std::string name = entry.path().filename().string();
+        const auto loaded = amr::loadDynamicObstacles(entry.path().string(), map);
+        REQUIRE(loaded.ok);
+        DynamicScenario scenario;
+        scenario.planning_map = &map;
+        scenario.obstacles = loaded.obstacles;
+        MotionConfig motion;
+        motion.model = name.rfind("diff-drive", 0) == 0 ? amr::RobotModel::DiffDrive : amr::RobotModel::Point;
+        motion.max_time = 600.0;
+        const auto sim = amr::simulatePath(map, path, motion, amr::Connectivity::Four, &scenario);
+        if (!sim.success()) {
+            std::cout << "    " << name << ": " << amr::toString(sim.status) << "\n";
+        }
+        CHECK(sim.success());
+        ++replayed;
+    }
+    CHECK(replayed >= 10);
+}
+
 void testValidation() {
     amr::ReplanningConfig config;
     CHECK(amr::validateReplanningConfig(config).empty());
@@ -490,6 +602,9 @@ int main() {
         {"Space-time planning in the simulator", testSpaceTimeNavigation},
         {"Livelock detection switches strategy", testLivelockSwitch},
         {"Off the path, no drive into a wall", testNoWallContactOffThePath},
+        {"Actuator model: lag, speed error, turn bias", testActuatorModel},
+        {"Lagging drive at corners: the line follower brakes", testLagAtCorners},
+        {"Failures found by the search stay fixed", testSearchedFailuresStayFixed},
         {"Configuration validation", testValidation},
         {"Symmetric swaps: deadlock, livelock switch, space-time", testSymmetricSwaps},
         {"Multi-robot bookkeeping", testRobotsBookkeeping},

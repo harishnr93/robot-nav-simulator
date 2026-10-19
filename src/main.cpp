@@ -65,6 +65,11 @@ struct CliOptions {
     bool steer_by_estimate = false;     ///< --steer-by-estimate
     double safety_margin = 0.0;         ///< --safety-margin (extra inflation), m
     bool turn_aware = false;            ///< --turn-aware (fastest path with turns, diff-drive)
+    amr::ActuatorConfig actuator;       ///< --actuator-lag, --speed-error, --turn-bias, --rate-noise
+    amr::PathTracker tracker = amr::PathTracker::TurnThenDrive;  ///< --tracker
+
+    /// Realistic actuators or the line follower: the closed-loop simulation.
+    bool closedLoop() const { return steer_by_estimate || !actuator.ideal() || tracker == amr::PathTracker::LineFollow; }
     bool particle_filter = false;       ///< --particle-filter
 };
 
@@ -166,6 +171,14 @@ void printUsage(std::ostream& os) {
           "  --safety-margin M     Extra inflation beyond the robot radius for planning, m\n"
           "  --turn-aware          Differential drive: plan the fastest path counting the\n"
           "                        time spent turning in place, not the shortest\n"
+          "  --actuator-lag S      Differential drive: the wheels follow the commands with\n"
+          "                        a first-order lag of S seconds (default 0)\n"
+          "  --speed-error F       ... and drive (1 + F) x the commanded speed (e.g. -0.05)\n"
+          "  --turn-bias R         ... and turn R rad/s more than commanded (slipping wheel)\n"
+          "  --rate-noise R        ... with a correlated turn-rate disturbance of std R rad/s\n"
+          "  --tracker T           Path tracking with real actuators: turn-then-drive\n"
+          "                        (default; aim at the next waypoint) or line (follow the\n"
+          "                        planned segment, PID on the cross-track error)\n"
           "  --steer-by-estimate   Drive by the EKF estimate instead of the true pose\n"
           "                        (needs --ekf; not with --dynamic-obstacles)\n"
           "  --particle-filter     Also localize globally with a particle filter (no prior\n"
@@ -359,6 +372,27 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             options.steer_by_estimate = true;
         } else if (arg == "--turn-aware") {
             options.turn_aware = true;
+        } else if (arg == "--actuator-lag") {
+            ok = parseNumber(options.actuator.lag);
+        } else if (arg == "--speed-error") {
+            double f = 0.0;
+            ok = parseNumber(f);
+            options.actuator.speed_scale = 1.0 + f;
+        } else if (arg == "--turn-bias") {
+            ok = parseNumber(options.actuator.turn_bias);
+        } else if (arg == "--rate-noise") {
+            ok = parseNumber(options.actuator.rate_noise);
+        } else if (arg == "--tracker") {
+            ok = requireValues(1);
+            if (ok) {
+                const std::string text = argv[++i];
+                if (text == "turn-then-drive" || text == "line") {
+                    options.tracker = text == "line" ? amr::PathTracker::LineFollow : amr::PathTracker::TurnThenDrive;
+                } else {
+                    error = "--tracker must be turn-then-drive or line, got '" + text + "'";
+                    ok = false;
+                }
+            }
         } else if (arg == "--particle-filter") {
             options.particle_filter = true;
         } else if (arg == "--obstacle-perception") {
@@ -515,6 +549,17 @@ std::optional<CliOptions> parseArguments(int argc, char** argv, std::string& err
             error = "--turn-aware requires --robot-model diff-drive (a point robot turns for free)";
         } else if (options.turn_aware && options.localization_weight >= 0.0) {
             error = "--turn-aware cannot be combined with --plan-for-localization";
+        } else if (!(options.actuator.lag >= 0.0 && options.actuator.lag <= 10.0) ||
+                   !(options.actuator.speed_scale > 0.0 && options.actuator.speed_scale <= 2.0) ||
+                   !std::isfinite(options.actuator.turn_bias) || std::fabs(options.actuator.turn_bias) > 10.0 ||
+                   !(options.actuator.rate_noise >= 0.0 && options.actuator.rate_noise <= 10.0)) {
+            error = "invalid actuator parameters: lag in [0, 10] s, speed error in (-1, 1], |turn bias| and "
+                    "rate noise at most 10 rad/s";
+        } else if (options.closedLoop() && options.motion.model != amr::RobotModel::DiffDrive) {
+            error = "--actuator-*, --speed-error, --turn-bias, --rate-noise and --tracker need "
+                    "--robot-model diff-drive";
+        } else if (options.closedLoop() && !options.dynamic_file.empty()) {
+            error = "realistic actuators and --steer-by-estimate do not support --dynamic-obstacles";
         } else if (options.steer_by_estimate && !options.ekf.enabled) {
             error = "--steer-by-estimate requires --ekf (it drives by the EKF estimate)";
         } else if (options.steer_by_estimate && !options.dynamic_file.empty()) {
@@ -910,13 +955,18 @@ int main(int argc, char** argv) {
     const amr::DynamicScenario* scenario = dynamic ? &*dynamic : nullptr;
     amr::SimulationResult sim;  // stays NOT_RUN with no trajectory if planning failed
     std::vector<amr::LocalizationSample> closed_loop_localization;
-    if (plan.success() && options.steer_by_estimate) {
-        // Closed loop: the controller only knows the EKF estimate.
+    double max_cross_track = -1.0;  // closed loop: the largest distance from the planned path
+    if (plan.success() && options.closedLoop()) {
+        // Closed loop: real actuators, and/or a controller that only knows the EKF estimate.
         amr::ClosedLoopConfig config;
         config.motion = options.motion;
         config.lidar = options.lidar;
         config.ekf = options.ekf;
+        config.actuator = options.actuator;
+        config.tracker = options.tracker;
+        config.steer_by_truth = !options.steer_by_estimate;
         amr::ClosedLoopResult loop = amr::simulateWithEstimate(map, plan.path, config, options.connectivity);
+        max_cross_track = loop.max_cross_track;
         sim.status = loop.status;
         sim.trajectory = std::move(loop.trajectory);
         sim.steps = sim.trajectory.empty() ? 0 : sim.trajectory.size() - 1;
@@ -955,6 +1005,12 @@ int main(int argc, char** argv) {
     }
 
     printSummary(options, map, inflation, plan, reference, sim, scans, localization, scenario);
+    if (max_cross_track >= 0.0) {
+        std::cout << std::setprecision(3) << "Tracking:       "
+                  << (options.tracker == amr::PathTracker::LineFollow ? "line follower" : "turn-then-drive")
+                  << (options.actuator.ideal() ? ", ideal actuators" : ", real actuators")
+                  << ", farthest from the planned path " << max_cross_track << " m\n";
+    }
     if (options.particle_filter && !sim.trajectory.empty()) {
         // Global localization: the particle filter starts knowing nothing.
         amr::ParticleFilterConfig pf;

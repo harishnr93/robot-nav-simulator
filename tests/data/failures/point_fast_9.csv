@@ -1,0 +1,5 @@
+# Found by planning_experiment search (0.6-1.0 m/s), shrunk; obstacles map, start (1, 1), goal (18, 18), point robot.
+# Collided before the turning hypotheses in the reactive robot's perception (section 21); reaches the goal now.
+0.29999999999999999, 0.7342689555008185, 17, 19, 18, 19
+0.30181525483942412, 0.59999999999999998, 16, 15, 16, 17
+0.27730499773842876, 0.83999999999999997, 17, 17, 19, 17
