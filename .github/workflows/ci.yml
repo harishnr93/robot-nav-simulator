@@ -26,7 +26,7 @@ jobs:
           cmake --build build -j
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)"
 
       - name: Demo smoke test
         run: .venv/bin/python python/run_demo.py --save-gif
@@ -36,7 +36,9 @@ jobs:
           cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAMR_PYTHON_TESTS=OFF \
                 -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
           cmake --build build-asan -j
-          ctest --test-dir build-asan --output-on-failure
+          # The acceptance tests (about 1000 simulations each) run in the Release step;
+          # under the sanitizers in Debug they would take hours.
+          ctest --test-dir build-asan --output-on-failure -LE acceptance
 
       - name: Upload demo results
         uses: actions/upload-artifact@v4

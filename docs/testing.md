@@ -564,7 +564,7 @@ Run in Phase 6, and again after each extension (latest: grid alignment):
 ```bash
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
       -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
-cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
+cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure -LE acceptance
 ```
 
 | Tool | Result |
